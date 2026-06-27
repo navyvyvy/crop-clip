@@ -61,8 +61,30 @@ jobs:
             -T "$ZIP_PATH" \
             "https://chromewebstore.googleapis.com/upload/v2/publishers/${PUBLISHER_ID}/items/${EXTENSION_ID}:upload"
 
+          fetch_status() {
+            local status_json
+            status_json="$(
+              curl -fsS -H "Authorization: Bearer $TOKEN" \
+                -X GET \
+                "https://chromewebstore.googleapis.com/v2/publishers/${PUBLISHER_ID}/items/${EXTENSION_ID}:fetchStatus"
+            )"
+            echo "$status_json" | node -e "let data='';process.stdin.on('data',c=>data+=c);process.stdin.on('end',()=>{const status=JSON.parse(data); console.log(JSON.stringify(status, null, 2)); if (status.uploadState === 'UPLOAD_IN_PROGRESS') process.exit(1);});"
+          }
+
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            if fetch_status; then
+              break
+            fi
+            if [ "$attempt" = "12" ]; then
+              echo "Chrome Web Store upload is still processing."
+              break
+            fi
+            sleep 5
+          done
+
           if [ "${{ inputs.publish }}" = "true" ]; then
             curl -fsS -H "Authorization: Bearer $TOKEN" \
               -X POST \
               "https://chromewebstore.googleapis.com/v2/publishers/${PUBLISHER_ID}/items/${EXTENSION_ID}:publish"
+            fetch_status || true
           fi
