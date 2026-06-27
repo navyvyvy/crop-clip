@@ -1,0 +1,8 @@
+<svg width="32" height="32" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>CropClip white icon 32</title>
+  <path d="M8.5 14V8.5H14" stroke="white" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M22 8.5H27.5V14" stroke="white" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M8.5 22V27.5H14" stroke="white" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M22 27.5H27.5V22" stroke="white" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="18" cy="18" r="3" fill="white"/>
+</svg>

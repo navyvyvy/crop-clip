@@ -1,0 +1,65 @@
+name: Publish Chrome Web Store
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "업로드 후 바로 게시 심사 요청까지 진행"
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+
+      - name: Upload Chrome Web Store package
+        env:
+          CLIENT_ID: ${{ secrets.CWS_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CWS_CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.CWS_REFRESH_TOKEN }}
+          PUBLISHER_ID: ${{ secrets.CWS_PUBLISHER_ID }}
+          EXTENSION_ID: ${{ secrets.CWS_EXTENSION_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$CLIENT_ID"
+          test -n "$CLIENT_SECRET"
+          test -n "$REFRESH_TOKEN"
+          test -n "$PUBLISHER_ID"
+          test -n "$EXTENSION_ID"
+
+          TOKEN="$(
+            curl -fsS https://oauth2.googleapis.com/token \
+              -d "client_id=$CLIENT_ID" \
+              -d "client_secret=$CLIENT_SECRET" \
+              -d "refresh_token=$REFRESH_TOKEN" \
+              -d "grant_type=refresh_token" |
+            node -e "let data='';process.stdin.on('data',c=>data+=c);process.stdin.on('end',()=>process.stdout.write(JSON.parse(data).access_token || ''));"
+          )"
+          test -n "$TOKEN"
+
+          ZIP_PATH="$(ls dist/cropclip-*.zip | head -n 1)"
+          curl -fsS -H "Authorization: Bearer $TOKEN" \
+            -X POST \
+            -T "$ZIP_PATH" \
+            "https://chromewebstore.googleapis.com/upload/v2/publishers/${PUBLISHER_ID}/items/${EXTENSION_ID}:upload"
+
+          if [ "${{ inputs.publish }}" = "true" ]; then
+            curl -fsS -H "Authorization: Bearer $TOKEN" \
+              -X POST \
+              "https://chromewebstore.googleapis.com/v2/publishers/${PUBLISHER_ID}/items/${EXTENSION_ID}:publish"
+          fi

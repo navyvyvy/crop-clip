@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CropClip</title>
+    <link rel="stylesheet" href="./popup.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">CropClip <span id="version-badge" class="version-badge"></span></p>
+          <h1>원하는 영역 녹화</h1>
+          <p class="lede">방송·영상 화면에서 필요한 영역만 선택해 녹화하고 저장하세요.</p>
+        </div>
+        <p id="recording-time" class="recording-time" aria-live="polite"></p>
+      </header>
+
+      <section class="stack">
+        <div class="action-row">
+          <button id="select-region-button" class="button secondary" type="button">녹화 영역 선택</button>
+          <button id="clear-region-button" class="button secondary" type="button">영역 해제</button>
+          <button id="record-toggle-button" class="button primary" type="button">녹화 시작</button>
+        </div>
+
+        <section class="panel">
+          <div class="settings-list">
+            <label class="setting-row">
+              <span class="setting-copy">
+                <span class="setting-title">저장 형식</span>
+                <span class="setting-desc">기본은 WebM입니다.</span>
+              </span>
+              <span class="segmented" id="output-format-group">
+                <label>
+                  <input type="radio" name="output-format" value="webm" />
+                  <span>WebM</span>
+                </label>
+                <label>
+                  <input type="radio" name="output-format" value="mp4" />
+                  <span>MP4</span>
+                </label>
+              </span>
+            </label>
+
+            <label class="setting-row">
+              <span class="setting-copy">
+                <span class="setting-title">비트레이트</span>
+                <span class="setting-desc">높을수록 화질과 용량이 커집니다.</span>
+              </span>
+              <input id="custom-video-bitrate-input" type="number" min="100000" step="100000" />
+            </label>
+
+            <label class="setting-row">
+              <span class="setting-copy">
+                <span class="setting-title">60fps 녹화</span>
+                <span class="setting-desc">움직임이 많은 화면에 사용합니다.</span>
+              </span>
+              <span class="segmented" id="fps-mode-group">
+                <label>
+                  <input type="radio" name="fps-mode" value="off" />
+                  <span>OFF</span>
+                </label>
+                <label>
+                  <input type="radio" name="fps-mode" value="on" />
+                  <span>ON</span>
+                </label>
+              </span>
+            </label>
+          </div>
+          <p id="fps-warning" class="warning"></p>
+
+          <footer class="footer-links" aria-label="외부 링크">
+            <a class="icon-link" href="https://github.com/navyvyvy/crop-clip" target="_blank" rel="noreferrer" aria-label="GitHub">
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path fill="currentColor" d="M12 2a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.8c-2.9.6-3.5-1.2-3.5-1.2-.5-1.1-1.1-1.4-1.1-1.4-.9-.6.1-.6.1-.6 1 0 1.6 1.1 1.6 1.1.9 1.5 2.4 1.1 3 .8.1-.7.4-1.1.7-1.3-2.3-.3-4.7-1.2-4.7-5A3.9 3.9 0 0 1 6.6 9c-.1-.3-.5-1.3.1-2.7 0 0 .9-.3 2.8 1a9.8 9.8 0 0 1 5 0c1.9-1.3 2.8-1 2.8-1 .6 1.4.2 2.4.1 2.7a3.9 3.9 0 0 1 1 2.7c0 3.9-2.4 4.8-4.7 5 .4.3.7 1 .7 2v2.3c0 .3.2.6.7.5A10 10 0 0 0 12 2Z"/>
+              </svg>
+            </a>
+            <a class="icon-link" href="mailto:navyvyvy@naver.com" aria-label="메일">
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M4 6h16v12H4z"/>
+                <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m4.5 7 7.5 6 7.5-6"/>
+              </svg>
+            </a>
+          </footer>
+        </section>
+      </section>
+    </main>
+    <script type="module" src="./popup.js"></script>
+  </body>
+</html>

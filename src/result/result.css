@@ -1,0 +1,400 @@
+:root {
+  color-scheme: dark;
+  --bg: #080d12;
+  --card: #101820;
+  --card-2: #131d26;
+  --line: #2a3743;
+  --text: #f1f6f8;
+  --muted: #9baab6;
+  --primary: #43c487;
+  --primary-hover: #5bd682;
+  --primary-ink: #061207;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background:
+    radial-gradient(circle at top right, rgba(67, 196, 135, 0.14), transparent 34%),
+    radial-gradient(circle at bottom left, rgba(91, 176, 214, 0.1), transparent 34%),
+    var(--bg);
+  color: var(--text);
+  font: 14px/1.45 "Segoe UI Variable", "Noto Sans KR", system-ui, sans-serif;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+.page {
+  min-height: 100vh;
+  padding: 18px;
+}
+
+.result-card {
+  position: relative;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 26px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(16, 24, 32, 0.98), rgba(9, 15, 21, 0.98));
+}
+
+.result-head,
+.title-row,
+.tool-row,
+.tool-group,
+.split-download-head {
+  display: flex;
+  align-items: center;
+}
+
+.result-head {
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.title-row {
+  gap: 14px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 28px;
+  line-height: 1.1;
+}
+
+h2 {
+  font-size: 18px;
+  white-space: nowrap;
+}
+
+.meta-chip {
+  padding: 9px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font-size: 15px;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 9px 14px;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.button-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+
+.primary {
+  background: var(--primary);
+  color: var(--primary-ink);
+}
+
+.primary:hover {
+  background: var(--primary-hover);
+}
+
+.secondary {
+  border-color: rgba(67, 196, 135, 0.42);
+  background: rgba(67, 196, 135, 0.12);
+  color: var(--primary-hover);
+}
+
+.secondary:hover {
+  background: rgba(67, 196, 135, 0.2);
+}
+
+.close-button {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-color: var(--line);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.close-button:hover {
+  border-color: rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+}
+
+.compact-button {
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.preview-frame {
+  display: flex;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #030608;
+}
+
+.preview-video {
+  width: auto;
+  max-width: 100%;
+  max-height: min(50vh, 460px);
+  background: #000;
+}
+
+.tool-row {
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 20px;
+  flex-wrap: wrap;
+}
+
+.tool-group {
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tool-group h2 {
+  display: inline-flex;
+  align-items: center;
+  height: 42px;
+}
+
+.split-group {
+  justify-content: flex-start;
+}
+
+.convert-group {
+  justify-content: flex-end;
+  margin-left: auto;
+}
+
+.tool-row select,
+.split-value {
+  height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card-2);
+  color: var(--text);
+}
+
+.tool-row select {
+  min-width: 88px;
+  padding: 0 8px;
+}
+
+.split-value {
+  display: inline-flex;
+  align-items: center;
+  width: 106px;
+}
+
+.split-value input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  padding: 0 8px;
+  outline: none;
+}
+
+.split-value span {
+  min-width: 34px;
+  border-left: 1px solid var(--line);
+  color: var(--text);
+  text-align: center;
+}
+
+.split-button {
+  min-height: 42px;
+  min-width: 0;
+  padding-inline: 16px;
+}
+
+.convert-button {
+  height: 42px;
+  padding: 0 12px;
+}
+
+.split-status,
+.empty-message {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.progress {
+  height: 7px;
+  margin-top: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(67, 196, 135, 0.14);
+}
+
+.progress-bar {
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--primary);
+  transition: width 180ms ease;
+}
+
+.split-downloads {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.split-download-head {
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.split-download-head strong {
+  font-size: 17px;
+}
+
+.split-files-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  max-height: 190px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.split-chip {
+  display: grid;
+  grid-template-columns: auto minmax(145px, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 245px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.split-chip-index {
+  min-width: 28px;
+  padding: 2px 6px;
+  border: 1px solid var(--primary);
+  border-radius: 5px;
+  color: var(--primary-hover);
+  font-weight: 800;
+  text-align: center;
+}
+
+.split-chip-meta {
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.icon-button {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid rgba(67, 196, 135, 0.5);
+  background: rgba(67, 196, 135, 0.12);
+  color: var(--primary-hover);
+}
+
+.icon-button:hover {
+  background: rgba(67, 196, 135, 0.22);
+}
+
+.icon-button svg {
+  width: 18px;
+  height: 18px;
+}
+
+@media (max-width: 760px) {
+  .page {
+    padding: 12px;
+  }
+
+  .result-card {
+    padding: 16px;
+  }
+
+  .result-head,
+  .split-download-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .header-actions {
+    flex-direction: column;
+  }
+
+  .result-head .button,
+  .split-download-head .button {
+    width: 100%;
+  }
+
+  .tool-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .tool-row select,
+  .split-value,
+  .split-button,
+  .tool-group,
+  .convert-group {
+    width: 100%;
+  }
+
+  .tool-group,
+  .convert-group {
+    align-items: stretch;
+    margin-left: 0;
+  }
+
+  .split-chip {
+    width: 100%;
+  }
+}
