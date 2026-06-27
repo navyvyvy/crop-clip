@@ -7,9 +7,9 @@
   }
   contentScriptGlobal[CONTENT_SCRIPT_BOOT_KEY] = true;
 
-const OVERLAY_ID = "cropClip-overlay";
-const BORDER_ID = "cropClip-border";
-const STYLE_ID = "cropClip-style";
+const OVERLAY_ID = "crop-clip-overlay";
+const BORDER_ID = "crop-clip-border";
+const STYLE_ID = "crop-clip-style";
 const MIN_WIDTH = 50;
 const MIN_HEIGHT = 50;
 const BORDER_WIDTH = 2;
@@ -17,8 +17,10 @@ const RESIZE_HIT_SIZE = 22;
 const CROP_ACCENT = "#5bd6bf";
 const MAX_PART_BYTES = 40 * 1024 * 1024;
 const MAX_PART_SECONDS = 45;
-const CHZZK_TOOL_BUTTON_ID = "cropClip-chzzk-tool-button";
-const CHZZK_TOOL_BUTTON_CLASS = "pzp-button pzp-pc-setting-button pzp-pc__setting-button pzp-pc-ui-button cropClip-pzp-button";
+const CHZZK_TOOL_BUTTON_ID = "crop-clip-chzzk-tool-button";
+const CHZZK_TOOL_BUTTON_CLASS = "pzp-button pzp-pc-setting-button pzp-pc__setting-button pzp-pc-ui-button crop-clip-pzp-button";
+const YOUTUBE_TOOL_BUTTON_ID = "crop-clip-youtube-tool-button";
+const YOUTUBE_TOOL_BUTTON_CLASS = "ytp-button";
 const PLAYER_TOOL_LABEL = "클립 영역 선택";
 
 type DownloadFormat = "auto" | "webm" | "mp4";
@@ -127,7 +129,8 @@ let currentRecordingState: LocalRecordingState = { status: "idle" };
 let directSession: DirectRecordingSession | null = null;
 let chzzkToolObserver: MutationObserver | null = null;
 let chzzkToolSyncFrame: number | null = null;
-let chzzkToolHandlersInstalled = false;
+let youtubeToolSyncTimer: number | null = null;
+let playerToolHandlersInstalled = false;
 
 function ensureStyle(): void {
   let style = document.getElementById(STYLE_ID) as HTMLStyleElement | null;
@@ -338,20 +341,84 @@ function ensureStyle(): void {
       color: rgba(255, 215, 215, 0.96);
     }
 
-    .cropClip-pzp-button {
+    .crop-clip-pzp-button {
       color: #ffffff;
     }
 
-    .cropClip-pzp-button .pzp-ui-icon {
+    .crop-clip-pzp-button .pzp-ui-icon {
       display: flex;
       align-items: center;
       justify-content: center;
     }
 
-    .cropClip-pzp-button svg {
+    .crop-clip-pzp-button svg {
       width: 22px;
       height: 22px;
       pointer-events: none;
+    }
+
+    @media (max-width: 543px) {
+      #${YOUTUBE_TOOL_BUTTON_ID} {
+        top: -4px;
+      }
+
+      #${YOUTUBE_TOOL_BUTTON_ID} .crop-clip-ytp-tooltip {
+        top: -52px !important;
+      }
+    }
+
+    #${YOUTUBE_TOOL_BUTTON_ID} {
+      position: relative;
+      color: #fff;
+      overflow: visible !important;
+      display: inline-flex !important;
+      align-items: center;
+      justify-content: center;
+      padding: 0 !important;
+      margin: 0 !important;
+      vertical-align: middle;
+    }
+
+    #${YOUTUBE_TOOL_BUTTON_ID} svg {
+      display: block;
+      width: 36px;
+      height: 36px;
+      pointer-events: none;
+    }
+
+    #${YOUTUBE_TOOL_BUTTON_ID} .crop-clip-ytp-tooltip {
+      position: absolute;
+      left: 50%;
+      top: -48px;
+      z-index: 100000;
+      display: block;
+      padding: 0;
+      border-radius: 8px;
+      background: transparent;
+      color: #fff;
+      font: 500 13px/1.2 Roboto, Arial, sans-serif;
+      white-space: nowrap;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateX(-50%);
+      transition: opacity 0.08s cubic-bezier(0, 0, 0.2, 1);
+    }
+
+    #${YOUTUBE_TOOL_BUTTON_ID} .ytp-tooltip-bottom-text {
+      display: block;
+      padding: 6px 10px;
+      border-radius: 8px;
+      background: hsla(0, 0%, 6.7%, 0.4);
+      color: #fff;
+    }
+
+    #${YOUTUBE_TOOL_BUTTON_ID} .ytp-tooltip-text-wrapper {
+      display: block;
+    }
+
+    #${YOUTUBE_TOOL_BUTTON_ID}:hover .crop-clip-ytp-tooltip,
+    #${YOUTUBE_TOOL_BUTTON_ID}:focus-visible .crop-clip-ytp-tooltip {
+      opacity: 1;
     }
   `;
 }
@@ -1435,7 +1502,7 @@ function startSelection(): void {
 
 function getCropIconSvg(): string {
   return `
-    <svg width="24" height="24" viewBox="0 0 36 36" fill="none" aria-hidden="true" focusable="false">
+    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" aria-hidden="true" focusable="false">
       <path d="M8.5 14V8.5H14" stroke="currentColor" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/>
       <path d="M22 8.5H27.5V14" stroke="currentColor" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/>
       <path d="M8.5 22V27.5H14" stroke="currentColor" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/>
@@ -1454,12 +1521,48 @@ function setChzzkButtonContent(button: HTMLElement): void {
   `;
 }
 
-function isChzzkToolEvent(event: Event): boolean {
-  return event.composedPath().some((item) => item instanceof HTMLElement && item.id === CHZZK_TOOL_BUTTON_ID);
+function setYoutubeButtonContent(button: HTMLElement): void {
+  button.id = YOUTUBE_TOOL_BUTTON_ID;
+  button.className = YOUTUBE_TOOL_BUTTON_CLASS;
+  button.setAttribute("type", "button");
+  button.hidden = false;
+  button.removeAttribute("style");
+  button.removeAttribute("disabled");
+  button.setAttribute("aria-label", PLAYER_TOOL_LABEL);
+  button.setAttribute("data-priority", "4");
+  button.setAttribute("data-title-no-tooltip", PLAYER_TOOL_LABEL);
+  button.setAttribute("data-tooltip-text", PLAYER_TOOL_LABEL);
+  button.setAttribute("data-tooltip-title", PLAYER_TOOL_LABEL);
+  button.removeAttribute("title");
+  button.removeAttribute("aria-keyshortcuts");
+  button.removeAttribute("aria-owns");
+  button.removeAttribute("aria-haspopup");
+  button.removeAttribute("aria-pressed");
+  button.removeAttribute("data-tooltip-target-id");
+  button.innerHTML = `
+    ${getCropIconSvg()}
+    <div class="crop-clip-ytp-tooltip ytp-tooltip" role="tooltip">
+      <div class="ytp-tooltip-text-wrapper">
+        <div class="ytp-tooltip-bottom-text">
+          <span class="ytp-tooltip-text">${PLAYER_TOOL_LABEL}</span>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
-function handleChzzkToolEvent(event: Event): void {
-  if (!isChzzkToolEvent(event)) {
+function isPlayerToolEvent(event: Event): boolean {
+  return event.composedPath().some(
+    (item) => item instanceof HTMLElement && (item.id === CHZZK_TOOL_BUTTON_ID || item.id === YOUTUBE_TOOL_BUTTON_ID),
+  );
+}
+
+function handlePlayerToolEvent(event: Event): void {
+  if (!isPlayerToolEvent(event)) {
+    return;
+  }
+
+  if (event instanceof MouseEvent && event.button !== 0) {
     return;
   }
 
@@ -1468,14 +1571,13 @@ function handleChzzkToolEvent(event: Event): void {
   startSelection();
 }
 
-function installChzzkToolHandlers(): void {
-  if (chzzkToolHandlersInstalled) {
+function installPlayerToolHandlers(): void {
+  if (playerToolHandlersInstalled) {
     return;
   }
 
-  document.addEventListener("pointerdown", handleChzzkToolEvent, true);
-  document.addEventListener("click", handleChzzkToolEvent, true);
-  chzzkToolHandlersInstalled = true;
+  document.addEventListener("click", handlePlayerToolEvent, true);
+  playerToolHandlersInstalled = true;
 }
 
 function isVisibleElement(element: HTMLElement): boolean {
@@ -1597,17 +1699,91 @@ function requestChzzkToolSync(): void {
   });
 }
 
+function isYoutubePage(): boolean {
+  return location.hostname.includes("youtube.com") || location.hostname.includes("youtu.be");
+}
+
+function findYoutubeButtonHost(): HTMLElement | null {
+  return document.querySelector<HTMLElement>(".ytp-right-controls-left")
+    ?? document.querySelector<HTMLElement>(".ytp-right-controls")
+    ?? document.querySelector<HTMLElement>(".ytp-chrome-bottom .ytp-right-controls")
+    ?? document.querySelector<HTMLElement>(".html5-video-player .ytp-right-controls");
+}
+
+function syncYoutubeToolButton(): void {
+  if (!isYoutubePage() || !location.pathname.startsWith("/watch")) {
+    document.getElementById(YOUTUBE_TOOL_BUTTON_ID)?.remove();
+    return;
+  }
+
+  const host = findYoutubeButtonHost();
+  if (!host) {
+    return;
+  }
+
+  const existingButtons = Array.from(document.querySelectorAll<HTMLButtonElement>(`#${YOUTUBE_TOOL_BUTTON_ID}`));
+  const existing = existingButtons.find((item) => item.parentElement === host) ?? existingButtons[0];
+  const button = existing ?? document.createElement("button");
+  for (const extraButton of existingButtons) {
+    if (extraButton !== button) {
+      extraButton.remove();
+    }
+  }
+
+  setYoutubeButtonContent(button);
+
+  if (button.parentElement !== host) {
+    const insertionPoint = Array.from(host.children).find(
+      (child) => child instanceof HTMLElement && child.id !== YOUTUBE_TOOL_BUTTON_ID,
+    );
+    if (insertionPoint && insertionPoint.parentElement === host) {
+      host.insertBefore(button, insertionPoint);
+    } else {
+      host.appendChild(button);
+    }
+  }
+}
+
+function requestYoutubeToolSync(delay = 100): void {
+  if (youtubeToolSyncTimer !== null) {
+    window.clearTimeout(youtubeToolSyncTimer);
+  }
+
+  youtubeToolSyncTimer = window.setTimeout(() => {
+    youtubeToolSyncTimer = null;
+    syncYoutubeToolButton();
+  }, delay);
+}
+
 function installChzzkToolButton(): void {
   if (!location.hostname.includes("chzzk.naver.com")) {
     return;
   }
 
   ensureStyle();
-  installChzzkToolHandlers();
+  installPlayerToolHandlers();
   syncChzzkToolButton();
   chzzkToolObserver?.disconnect();
   chzzkToolObserver = new MutationObserver(() => requestChzzkToolSync());
   chzzkToolObserver.observe(document.documentElement, { childList: true, subtree: true });
+}
+
+function installYoutubeToolButton(): void {
+  if (!isYoutubePage()) {
+    return;
+  }
+
+  ensureStyle();
+  installPlayerToolHandlers();
+  requestYoutubeToolSync(0);
+  window.addEventListener("yt-navigate-finish", () => requestYoutubeToolSync(300), true);
+  window.setTimeout(() => requestYoutubeToolSync(0), 800);
+  window.setTimeout(() => requestYoutubeToolSync(0), 2000);
+}
+
+function installPlayerToolButtons(): void {
+  installChzzkToolButton();
+  installYoutubeToolButton();
 }
 
 function isRecordingState(value: LocalRecordingState): boolean {
@@ -1771,5 +1947,5 @@ window.addEventListener("keydown", (event) => {
 }, true);
 
   void initializePageState();
-  installChzzkToolButton();
+  installPlayerToolButtons();
 })();
