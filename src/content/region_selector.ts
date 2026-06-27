@@ -19,6 +19,7 @@ const MAX_PART_BYTES = 40 * 1024 * 1024;
 const MAX_PART_SECONDS = 45;
 const CHZZK_TOOL_BUTTON_ID = "cropClip-chzzk-tool-button";
 const CHZZK_TOOL_BUTTON_CLASS = "pzp-button pzp-pc-setting-button pzp-pc__setting-button pzp-pc-ui-button cropClip-pzp-button";
+const PLAYER_TOOL_LABEL = "클립 영역 선택";
 
 type DownloadFormat = "auto" | "webm" | "mp4";
 type BitratePreset = "low" | "standard" | "high" | "veryHigh" | "custom";
@@ -1445,10 +1446,10 @@ function getCropIconSvg(): string {
 }
 
 function setChzzkButtonContent(button: HTMLElement): void {
-  button.setAttribute("aria-label", "클립 영역 선택");
+  button.setAttribute("aria-label", PLAYER_TOOL_LABEL);
   button.removeAttribute("title");
   button.innerHTML = `
-    <span class="pzp-button__tooltip pzp-button__tooltip--top">클립 영역 선택</span>
+    <span class="pzp-button__tooltip pzp-button__tooltip--top">${PLAYER_TOOL_LABEL}</span>
     <span class="pzp-ui-icon pzp-pc-setting-button__icon">${getCropIconSvg()}</span>
   `;
 }
@@ -1597,6 +1598,10 @@ function requestChzzkToolSync(): void {
 }
 
 function installChzzkToolButton(): void {
+  if (!location.hostname.includes("chzzk.naver.com")) {
+    return;
+  }
+
   ensureStyle();
   installChzzkToolHandlers();
   syncChzzkToolButton();
