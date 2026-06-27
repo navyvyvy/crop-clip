@@ -2,14 +2,24 @@ name: Build
 
 on:
   push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
   pull_request:
   workflow_dispatch:
+    inputs:
+      release:
+        description: "GitHub Release를 생성하고 zip 파일을 첨부"
+        required: true
+        type: boolean
+        default: false
 
 jobs:
   extension:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -28,3 +38,11 @@ jobs:
           name: cropclip-extension
           path: dist/cropclip-*.zip
           if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release == true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', github.run_number) }}
+          name: CropClip ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', github.run_number) }}
+          files: dist/cropclip-*.zip
