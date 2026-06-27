@@ -1,5 +1,5 @@
 (() => {
-  const CONTENT_SCRIPT_BOOT_KEY = "__cropclipRegionSelectorBooted";
+  const CONTENT_SCRIPT_BOOT_KEY = "__cropClipRegionSelectorBooted";
   const contentScriptGlobal = globalThis as typeof globalThis & { [CONTENT_SCRIPT_BOOT_KEY]?: boolean };
 
   if (contentScriptGlobal[CONTENT_SCRIPT_BOOT_KEY]) {
@@ -7,9 +7,9 @@
   }
   contentScriptGlobal[CONTENT_SCRIPT_BOOT_KEY] = true;
 
-const OVERLAY_ID = "cropclip-overlay";
-const BORDER_ID = "cropclip-border";
-const STYLE_ID = "cropclip-style";
+const OVERLAY_ID = "cropClip-overlay";
+const BORDER_ID = "cropClip-border";
+const STYLE_ID = "cropClip-style";
 const MIN_WIDTH = 50;
 const MIN_HEIGHT = 50;
 const BORDER_WIDTH = 2;
@@ -17,8 +17,8 @@ const RESIZE_HIT_SIZE = 22;
 const CROP_ACCENT = "#5bd6bf";
 const MAX_PART_BYTES = 40 * 1024 * 1024;
 const MAX_PART_SECONDS = 45;
-const CHZZK_TOOL_BUTTON_ID = "cropclip-chzzk-tool-button";
-const CHZZK_TOOL_BUTTON_CLASS = "pzp-button pzp-pc-setting-button pzp-pc__setting-button pzp-pc-ui-button cropclip-pzp-button";
+const CHZZK_TOOL_BUTTON_ID = "cropClip-chzzk-tool-button";
+const CHZZK_TOOL_BUTTON_CLASS = "pzp-button pzp-pc-setting-button pzp-pc__setting-button pzp-pc-ui-button cropClip-pzp-button";
 
 type DownloadFormat = "auto" | "webm" | "mp4";
 type BitratePreset = "low" | "standard" | "high" | "veryHigh" | "custom";
@@ -337,17 +337,17 @@ function ensureStyle(): void {
       color: rgba(255, 215, 215, 0.96);
     }
 
-    .cropclip-pzp-button {
+    .cropClip-pzp-button {
       color: #ffffff;
     }
 
-    .cropclip-pzp-button .pzp-ui-icon {
+    .cropClip-pzp-button .pzp-ui-icon {
       display: flex;
       align-items: center;
       justify-content: center;
     }
 
-    .cropclip-pzp-button svg {
+    .cropClip-pzp-button svg {
       width: 22px;
       height: 22px;
       pointer-events: none;
@@ -519,7 +519,7 @@ function selectDirectMimeType(settings: Settings): { mimeType: string; extension
 function buildBaseName(): string {
   const date = new Date();
   const pad = (value: number) => String(value).padStart(2, "0");
-  return `cropclip_${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}_${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+  return `cropClip_${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}_${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
 }
 
 function buildDirectFilename(session: DirectRecordingSession): string {

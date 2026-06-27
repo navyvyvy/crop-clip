@@ -1,6 +1,6 @@
 import type { RecordingPartRecord, RecordingRecord } from "./types.js";
 
-const DB_NAME = "cropclip";
+const DB_NAME = "cropClip";
 const DB_VERSION = 2;
 const RECORDINGS_STORE = "recordings";
 const PARTS_STORE = "parts";

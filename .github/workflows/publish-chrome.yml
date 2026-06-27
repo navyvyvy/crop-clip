@@ -52,7 +52,7 @@ jobs:
           )"
           test -n "$TOKEN"
 
-          ZIP_PATH="$(ls dist/cropclip-*.zip | head -n 1)"
+          ZIP_PATH="$(ls dist/crop-clip-*.zip | head -n 1)"
           curl -fsS -H "Authorization: Bearer $TOKEN" \
             -X POST \
             -T "$ZIP_PATH" \
