@@ -56,10 +56,28 @@ jobs:
 
           ZIP_PATH="$(ls dist/crop-clip-*.zip | head -n 1)"
           test -f "$ZIP_PATH"
-          curl -fsS -H "Authorization: Bearer $TOKEN" \
-            -X POST \
-            -T "$ZIP_PATH" \
-            "https://chromewebstore.googleapis.com/upload/v2/publishers/${PUBLISHER_ID}/items/${EXTENSION_ID}:upload"
+          UPLOAD_JSON="$(
+            curl -fsS -H "Authorization: Bearer $TOKEN" \
+              -X POST \
+              -T "$ZIP_PATH" \
+              "https://chromewebstore.googleapis.com/upload/v2/publishers/${PUBLISHER_ID}/items/${EXTENSION_ID}:upload"
+          )"
+
+          print_upload_status() {
+            UPLOAD_JSON="$1" node <<'NODE'
+const status = JSON.parse(process.env.UPLOAD_JSON ?? "{}");
+const labels = {
+  SUCCEEDED: "업로드 성공",
+  UPLOAD_IN_PROGRESS: "업로드 처리 중",
+  FAILED: "업로드 실패",
+};
+console.log(`업로드 결과: ${status.uploadState ?? "UNKNOWN"} (${labels[status.uploadState] ?? "알 수 없음"})`);
+if (status.crxVersion) {
+  console.log(`업로드 버전: ${status.crxVersion}`);
+}
+process.exit(status.uploadState === "SUCCEEDED" ? 0 : 1);
+NODE
+          }
 
           fetch_status() {
             local status_json
@@ -68,8 +86,57 @@ jobs:
                 -X GET \
                 "https://chromewebstore.googleapis.com/v2/publishers/${PUBLISHER_ID}/items/${EXTENSION_ID}:fetchStatus"
             )"
-            echo "$status_json" | node -e "let data='';process.stdin.on('data',c=>data+=c);process.stdin.on('end',()=>{const status=JSON.parse(data); console.log(JSON.stringify(status, null, 2)); if (status.uploadState === 'UPLOAD_IN_PROGRESS') process.exit(1);});"
+            STATUS_JSON="$status_json" node <<'NODE'
+const status = JSON.parse(process.env.STATUS_JSON ?? "{}");
+const itemLabels = {
+  ITEM_STATE_UNSPECIFIED: "알 수 없음",
+  PENDING_REVIEW: "심사 대기",
+  STAGED: "게시 준비 완료",
+  PUBLISHED: "공개 게시됨",
+  PUBLISHED_TO_TESTERS: "테스터 공개됨",
+  REJECTED: "게시 거절됨",
+  CANCELLED: "제출 취소됨",
+};
+const uploadLabels = {
+  UPLOAD_IN_PROGRESS: "업로드 처리 중",
+  SUCCEEDED: "업로드 성공",
+  FAILED: "업로드 실패",
+};
+console.log("=== Chrome Web Store 상태 ===");
+console.log(`이름: ${status.name}`);
+console.log(`itemId: ${status.itemId}`);
+if (status.lastAsyncUploadState) {
+  console.log(`최근 업로드: ${status.lastAsyncUploadState} (${uploadLabels[status.lastAsyncUploadState] ?? "알 수 없음"})`);
+}
+const published = status.publishedItemRevisionStatus;
+if (published?.state) {
+  console.log(`공개 상태: ${published.state} (${itemLabels[published.state] ?? "알 수 없음"})`);
+  const channel = published.distributionChannels?.[0];
+  if (channel) {
+    console.log(`공개 배포: ${channel.crxVersion}${typeof channel.deployPercentage === "number" ? `, ${channel.deployPercentage}%` : ""}`);
+  }
+}
+const submitted = status.submittedItemRevisionStatus;
+if (submitted?.state) {
+  console.log(`제출 상태: ${submitted.state} (${itemLabels[submitted.state] ?? "알 수 없음"})`);
+  const channel = submitted.distributionChannels?.[0];
+  if (channel) {
+    console.log(`제출 배포: ${channel.crxVersion}${typeof channel.deployPercentage === "number" ? `, ${channel.deployPercentage}%` : ""}`);
+  }
+}
+if (status.takenDown) {
+  console.error("주의: 항목이 내려간 상태입니다.");
+  process.exit(1);
+}
+if (status.warned) {
+  console.error("주의: 항목 경고가 있습니다.");
+  process.exit(1);
+}
+process.exit(status.lastAsyncUploadState === "UPLOAD_IN_PROGRESS" ? 1 : 0);
+NODE
           }
+
+          print_upload_status "$UPLOAD_JSON"
 
           for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
             if fetch_status; then
