@@ -1,7 +1,7 @@
 import { deleteRecording, putPart, putRecording } from "../shared/idb.js";
 import { fail, ok, type ContentCommand, type DeletionCancelRequest, type DeletionScheduleRequest, type MessageResponse, type PopupCommand, type RecordingErrorMessage, type RecordingFinishedMessage, type StoreRecordingPartMessage } from "../shared/messages.js";
-import { loadAppState, loadRecordingState, loadSettings, patchRecordingState, saveRecordingState } from "../shared/storage.js";
-import type { RegionSelection } from "../shared/types.js";
+import { loadAppState, loadRecordingState, patchRecordingState, saveRecordingState } from "../shared/storage.js";
+import type { RegionSelection, Settings } from "../shared/types.js";
 const DELETE_AFTER_MINUTES = 10;
 const DELETE_ALARM_PREFIX = "delete-recording:";
 
@@ -146,7 +146,7 @@ async function getCurrentRegionGeometry(tabId: number): Promise<MessageResponse<
   return await sendCommandToContentScript<RegionSelection>(tabId, { type: "GET_REGION_GEOMETRY" });
 }
 
-async function startDirectRecording(tabId: number, recordingId: string, region: RegionSelection, settings: Awaited<ReturnType<typeof loadSettings>>): Promise<MessageResponse> {
+async function startDirectRecording(tabId: number, recordingId: string, region: RegionSelection, settings: Settings): Promise<MessageResponse> {
   return await sendCommandToContentScript(tabId, {
     type: "START_DIRECT_RECORDING",
     recordingId,
@@ -176,7 +176,7 @@ async function startRecording(): Promise<MessageResponse<{ recordingId: string }
     return fail("이미 녹화가 진행 중입니다.");
   }
 
-  const settings = await loadSettings();
+  const settings = state.settings;
   const recordingId = crypto.randomUUID();
 
   await saveRecordingState({

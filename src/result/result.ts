@@ -117,25 +117,6 @@ function getPartSource(part: LoadedPart): Blob | string {
   return part.objectUrl;
 }
 
-function createDownloadButton(source: Blob | string, filename: string, label = "다운로드"): HTMLButtonElement {
-  const button = document.createElement("button");
-  button.className = "button primary";
-  button.type = "button";
-  button.textContent = label;
-  button.addEventListener("click", () => {
-    const { url, revoke } = createObjectUrlSource(source);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = filename;
-    anchor.rel = "noopener";
-    anchor.click();
-    if (revoke) {
-      window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
-    }
-  });
-  return button;
-}
-
 function getDownloadIconSvg(): string {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -719,11 +700,23 @@ function renderSplitDownloads(): void {
     meta.className = "split-chip-meta";
     meta.textContent = `${formatDuration(segment.startSeconds)} - ${formatDuration(segment.endSeconds)} · ${formatBytes(segment.blob.size)}`;
 
-    const button = createDownloadButton(segment.blob, segment.filename, "");
-    button.className = "button icon-button";
+    const button = document.createElement("button");
+    button.className = "button primary icon-button";
+    button.type = "button";
     button.innerHTML = getDownloadIconSvg();
     button.title = "다운로드";
     button.setAttribute("aria-label", `${segment.index}번 파일 다운로드`);
+    button.addEventListener("click", () => {
+      const { url, revoke } = createObjectUrlSource(segment.blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = segment.filename;
+      anchor.rel = "noopener";
+      anchor.click();
+      if (revoke) {
+        window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+      }
+    });
 
     chip.append(index, meta, button);
     elements.splitFilesList.appendChild(chip);

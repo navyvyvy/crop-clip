@@ -21,7 +21,7 @@ const CHZZK_TOOL_BUTTON_ID = "crop-clip-chzzk-tool-button";
 const CHZZK_TOOL_BUTTON_CLASS = "pzp-button pzp-pc-setting-button pzp-pc__setting-button pzp-pc-ui-button crop-clip-pzp-button";
 const YOUTUBE_TOOL_BUTTON_ID = "crop-clip-youtube-tool-button";
 const YOUTUBE_TOOL_BUTTON_CLASS = "ytp-button";
-const PLAYER_TOOL_LABEL = "클립 영역 선택";
+const PLAYER_TOOL_LABEL = "녹화 영역 선택";
 
 type DownloadFormat = "auto" | "webm" | "mp4";
 type BitratePreset = "low" | "standard" | "high" | "veryHigh" | "custom";
@@ -130,7 +130,6 @@ let directSession: DirectRecordingSession | null = null;
 let chzzkToolObserver: MutationObserver | null = null;
 let chzzkToolSyncFrame: number | null = null;
 let youtubeToolSyncTimer: number | null = null;
-let playerToolHandlersInstalled = false;
 
 function ensureStyle(): void {
   let style = document.getElementById(STYLE_ID) as HTMLStyleElement | null;
@@ -1514,6 +1513,7 @@ function getCropIconSvg(): string {
 
 function setChzzkButtonContent(button: HTMLElement): void {
   button.setAttribute("aria-label", PLAYER_TOOL_LABEL);
+  button.setAttribute("type", "button");
   button.removeAttribute("title");
   button.innerHTML = `
     <span class="pzp-button__tooltip pzp-button__tooltip--top">${PLAYER_TOOL_LABEL}</span>
@@ -1551,33 +1551,24 @@ function setYoutubeButtonContent(button: HTMLElement): void {
   `;
 }
 
-function isPlayerToolEvent(event: Event): boolean {
-  return event.composedPath().some(
-    (item) => item instanceof HTMLElement && (item.id === CHZZK_TOOL_BUTTON_ID || item.id === YOUTUBE_TOOL_BUTTON_ID),
-  );
-}
-
-function handlePlayerToolEvent(event: Event): void {
-  if (!isPlayerToolEvent(event)) {
-    return;
-  }
-
-  if (event instanceof MouseEvent && event.button !== 0) {
+function handlePlayerToolActivation(event: MouseEvent): void {
+  if (event.button !== 0) {
     return;
   }
 
   event.preventDefault();
-  event.stopImmediatePropagation();
+  event.stopPropagation();
   startSelection();
 }
 
-function installPlayerToolHandlers(): void {
-  if (playerToolHandlersInstalled) {
+function bindDirectPlayerToolActivation(button: HTMLElement): void {
+  if (button.dataset.cropClipBound === "true") {
     return;
   }
 
-  document.addEventListener("click", handlePlayerToolEvent, true);
-  playerToolHandlersInstalled = true;
+  button.dataset.cropClipBound = "true";
+  button.addEventListener("pointerdown", handlePlayerToolActivation);
+  button.addEventListener("click", handlePlayerToolActivation);
 }
 
 function isVisibleElement(element: HTMLElement): boolean {
@@ -1673,6 +1664,7 @@ function syncChzzkToolButton(): void {
   if (existing && existing.parentElement === host) {
     existing.className = CHZZK_TOOL_BUTTON_CLASS;
     setChzzkButtonContent(existing);
+    bindDirectPlayerToolActivation(existing);
     return;
   }
 
@@ -1682,6 +1674,7 @@ function syncChzzkToolButton(): void {
   button.className = CHZZK_TOOL_BUTTON_CLASS;
   button.type = "button";
   setChzzkButtonContent(button);
+  bindDirectPlayerToolActivation(button);
   const firstControl = Array.from(host.children).find(
     (child) => child instanceof HTMLElement && child.id !== CHZZK_TOOL_BUTTON_ID,
   );
@@ -1731,6 +1724,7 @@ function syncYoutubeToolButton(): void {
   }
 
   setYoutubeButtonContent(button);
+  bindDirectPlayerToolActivation(button);
 
   if (button.parentElement !== host) {
     const insertionPoint = Array.from(host.children).find(
@@ -1761,7 +1755,6 @@ function installChzzkToolButton(): void {
   }
 
   ensureStyle();
-  installPlayerToolHandlers();
   syncChzzkToolButton();
   chzzkToolObserver?.disconnect();
   chzzkToolObserver = new MutationObserver(() => requestChzzkToolSync());
@@ -1774,7 +1767,6 @@ function installYoutubeToolButton(): void {
   }
 
   ensureStyle();
-  installPlayerToolHandlers();
   requestYoutubeToolSync(0);
   window.addEventListener("yt-navigate-finish", () => requestYoutubeToolSync(300), true);
   window.setTimeout(() => requestYoutubeToolSync(0), 800);

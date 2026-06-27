@@ -112,16 +112,6 @@ export async function loadAppState(): Promise<AppState> {
   };
 }
 
-export async function loadSettings(): Promise<Settings> {
-  const state = await loadAppState();
-  return state.settings;
-}
-
-export async function loadRegion(): Promise<RegionSelection | null> {
-  const state = await loadAppState();
-  return state.region;
-}
-
 export async function loadRecordingState(): Promise<RecordingState> {
   const state = await loadAppState();
   return state.recordingState;
