@@ -18,14 +18,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: npm
-
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm run build
+      - name: Download release package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download latest --pattern "crop-clip-*.zip" --dir dist
+          ls -la dist
 
       - name: Upload Chrome Web Store package
         env:
@@ -53,6 +53,7 @@ jobs:
           test -n "$TOKEN"
 
           ZIP_PATH="$(ls dist/crop-clip-*.zip | head -n 1)"
+          test -f "$ZIP_PATH"
           curl -fsS -H "Authorization: Bearer $TOKEN" \
             -X POST \
             -T "$ZIP_PATH" \

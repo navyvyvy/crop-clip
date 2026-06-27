@@ -8,6 +8,20 @@ const root = process.cwd();
 const srcDir = path.join(root, "src");
 const distDir = path.join(root, "dist");
 const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
+let buildVersion = process.env.BUILD_VERSION?.trim() || "";
+
+if (!buildVersion) {
+  try {
+    const taggedRef = execFileSync(
+      "git",
+      ["describe", "--tags", "--exact-match", "--match", "v*"],
+      { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    buildVersion = taggedRef.startsWith("v") ? taggedRef.slice(1) : taggedRef;
+  } catch {
+    buildVersion = packageJson.version;
+  }
+}
 
 await rm(distDir, { recursive: true, force: true });
 await mkdir(distDir, { recursive: true });
@@ -42,6 +56,13 @@ async function copyStaticFiles(fromDir, toDir) {
 
 await copyStaticFiles(srcDir, distDir);
 await copyFile(path.join(root, "manifest.json"), path.join(distDir, "manifest.json"));
+
+if (buildVersion && buildVersion !== packageJson.version) {
+  const manifestPath = path.join(distDir, "manifest.json");
+  const manifestJson = JSON.parse(await readFile(manifestPath, "utf8"));
+  manifestJson.version = buildVersion;
+  await writeFile(manifestPath, `${JSON.stringify(manifestJson, null, 2)}\n`);
+}
 
 await copyStaticFiles(path.join(root, "node_modules", "@ffmpeg", "ffmpeg", "dist", "esm"), path.join(distDir, "vendor", "ffmpeg", "ffmpeg"));
 await mkdir(path.join(distDir, "vendor", "ffmpeg", "core"), { recursive: true });
@@ -163,4 +184,4 @@ async function writeZip(sourceDir, zipPath) {
   await writeFile(zipPath, Buffer.concat([...localParts, ...centralParts, end]));
 }
 
-await writeZip(distDir, path.join(distDir, `${packageJson.name}-${packageJson.version}.zip`));
+await writeZip(distDir, path.join(distDir, `${packageJson.name}-${buildVersion}.zip`));
