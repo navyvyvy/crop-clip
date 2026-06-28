@@ -1,11 +1,9 @@
 import {
-  BITRATE_PRESET_VALUES,
   DEFAULT_RECORDING_STATE,
   DEFAULT_SETTINGS,
   MAX_VIDEO_BITS_PER_SECOND,
   MIN_VIDEO_BITS_PER_SECOND,
   type AppState,
-  type BitratePreset,
   type RecordingState,
   type RegionSelection,
   type Settings,
@@ -27,37 +25,13 @@ function coerceNumber(value: unknown, fallback: number): number {
 
 export function normalizeSettings(raw: Partial<Settings> | undefined): Settings {
   const outputFormat = raw?.outputFormat === "webm" || raw?.outputFormat === "mp4" ? raw.outputFormat : DEFAULT_SETTINGS.outputFormat;
-  const hasPreviousDefaultBitrate =
-    raw?.bitratePreset === "standard" &&
-    coerceNumber(raw.videoBitsPerSecond, BITRATE_PRESET_VALUES.standard) === BITRATE_PRESET_VALUES.standard &&
-    coerceNumber(raw.customVideoBitsPerSecond, BITRATE_PRESET_VALUES.standard) === BITRATE_PRESET_VALUES.standard;
-  const bitratePreset = hasPreviousDefaultBitrate
-    ? DEFAULT_SETTINGS.bitratePreset
-    : raw?.bitratePreset === "low" || raw?.bitratePreset === "standard" || raw?.bitratePreset === "high" || raw?.bitratePreset === "veryHigh" || raw?.bitratePreset === "custom"
-    ? raw.bitratePreset
-    : DEFAULT_SETTINGS.bitratePreset;
-  const presetValue = hasPreviousDefaultBitrate
-    ? DEFAULT_SETTINGS.videoBitsPerSecond
-    : bitratePreset === "custom"
-    ? coerceNumber(raw?.customVideoBitsPerSecond ?? raw?.videoBitsPerSecond, DEFAULT_SETTINGS.customVideoBitsPerSecond ?? DEFAULT_SETTINGS.videoBitsPerSecond)
-    : BITRATE_PRESET_VALUES[bitratePreset as Exclude<BitratePreset, "custom">];
-  const rawVideoBitsPerSecond = hasPreviousDefaultBitrate ? presetValue : raw?.videoBitsPerSecond;
-  const rawCustomVideoBitsPerSecond = hasPreviousDefaultBitrate ? presetValue : raw?.customVideoBitsPerSecond;
+  const rawSettings = raw as Partial<Settings> & { customVideoBitsPerSecond?: number };
+  const videoBitsPerSecond = coerceNumber(rawSettings.customVideoBitsPerSecond ?? rawSettings.videoBitsPerSecond, DEFAULT_SETTINGS.videoBitsPerSecond);
 
   return {
     outputFormat,
-    bitratePreset,
-    videoBitsPerSecond: bitratePreset === "custom"
-      ? clamp(Math.round(coerceNumber(rawVideoBitsPerSecond, presetValue)), MIN_VIDEO_BITS_PER_SECOND, MAX_VIDEO_BITS_PER_SECOND)
-      : presetValue,
-    customVideoBitsPerSecond: clamp(Math.round(coerceNumber(rawCustomVideoBitsPerSecond ?? presetValue, presetValue)), MIN_VIDEO_BITS_PER_SECOND, MAX_VIDEO_BITS_PER_SECOND),
+    videoBitsPerSecond: clamp(Math.round(videoBitsPerSecond), MIN_VIDEO_BITS_PER_SECOND, MAX_VIDEO_BITS_PER_SECOND),
     enable60fps: Boolean(raw?.enable60fps),
-    targetHeight: DEFAULT_SETTINGS.targetHeight,
-    includeAudio: raw?.includeAudio ?? DEFAULT_SETTINGS.includeAudio,
-    autoSplit: raw?.autoSplit ?? DEFAULT_SETTINGS.autoSplit,
-    audioGain: clamp(Number(raw?.audioGain ?? DEFAULT_SETTINGS.audioGain), 0, 2),
-    audioBitsPerSecond: clamp(Math.round(coerceNumber(raw?.audioBitsPerSecond, DEFAULT_SETTINGS.audioBitsPerSecond)), 32_000, 512_000),
-    splitSeconds: clamp(Math.round(coerceNumber(raw?.splitSeconds, DEFAULT_SETTINGS.splitSeconds)), 0, 45),
   };
 }
 

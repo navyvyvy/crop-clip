@@ -1,17 +1,14 @@
 :root {
   color-scheme: dark;
   --bg: #0e1318;
-  --panel: #151b22;
   --panel-2: #10161d;
   --line: #29323d;
-  --line-strong: #3a4653;
   --text: #edf3f8;
   --muted: #92a1b2;
   --accent: #5bd6bf;
   --accent-strong: #7ae8d4;
   --danger: #ff7474;
   --warn: #ffcf72;
-  --shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
 }
 
 * {
@@ -38,7 +35,6 @@ body {
 }
 
 button,
-select,
 input {
   font: inherit;
 }
@@ -89,7 +85,6 @@ input {
 }
 
 h1,
-h2,
 p {
   margin: 0;
 }
@@ -170,8 +165,8 @@ h1 {
 
 .setting-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 112px;
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) 132px;
+  gap: 8px;
   align-items: center;
 }
 
@@ -192,15 +187,59 @@ h1 {
   line-height: 1.35;
 }
 
-.setting-row > input,
-.setting-row > select {
-  width: 100%;
-  border-radius: 8px;
+.bitrate-field {
+  display: grid;
+  grid-template-columns: 20px minmax(34px, 1fr) 38px 20px;
+  gap: 2px;
+  padding: 2px;
   border: 1px solid var(--line);
+  border-radius: 9px;
   background: var(--panel-2);
+}
+
+.bitrate-field input {
+  width: 100%;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
   color: var(--text);
-  padding: 7px 8px;
+  padding: 5px 4px;
+  text-align: right;
   font-size: 12px;
+}
+
+.bitrate-field button {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  min-width: 0;
+  border: 0;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.bitrate-field button:hover:not(:disabled) {
+  background: var(--accent);
+  color: #06221d;
+}
+
+.bitrate-field button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.bitrate-field span {
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .segmented {

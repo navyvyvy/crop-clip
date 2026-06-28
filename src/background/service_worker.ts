@@ -57,9 +57,9 @@ async function getActiveRecordableTab(): Promise<chrome.tabs.Tab> {
   return tab;
 }
 
-async function queryPlayerStatus(tabId: number): Promise<{ ok: true; data: { available: boolean; muted: boolean; volume: number; paused: boolean; hasAudioTracks: boolean; label: string } } | { ok: false; error: string }> {
+async function queryPlayerStatus(tabId: number): Promise<{ ok: true; data: { muted: boolean; volume: number } } | { ok: false; error: string }> {
   try {
-    const response = await sendToTab<{ ok: true; data: { available: boolean; muted: boolean; volume: number; paused: boolean; hasAudioTracks: boolean; label: string } } | { ok: false; error: string }>(tabId, { type: "GET_PLAYER_STATUS" });
+    const response = await sendToTab<{ ok: true; data: { muted: boolean; volume: number } } | { ok: false; error: string }>(tabId, { type: "GET_PLAYER_STATUS" });
     if (!response) {
       return { ok: false, error: "재생 상태를 확인할 수 없습니다." };
     }

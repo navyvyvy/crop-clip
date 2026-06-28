@@ -1,20 +1,11 @@
-export type DownloadFormat = "auto" | "webm" | "mp4";
-export type BitratePreset = "low" | "standard" | "high" | "veryHigh" | "custom";
-export type TargetHeight = "source" | 480 | 720 | 1080;
+export type RecordingFormat = "webm" | "mp4";
+export type DownloadFormat = RecordingFormat | "auto";
 export type RecordingStatus = "idle" | "recording" | "completed" | "error";
 
 export interface Settings {
-  outputFormat: DownloadFormat;
-  bitratePreset: BitratePreset;
+  outputFormat: RecordingFormat;
   videoBitsPerSecond: number;
-  customVideoBitsPerSecond?: number;
   enable60fps: boolean;
-  targetHeight: TargetHeight;
-  includeAudio: boolean;
-  autoSplit: boolean;
-  audioGain: number;
-  audioBitsPerSecond: number;
-  splitSeconds: number;
 }
 
 export interface RegionSelection {
@@ -42,9 +33,9 @@ export interface RecordingState {
   endedAt?: number;
   lastError?: string;
   requestedOutputFormat?: DownloadFormat;
-  actualOutputFormat?: Exclude<DownloadFormat, "auto">;
+  actualOutputFormat?: RecordingFormat;
   actualMimeType?: string;
-  actualExtension?: "webm" | "mp4";
+  actualExtension?: RecordingFormat;
 }
 
 export interface RecordingRecord {
@@ -56,9 +47,9 @@ export interface RecordingRecord {
   partCount: number;
   totalSize: number;
   actualMimeType: string;
-  actualExtension: "webm" | "mp4";
+  actualExtension: RecordingFormat;
   requestedOutputFormat: DownloadFormat;
-  actualOutputFormat: Exclude<DownloadFormat, "auto">;
+  actualOutputFormat: RecordingFormat;
 }
 
 export interface RecordingPartRecord {
@@ -67,8 +58,8 @@ export interface RecordingPartRecord {
   index: number;
   filename: string;
   mimeType: string;
-  extension: "webm" | "mp4";
-  outputFormat: Exclude<DownloadFormat, "auto">;
+  extension: RecordingFormat;
+  outputFormat: RecordingFormat;
   size: number;
   blob?: Blob;
   dataUrl?: string;
@@ -82,27 +73,15 @@ export interface AppState {
   recordingState: RecordingState;
 }
 
-export const BITRATE_PRESET_VALUES: Record<Exclude<BitratePreset, "custom">, number> = {
-  low: 1_500_000,
-  standard: 2_500_000,
-  high: 4_000_000,
-  veryHigh: 6_000_000,
-};
 export const MIN_VIDEO_BITS_PER_SECOND = 100_000;
-export const MAX_VIDEO_BITS_PER_SECOND = 20_000_000;
+export const MAX_VIDEO_BITS_PER_SECOND = 12_000_000;
+export const DEFAULT_VIDEO_BITS_PER_SECOND = 4_000_000;
+export const FPS_WARNING_VIDEO_BITS_PER_SECOND = DEFAULT_VIDEO_BITS_PER_SECOND;
 
 export const DEFAULT_SETTINGS: Settings = {
   outputFormat: "webm",
-  bitratePreset: "custom",
-  videoBitsPerSecond: BITRATE_PRESET_VALUES.high,
-  customVideoBitsPerSecond: BITRATE_PRESET_VALUES.high,
+  videoBitsPerSecond: DEFAULT_VIDEO_BITS_PER_SECOND,
   enable60fps: false,
-  targetHeight: "source",
-  includeAudio: true,
-  autoSplit: false,
-  audioGain: 1,
-  audioBitsPerSecond: 128_000,
-  splitSeconds: 45,
 };
 
 export const DEFAULT_RECORDING_STATE: RecordingState = {

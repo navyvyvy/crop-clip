@@ -1,4 +1,4 @@
-import { BITRATE_PRESET_VALUES, DEFAULT_SETTINGS, MAX_VIDEO_BITS_PER_SECOND, MIN_VIDEO_BITS_PER_SECOND, type AppState, type DownloadFormat, type Settings } from "../shared/types.js";
+import { DEFAULT_SETTINGS, FPS_WARNING_VIDEO_BITS_PER_SECOND, MAX_VIDEO_BITS_PER_SECOND, MIN_VIDEO_BITS_PER_SECOND, type AppState, type RecordingFormat, type Settings } from "../shared/types.js";
 import { loadAppState, normalizeRecordingState, normalizeRegion, normalizeSettings, saveSettings } from "../shared/storage.js";
 import type { MessageResponse } from "../shared/messages.js";
 
@@ -10,13 +10,18 @@ const elements = {
   recordToggleButton: document.getElementById("record-toggle-button") as HTMLButtonElement,
   outputFormatInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='output-format']")),
   fpsModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='fps-mode']")),
+  bitrateDecreaseButton: document.getElementById("bitrate-decrease-button") as HTMLButtonElement,
+  bitrateIncreaseButton: document.getElementById("bitrate-increase-button") as HTMLButtonElement,
   customVideoBitrateInput: document.getElementById("custom-video-bitrate-input") as HTMLInputElement,
   fpsWarning: document.getElementById("fps-warning") as HTMLParagraphElement,
 };
 
+const BITS_PER_MEGABIT = 1_000_000;
+const BITRATE_STEP_MEGABITS_PER_SECOND = 0.5;
+const MIN_VIDEO_MEGABITS_PER_SECOND = MIN_VIDEO_BITS_PER_SECOND / BITS_PER_MEGABIT;
+const MAX_VIDEO_MEGABITS_PER_SECOND = MAX_VIDEO_BITS_PER_SECOND / BITS_PER_MEGABIT;
+
 elements.versionBadge.textContent = `v${chrome.runtime.getManifest().version}`;
-elements.customVideoBitrateInput.min = String(MIN_VIDEO_BITS_PER_SECOND);
-elements.customVideoBitrateInput.max = String(MAX_VIDEO_BITS_PER_SECOND);
 
 let appState: AppState = {
   settings: DEFAULT_SETTINGS,
@@ -71,12 +76,20 @@ function showError(message = ""): void {
 }
 
 function showFpsWarning(settings: Settings): void {
-  if (settings.enable60fps && settings.videoBitsPerSecond <= BITRATE_PRESET_VALUES.standard) {
+  if (settings.enable60fps && settings.videoBitsPerSecond < FPS_WARNING_VIDEO_BITS_PER_SECOND) {
     elements.fpsWarning.textContent = "60fps는 높음 / 4 Mbps 이상을 권장합니다.";
     return;
   }
 
   elements.fpsWarning.textContent = "";
+}
+
+function showBitrateRangeWarning(): void {
+  elements.fpsWarning.textContent = `비트레이트는 ${MIN_VIDEO_MEGABITS_PER_SECOND} ~ ${MAX_VIDEO_MEGABITS_PER_SECOND} Mbps 사이로 입력해 주세요.`;
+}
+
+function formatBitrateMbps(value: number): string {
+  return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(1)));
 }
 
 function syncPresetUi(settings: Settings): void {
@@ -87,7 +100,7 @@ function syncPresetUi(settings: Settings): void {
   for (const input of elements.fpsModeInputs) {
     input.checked = input.value === (settings.enable60fps ? "on" : "off");
   }
-  elements.customVideoBitrateInput.value = String(settings.customVideoBitsPerSecond ?? settings.videoBitsPerSecond);
+  elements.customVideoBitrateInput.value = formatBitrateMbps(settings.videoBitsPerSecond / BITS_PER_MEGABIT);
   showFpsWarning(settings);
 }
 
@@ -105,13 +118,29 @@ function renderState(): void {
   const controls = [
     ...elements.outputFormatInputs,
     ...elements.fpsModeInputs,
+    elements.bitrateDecreaseButton,
+    elements.bitrateIncreaseButton,
     elements.customVideoBitrateInput,
   ];
 
   for (const control of controls) {
     control.disabled = lockControls;
   }
+}
 
+async function stepBitrate(direction: -1 | 1): Promise<void> {
+  const current = Number(elements.customVideoBitrateInput.value);
+  const fallback = appState.settings.videoBitsPerSecond / BITS_PER_MEGABIT;
+  const next = Math.min(
+    MAX_VIDEO_MEGABITS_PER_SECOND,
+    Math.max(
+      MIN_VIDEO_MEGABITS_PER_SECOND,
+      (Number.isFinite(current) ? current : fallback) + direction * BITRATE_STEP_MEGABITS_PER_SECOND,
+    ),
+  );
+
+  elements.customVideoBitrateInput.value = formatBitrateMbps(next);
+  await persistUiSettings();
 }
 
 async function sendCommand<T = undefined>(message: { type: string }): Promise<MessageResponse<T>> {
@@ -126,30 +155,64 @@ async function refreshAppState(): Promise<void> {
 }
 
 function readSettingsFromUi(): Settings {
-  const outputFormat = (elements.outputFormatInputs.find((input) => input.checked)?.value ?? DEFAULT_SETTINGS.outputFormat) as DownloadFormat;
+  const outputFormat = (elements.outputFormatInputs.find((input) => input.checked)?.value ?? DEFAULT_SETTINGS.outputFormat) as RecordingFormat;
   const enable60fps = elements.fpsModeInputs.find((input) => input.checked)?.value === "on";
-  const customVideoBitsPerSecond = Math.round(Number(elements.customVideoBitrateInput.value || DEFAULT_SETTINGS.customVideoBitsPerSecond));
+  const fallbackBitrateMbps = (appState.settings.videoBitsPerSecond ?? DEFAULT_SETTINGS.videoBitsPerSecond) / BITS_PER_MEGABIT;
+  const videoBitsPerSecond = Math.round(Number(elements.customVideoBitrateInput.value || fallbackBitrateMbps) * BITS_PER_MEGABIT);
 
   return normalizeSettings({
     outputFormat,
-    bitratePreset: "custom",
-    videoBitsPerSecond: customVideoBitsPerSecond,
-    customVideoBitsPerSecond,
+    videoBitsPerSecond,
     enable60fps,
-    targetHeight: DEFAULT_SETTINGS.targetHeight,
-    includeAudio: DEFAULT_SETTINGS.includeAudio,
-    autoSplit: DEFAULT_SETTINGS.autoSplit,
-    audioGain: DEFAULT_SETTINGS.audioGain,
-    audioBitsPerSecond: DEFAULT_SETTINGS.audioBitsPerSecond,
-    splitSeconds: DEFAULT_SETTINGS.splitSeconds,
   });
 }
 
+function sanitizeBitrateInput(): void {
+  const sanitized = elements.customVideoBitrateInput.value
+    .replace(/[^\d.]/g, "")
+    .replace(/(\..*)\./g, "$1");
+  if (!sanitized) {
+    elements.customVideoBitrateInput.value = "";
+    return;
+  }
+
+  elements.customVideoBitrateInput.value = Number(sanitized) > MAX_VIDEO_MEGABITS_PER_SECOND
+    ? String(MAX_VIDEO_MEGABITS_PER_SECOND)
+    : sanitized;
+}
+
 async function persistUiSettings(): Promise<void> {
+  sanitizeBitrateInput();
+  if (!elements.customVideoBitrateInput.value) {
+    syncPresetUi(appState.settings);
+    return;
+  }
+
+  const value = Number(elements.customVideoBitrateInput.value);
+  if (!Number.isFinite(value) || value < MIN_VIDEO_MEGABITS_PER_SECOND || value > MAX_VIDEO_MEGABITS_PER_SECOND) {
+    syncPresetUi(appState.settings);
+    showBitrateRangeWarning();
+    return;
+  }
+
   const settings = readSettingsFromUi();
   appState.settings = settings;
   await saveSettings(settings);
   syncPresetUi(settings);
+  renderState();
+}
+
+async function persistBitrateInput(): Promise<void> {
+  sanitizeBitrateInput();
+  const value = Number(elements.customVideoBitrateInput.value);
+  if (!Number.isFinite(value) || value < MIN_VIDEO_MEGABITS_PER_SECOND || value > MAX_VIDEO_MEGABITS_PER_SECOND) {
+    return;
+  }
+
+  const settings = readSettingsFromUi();
+  appState.settings = settings;
+  await saveSettings(settings);
+  showFpsWarning(settings);
   renderState();
 }
 
@@ -213,7 +276,19 @@ for (const element of [...elements.outputFormatInputs, ...elements.fpsModeInputs
 }
 
 elements.customVideoBitrateInput.addEventListener("input", () => {
+  void persistBitrateInput();
+});
+
+elements.customVideoBitrateInput.addEventListener("change", () => {
   void persistUiSettings();
+});
+
+elements.bitrateDecreaseButton.addEventListener("click", () => {
+  void stepBitrate(-1);
+});
+
+elements.bitrateIncreaseButton.addEventListener("click", () => {
+  void stepBitrate(1);
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -223,7 +298,11 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 
   if (changes.settings) {
     appState.settings = normalizeSettings(changes.settings.newValue as Partial<Settings> | undefined);
-    syncPresetUi(appState.settings);
+    if (document.activeElement !== elements.customVideoBitrateInput) {
+      syncPresetUi(appState.settings);
+    } else {
+      showFpsWarning(appState.settings);
+    }
   }
 
   if (changes.region) {

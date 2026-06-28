@@ -17,83 +17,32 @@ const BORDER_WIDTH = 2;
 const RESIZE_HIT_SIZE = 22;
 const CROP_ACCENT = "#5bd6bf";
 const MAX_SCREENSHOT_PREVIEWS = 8;
-const MAX_PART_BYTES = 40 * 1024 * 1024;
-const MAX_PART_SECONDS = 45;
+const AUDIO_BITS_PER_SECOND = 128_000;
 const CHZZK_TOOL_BUTTON_ID = "crop-clip-chzzk-tool-button";
 const CHZZK_TOOL_BUTTON_CLASS = "pzp-button pzp-pc-setting-button pzp-pc__setting-button pzp-pc-ui-button crop-clip-pzp-button";
 const YOUTUBE_TOOL_BUTTON_ID = "crop-clip-youtube-tool-button";
 const YOUTUBE_TOOL_BUTTON_CLASS = "ytp-button";
 const PLAYER_TOOL_LABEL = "녹화 영역 선택";
 
-type DownloadFormat = "auto" | "webm" | "mp4";
-type BitratePreset = "low" | "standard" | "high" | "veryHigh" | "custom";
-type TargetHeight = "source" | 480 | 720 | 1080;
-
-interface Settings {
-  outputFormat: DownloadFormat;
-  bitratePreset: BitratePreset;
-  videoBitsPerSecond: number;
-  customVideoBitsPerSecond?: number;
-  enable60fps: boolean;
-  targetHeight: TargetHeight;
-  includeAudio: boolean;
-  autoSplit: boolean;
-  audioGain: number;
-  audioBitsPerSecond: number;
-  splitSeconds: number;
-}
-
-interface RegionSelection {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  videoRelative?: {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-  };
-  viewportWidth: number;
-  viewportHeight: number;
-  devicePixelRatio: number;
-  selectedAt: number;
-}
-
-interface LocalRecordingState {
-  status: "idle" | "recording" | "completed" | "error";
-  startedAt?: number;
-}
-
-type ContentCommand =
-  | { type: "START_SELECTION" }
-  | { type: "CLEAR_REGION" }
-  | { type: "GET_REGION_GEOMETRY" }
-  | {
-      type: "START_DIRECT_RECORDING";
-      recordingId: string;
-      region: RegionSelection;
-      settings: Settings;
-    }
-  | { type: "STOP_DIRECT_RECORDING" };
-type PlayerStatusRequest = { type: "GET_PLAYER_STATUS" };
+type ContentCommand = import("../shared/messages.js").ContentCommand;
+type MessageResponse<T = undefined> = import("../shared/messages.js").MessageResponse<T>;
+type PlayerStatusRequest = import("../shared/messages.js").PlayerStatusRequest;
+type RecordingState = import("../shared/types.js").RecordingState;
+type RegionSelection = import("../shared/types.js").RegionSelection;
+type Settings = import("../shared/types.js").Settings;
+type LocalRecordingState = Pick<RecordingState, "status" | "startedAt">;
 
 type PlayerStatusResponse =
   | {
       ok: true;
       data: {
-        available: boolean;
         muted: boolean;
         volume: number;
-        paused: boolean;
-        hasAudioTracks: boolean;
-        label: string;
       };
     }
   | { ok: false; error: string };
 
-type MessageResponse = { ok: true } | { ok: false; error: string };
-type RegionGeometryResponse = { ok: true; data: RegionSelection } | { ok: false; error: string };
+type RegionGeometryResponse = MessageResponse<RegionSelection>;
 
 interface DirectRecordingSession {
   recordingId: string;
@@ -112,14 +61,10 @@ interface DirectRecordingSession {
   partNumber: number;
   totalSize: number;
   currentChunks: BlobPart[];
-  currentBytes: number;
   createdAt: number;
-  partStartedAt: number;
   drawTimerId: number;
-  splitTimerId: number | null;
   stopRequested: boolean;
   closingPart: boolean;
-  continueAfterStop: boolean;
   finishPromise: Promise<void>;
   resolveFinish: () => void;
   rejectFinish: (error: Error) => void;
@@ -659,17 +604,11 @@ function computeDirectCrop(region: RegionSelection, video: HTMLVideoElement): { 
   return { x, y, width: right - x, height: bottom - y };
 }
 
-function computeDirectOutput(crop: { width: number; height: number }, settings: Settings): { width: number; height: number } {
-  if (settings.targetHeight === "source" || crop.height <= settings.targetHeight) {
-    return {
-      width: Math.max(1, Math.round(crop.width)),
-      height: Math.max(1, Math.round(crop.height)),
-    };
-  }
-
-  const height = settings.targetHeight;
-  const width = Math.max(1, Math.round((crop.width / crop.height) * height));
-  return { width, height };
+function computeDirectOutput(crop: { width: number; height: number }): { width: number; height: number } {
+  return {
+    width: Math.max(1, Math.round(crop.width)),
+    height: Math.max(1, Math.round(crop.height)),
+  };
 }
 
 function selectDirectMimeType(settings: Settings): { mimeType: string; extension: "webm" | "mp4"; outputFormat: "webm" | "mp4" } {
@@ -848,11 +787,6 @@ async function captureRegionScreenshot(): Promise<void> {
 }
 
 function buildDirectFilename(session: DirectRecordingSession): string {
-  const splitSeconds = session.settings.autoSplit ? session.settings.splitSeconds : 0;
-  if (splitSeconds > 0) {
-    return `${session.baseName}_part_${String(session.partNumber).padStart(3, "0")}.${session.extension}`;
-  }
-
   return `${session.baseName}.${session.extension}`;
 }
 
@@ -898,10 +832,6 @@ async function saveDirectPart(session: DirectRecordingSession, blob: Blob): Prom
 
 function clearDirectTimers(session: DirectRecordingSession): void {
   window.clearInterval(session.drawTimerId);
-  if (session.splitTimerId !== null) {
-    window.clearTimeout(session.splitTimerId);
-    session.splitTimerId = null;
-  }
 }
 
 async function finalizeDirectRecording(session: DirectRecordingSession): Promise<void> {
@@ -942,7 +872,7 @@ function stopDirectRecordingAfterSourceChange(session: DirectRecordingSession): 
   }
 
   session.stopRequested = true;
-  requestDirectPartStop(session, false);
+  requestDirectPartStop(session);
 }
 
 function watchDirectRecordingSource(session: DirectRecordingSession): void {
@@ -960,13 +890,12 @@ function watchDirectRecordingSource(session: DirectRecordingSession): void {
   };
 }
 
-function requestDirectPartStop(session: DirectRecordingSession, continueAfterStop: boolean): void {
+function requestDirectPartStop(session: DirectRecordingSession): void {
   if (!session.recorder || session.recorder.state === "inactive" || session.closingPart) {
     return;
   }
 
   session.closingPart = true;
-  session.continueAfterStop = continueAfterStop;
   try {
     session.recorder.requestData();
   } catch {
@@ -975,32 +904,14 @@ function requestDirectPartStop(session: DirectRecordingSession, continueAfterSto
   session.recorder.stop();
 }
 
-function scheduleDirectSplit(session: DirectRecordingSession): void {
-  if (!session.settings.autoSplit) {
-    return;
-  }
-
-  const splitSeconds = Math.min(session.settings.splitSeconds, MAX_PART_SECONDS);
-  if (splitSeconds <= 0) {
-    return;
-  }
-
-  session.splitTimerId = window.setTimeout(() => {
-    requestDirectPartStop(session, true);
-  }, splitSeconds * 1000);
-}
-
 async function startDirectPart(session: DirectRecordingSession): Promise<void> {
   session.currentChunks = [];
-  session.currentBytes = 0;
-  session.partStartedAt = Date.now();
   session.closingPart = false;
-  session.continueAfterStop = false;
 
   const recorder = new MediaRecorder(session.outputStream, {
     mimeType: session.mimeType,
     videoBitsPerSecond: session.settings.videoBitsPerSecond,
-    audioBitsPerSecond: session.settings.audioBitsPerSecond,
+    audioBitsPerSecond: AUDIO_BITS_PER_SECOND,
   });
   session.recorder = recorder;
 
@@ -1010,10 +921,6 @@ async function startDirectPart(session: DirectRecordingSession): Promise<void> {
     }
 
     session.currentChunks.push(event.data);
-    session.currentBytes += event.data.size;
-    if (session.settings.autoSplit && session.currentBytes >= MAX_PART_BYTES) {
-      requestDirectPartStop(session, true);
-    }
   };
 
   recorder.onerror = () => {
@@ -1030,13 +937,6 @@ async function startDirectPart(session: DirectRecordingSession): Promise<void> {
     void (async () => {
       const blob = new Blob(session.currentChunks, { type: session.mimeType });
       await saveDirectPart(session, blob);
-
-      if (session.continueAfterStop && !session.stopRequested) {
-        session.partNumber += 1;
-        await startDirectPart(session);
-        return;
-      }
-
       await finalizeDirectRecording(session);
     })().catch((error: Error) => {
       session.rejectFinish(error);
@@ -1051,7 +951,6 @@ async function startDirectPart(session: DirectRecordingSession): Promise<void> {
   };
 
   recorder.start(1000);
-  scheduleDirectSplit(session);
 }
 
 async function startDirectRecording(command: Extract<ContentCommand, { type: "START_DIRECT_RECORDING" }>): Promise<MessageResponse> {
@@ -1077,7 +976,7 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
     return { ok: false, error: "선택 영역이 비디오 화면과 겹치지 않습니다." };
   }
 
-  const output = computeDirectOutput(crop, command.settings);
+  const output = computeDirectOutput(crop);
   const sourceStream = getVideoStream(video);
   if (!sourceStream) {
     return { ok: false, error: "이 브라우저에서는 비디오 스트림 직접 녹화를 지원하지 않습니다." };
@@ -1102,7 +1001,7 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
   const canvasStream = canvas.captureStream(frameRate);
   const tracks = [
     ...canvasStream.getVideoTracks(),
-    ...(command.settings.includeAudio ? sourceStream.getAudioTracks() : []),
+    ...sourceStream.getAudioTracks(),
   ];
   const outputStream = new MediaStream(tracks);
   const mime = selectDirectMimeType(command.settings);
@@ -1138,14 +1037,10 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
     partNumber: 1,
     totalSize: 0,
     currentChunks: [],
-    currentBytes: 0,
     createdAt: Date.now(),
-    partStartedAt: 0,
     drawTimerId: window.setInterval(drawFrame, Math.max(16, Math.round(1000 / frameRate))),
-    splitTimerId: null,
     stopRequested: false,
     closingPart: false,
-    continueAfterStop: false,
     finishPromise,
     resolveFinish,
     rejectFinish,
@@ -1167,7 +1062,7 @@ async function stopDirectRecording(): Promise<MessageResponse> {
   }
 
   session.stopRequested = true;
-  requestDirectPartStop(session, false);
+  requestDirectPartStop(session);
   await session.finishPromise;
   return { ok: true };
 }
@@ -1178,7 +1073,7 @@ function stopDirectRecordingForUnload(): void {
   }
 
   directSession.stopRequested = true;
-  requestDirectPartStop(directSession, false);
+  requestDirectPartStop(directSession);
 }
 
 function showSelectionBorder(region: RegionSelection | null): void {
@@ -2172,30 +2067,13 @@ function getPlayerStatus(): PlayerStatusResponse {
     };
   }
 
-  const muted = video.muted;
-  const label = muted
-    ? "현재 탭의 영상이 음소거되어 있습니다."
-    : video.paused
-      ? "현재 탭의 영상이 재생 중이 아닙니다."
-      : "";
-
-  return {
-    ok: true,
-    data: {
-      available: true,
-      muted,
-      volume: video.volume,
-      paused: video.paused,
-      hasAudioTracks: true,
-      label,
-    },
-  };
+  return { ok: true, data: { muted: video.muted, volume: video.volume } };
 }
 
 chrome.runtime.onMessage.addListener((message: ContentCommand | PlayerStatusRequest, _sender, sendResponse: (response: MessageResponse | PlayerStatusResponse | RegionGeometryResponse) => void) => {
   if (message.type === "GET_PLAYER_STATUS") {
     const status = getPlayerStatus();
-    sendResponse(status.ok && status.data.muted ? { ok: false, error: status.data.label || "재생 상태를 확인할 수 없습니다." } : status);
+    sendResponse(status.ok && status.data.muted ? { ok: false, error: "현재 탭의 영상이 음소거되어 있습니다." } : status);
     return false;
   }
 

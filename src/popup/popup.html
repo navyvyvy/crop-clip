@@ -45,10 +45,15 @@
 
             <label class="setting-row">
               <span class="setting-copy">
-                <span class="setting-title">비트레이트 (bps)</span>
-                <span class="setting-desc">높을수록 화질과 용량이 커집니다.<br/>기본값 4000000 입니다.</span>
+                <span class="setting-title">비트레이트</span>
+                <span class="setting-desc">화질·용량 조절, 기본 4 Mbps</span>
               </span>
-              <input id="custom-video-bitrate-input" type="number" min="100000" max="20000000" step="100000" />
+              <span class="bitrate-field">
+                <button id="bitrate-decrease-button" type="button" aria-label="비트레이트 감소">−</button>
+                <input id="custom-video-bitrate-input" type="text" inputmode="decimal" pattern="[0-9.]*" />
+                <span>Mbps</span>
+                <button id="bitrate-increase-button" type="button" aria-label="비트레이트 증가">+</button>
+              </span>
             </label>
 
             <label class="setting-row">
