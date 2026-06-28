@@ -22,6 +22,12 @@ export interface RegionSelection {
   y: number;
   width: number;
   height: number;
+  videoRelative?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
   viewportWidth: number;
   viewportHeight: number;
   devicePixelRatio: number;

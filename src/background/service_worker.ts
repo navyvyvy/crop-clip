@@ -331,29 +331,6 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   })();
 });
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.status !== "loading") {
-    return;
-  }
-
-  void (async () => {
-    const state = await loadRecordingState();
-    if (state.status !== "recording" || state.tabId !== tabId) {
-      return;
-    }
-
-    const response = await stopDirectRecording(tabId);
-    if (!response.ok) {
-      await patchRecordingState({
-        status: "error",
-        recordingId: state.recordingId,
-        tabId,
-        lastError: response.error,
-      });
-    }
-  })();
-});
-
 chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingFinishedMessage | RecordingErrorMessage | StoreRecordingPartMessage | DeletionScheduleRequest | DeletionCancelRequest, _sender, sendResponse: (response: MessageResponse<any>) => void) => {
   void (async () => {
     if (message.type === "SELECT_REGION") {

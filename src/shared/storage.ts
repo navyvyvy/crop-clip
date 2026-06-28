@@ -71,11 +71,26 @@ export function normalizeRegion(raw: Partial<RegionSelection> | null | undefined
     return null;
   }
 
+  const relative = raw.videoRelative;
+  const videoRelative =
+    relative &&
+    [relative.x, relative.y, relative.width, relative.height].every((value) => Number.isFinite(Number(value))) &&
+    Number(relative.width) > 0 &&
+    Number(relative.height) > 0
+      ? {
+          x: Number(relative.x),
+          y: Number(relative.y),
+          width: Number(relative.width),
+          height: Number(relative.height),
+        }
+      : undefined;
+
   return {
     x: Number(raw.x),
     y: Number(raw.y),
     width: Number(raw.width),
     height: Number(raw.height),
+    ...(videoRelative ? { videoRelative } : {}),
     viewportWidth: Math.max(1, Number(raw.viewportWidth)),
     viewportHeight: Math.max(1, Number(raw.viewportHeight)),
     devicePixelRatio: Math.max(0.1, Number(raw.devicePixelRatio)),

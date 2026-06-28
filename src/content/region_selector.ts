@@ -48,6 +48,12 @@ interface RegionSelection {
   y: number;
   width: number;
   height: number;
+  videoRelative?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
   viewportWidth: number;
   viewportHeight: number;
   devicePixelRatio: number;
@@ -119,6 +125,7 @@ interface DirectRecordingSession {
   rejectFinish: (error: Error) => void;
   crop: { x: number; y: number; width: number; height: number };
   output: { width: number; height: number };
+  sourceChangeCleanup?: () => void;
 }
 
 let currentOverlay: HTMLDivElement | null = null;
@@ -132,6 +139,8 @@ let directSession: DirectRecordingSession | null = null;
 let chzzkToolObserver: MutationObserver | null = null;
 let chzzkToolSyncFrame: number | null = null;
 let youtubeToolSyncTimer: number | null = null;
+let regionLayoutTimerId: number | null = null;
+let lastVideoLayoutKey = "";
 
 function ensureStyle(): void {
   let style = document.getElementById(STYLE_ID) as HTMLStyleElement | null;
@@ -335,10 +344,14 @@ function ensureStyle(): void {
 
     #${BORDER_ID} .record-region[data-recording="true"] {
       color: #ff7474;
+      border-color: rgba(255, 116, 116, 0.55);
+      box-shadow: 0 0 0 1px rgba(255, 116, 116, 0.28);
     }
 
     #${BORDER_ID} .record-region[data-recording="true"]:hover {
       color: #ff8a8a;
+      border-color: rgba(255, 138, 138, 0.7);
+      box-shadow: 0 0 0 1px rgba(255, 138, 138, 0.36);
     }
 
     #${BORDER_ID} .move-region {
@@ -558,19 +571,58 @@ function getVideoSelectionRect(): DOMRect | null {
   return new DOMRect(left, top, right - left, bottom - top);
 }
 
-function clampRegionToRect(region: RegionSelection, rect: DOMRect): RegionSelection {
-  const width = Math.min(region.width, rect.width);
-  const height = Math.min(region.height, rect.height);
+function getVideoRenderedViewportRect(): DOMRect | null {
+  const video = findPrimaryVideoElement();
+  return video ? getRenderedVideoRect(video).rect : null;
+}
+
+function buildRegionSelection(x: number, y: number, width: number, height: number): RegionSelection {
+  const renderedRect = getVideoRenderedViewportRect();
+  const relativeX = renderedRect && renderedRect.width > 0 ? clamp((x - renderedRect.left) / renderedRect.width, 0, 1) : 0;
+  const relativeY = renderedRect && renderedRect.height > 0 ? clamp((y - renderedRect.top) / renderedRect.height, 0, 1) : 0;
+  const relative =
+    renderedRect && renderedRect.width > 0 && renderedRect.height > 0
+      ? {
+          x: relativeX,
+          y: relativeY,
+          width: clamp(width / renderedRect.width, 0, 1 - relativeX),
+          height: clamp(height / renderedRect.height, 0, 1 - relativeY),
+        }
+      : undefined;
+
   return {
-    x: clamp(region.x, rect.left, rect.right - width),
-    y: clamp(region.y, rect.top, rect.bottom - height),
+    x,
+    y,
     width,
     height,
+    ...(relative ? { videoRelative: relative } : {}),
     viewportWidth: window.innerWidth,
     viewportHeight: window.innerHeight,
     devicePixelRatio: window.devicePixelRatio || 1,
     selectedAt: Date.now(),
   };
+}
+
+function resolveRegionToViewport(region: RegionSelection): RegionSelection {
+  const renderedRect = getVideoRenderedViewportRect();
+  const relative = region.videoRelative;
+  if (!renderedRect || !relative) {
+    const bounds = getVideoSelectionRect();
+    return bounds ? clampRegionToRect(region, bounds) : region;
+  }
+
+  return buildRegionSelection(
+    renderedRect.left + renderedRect.width * relative.x,
+    renderedRect.top + renderedRect.height * relative.y,
+    renderedRect.width * relative.width,
+    renderedRect.height * relative.height,
+  );
+}
+
+function clampRegionToRect(region: RegionSelection, rect: DOMRect): RegionSelection {
+  const width = Math.min(region.width, rect.width);
+  const height = Math.min(region.height, rect.height);
+  return buildRegionSelection(clamp(region.x, rect.left, rect.right - width), clamp(region.y, rect.top, rect.bottom - height), width, height);
 }
 
 function computeDirectCrop(region: RegionSelection, video: HTMLVideoElement): { x: number; y: number; width: number; height: number } | null {
@@ -854,6 +906,8 @@ function clearDirectTimers(session: DirectRecordingSession): void {
 
 async function finalizeDirectRecording(session: DirectRecordingSession): Promise<void> {
   clearDirectTimers(session);
+  session.sourceChangeCleanup?.();
+  session.sourceChangeCleanup = undefined;
   session.sourceStream.getTracks().forEach((track) => track.stop());
   session.outputStream.getTracks().forEach((track) => track.stop());
   session.canvas.remove();
@@ -880,6 +934,30 @@ async function finalizeDirectRecording(session: DirectRecordingSession): Promise
   } catch (error) {
     session.rejectFinish(error instanceof Error ? error : new Error("녹화 결과를 저장하지 못했습니다."));
   }
+}
+
+function stopDirectRecordingAfterSourceChange(session: DirectRecordingSession): void {
+  if (directSession !== session || session.stopRequested) {
+    return;
+  }
+
+  session.stopRequested = true;
+  requestDirectPartStop(session, false);
+}
+
+function watchDirectRecordingSource(session: DirectRecordingSession): void {
+  const stop = () => stopDirectRecordingAfterSourceChange(session);
+  const sourceTracks = session.sourceStream.getTracks();
+  session.video.addEventListener("ended", stop);
+  session.video.addEventListener("loadstart", stop);
+  session.video.addEventListener("emptied", stop);
+  sourceTracks.forEach((track) => track.addEventListener("ended", stop));
+  session.sourceChangeCleanup = () => {
+    session.video.removeEventListener("ended", stop);
+    session.video.removeEventListener("loadstart", stop);
+    session.video.removeEventListener("emptied", stop);
+    sourceTracks.forEach((track) => track.removeEventListener("ended", stop));
+  };
 }
 
 function requestDirectPartStop(session: DirectRecordingSession, continueAfterStop: boolean): void {
@@ -1030,9 +1108,12 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
   const mime = selectDirectMimeType(command.settings);
 
   const drawFrame = () => {
-    context.drawImage(video, crop.x, crop.y, crop.width, crop.height, 0, 0, output.width, output.height);
+    const nextCrop = computeDirectCrop(resolveRegionToViewport(command.region), video);
+    if (nextCrop) {
+      session.crop = nextCrop;
+    }
+    context.drawImage(video, session.crop.x, session.crop.y, session.crop.width, session.crop.height, 0, 0, output.width, output.height);
   };
-  drawFrame();
 
   let resolveFinish: () => void = () => {};
   let rejectFinish: (error: Error) => void = () => {};
@@ -1073,7 +1154,9 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
   };
 
   directSession = session;
+  drawFrame();
   await startDirectPart(session);
+  watchDirectRecordingSource(session);
   return { ok: true };
 }
 
@@ -1100,6 +1183,7 @@ function stopDirectRecordingForUnload(): void {
 
 function showSelectionBorder(region: RegionSelection | null): void {
   ensureStyle();
+  stopRegionLayoutWatch();
   removeBorderHandlers?.();
   removeBorderHandlers = null;
   currentBorder?.remove();
@@ -1132,11 +1216,56 @@ function showSelectionBorder(region: RegionSelection | null): void {
   attachBorderControls(border);
   document.body.appendChild(border);
   currentBorder = border;
+  startRegionLayoutWatch(border);
+}
+
+function getVideoLayoutKey(): string {
+  const rect = getVideoRenderedViewportRect();
+  return rect ? `${Math.round(rect.left)}:${Math.round(rect.top)}:${Math.round(rect.width)}:${Math.round(rect.height)}` : "";
+}
+
+function stopRegionLayoutWatch(): void {
+  if (regionLayoutTimerId !== null) {
+    window.clearInterval(regionLayoutTimerId);
+    regionLayoutTimerId = null;
+  }
+  lastVideoLayoutKey = "";
+}
+
+function startRegionLayoutWatch(border: HTMLDivElement): void {
+  lastVideoLayoutKey = getVideoLayoutKey();
+  regionLayoutTimerId = window.setInterval(() => {
+    if (!currentRegion || !document.body.contains(border)) {
+      stopRegionLayoutWatch();
+      return;
+    }
+
+    const nextKey = getVideoLayoutKey();
+    if (nextKey === lastVideoLayoutKey) {
+      return;
+    }
+
+    lastVideoLayoutKey = nextKey;
+    applyBorderGeometry(border, currentRegion);
+    const stack = document.getElementById(SCREENSHOT_STACK_ID);
+    if (stack) {
+      positionScreenshotStack(stack);
+    }
+  }, 300);
 }
 
 function applyBorderGeometry(border: HTMLDivElement, region: RegionSelection): void {
-  const bounds = getVideoSelectionRect();
-  const displayRegion = bounds ? clampRegionToRect(region, bounds) : region;
+  const displayRegion = resolveRegionToViewport(region);
+  const visibleLeft = Math.max(displayRegion.x, 0);
+  const visibleTop = Math.max(displayRegion.y, 0);
+  const visibleRight = Math.min(displayRegion.x + displayRegion.width, window.innerWidth);
+  const visibleBottom = Math.min(displayRegion.y + displayRegion.height, window.innerHeight);
+  if (visibleRight <= visibleLeft || visibleBottom <= visibleTop) {
+    border.style.display = "none";
+    return;
+  }
+
+  border.style.display = "";
   const left = clamp(displayRegion.x, 0, Math.max(0, window.innerWidth - 1));
   const top = clamp(displayRegion.y, 0, Math.max(0, window.innerHeight - 1));
   const width = Math.min(displayRegion.width, Math.max(1, window.innerWidth - left));
@@ -1193,18 +1322,50 @@ function attachBorderControls(border: HTMLDivElement): void {
       return;
     }
 
+    if (type === "START_RECORDING") {
+      currentRecordingState = { status: "recording", startedAt: Date.now() };
+      updateRecordButton();
+    }
+
+    const previousRecordingState = currentRecordingState;
+    if (type === "STOP_RECORDING") {
+      currentRecordingState = { status: "idle" };
+      updateRecordButton();
+    }
+
     try {
       chrome.runtime.sendMessage({ type }, (response?: MessageResponse) => {
         if (chrome.runtime.lastError) {
+          if (type === "START_RECORDING") {
+            currentRecordingState = { status: "idle" };
+            updateRecordButton();
+          } else if (type === "STOP_RECORDING") {
+            currentRecordingState = previousRecordingState;
+            updateRecordButton();
+          }
           window.alert(chrome.runtime.lastError.message);
           return;
         }
 
         if (response && !response.ok) {
+          if (type === "START_RECORDING") {
+            currentRecordingState = { status: "idle" };
+            updateRecordButton();
+          } else if (type === "STOP_RECORDING") {
+            currentRecordingState = previousRecordingState;
+            updateRecordButton();
+          }
           window.alert(response.error);
         }
       });
     } catch {
+      if (type === "START_RECORDING") {
+        currentRecordingState = { status: "idle" };
+        updateRecordButton();
+      } else if (type === "STOP_RECORDING") {
+        currentRecordingState = previousRecordingState;
+        updateRecordButton();
+      }
       window.alert("확장 프로그램이 새로고침되었습니다. 페이지를 새로고침한 뒤 다시 시도하세요.");
     }
   };
@@ -1227,10 +1388,8 @@ function attachBorderControls(border: HTMLDivElement): void {
     cleanupCallbacks.push(() => screenshotButton.removeEventListener("click", onScreenshot));
   }
 
-  if (currentRecordingState.status === "recording") {
-    const timerId = window.setInterval(updateRecordButton, 1000);
-    cleanupCallbacks.push(() => window.clearInterval(timerId));
-  }
+  const timerId = window.setInterval(updateRecordButton, 1000);
+  cleanupCallbacks.push(() => window.clearInterval(timerId));
 
   const onClear = (event: MouseEvent) => {
     event.preventDefault();
@@ -1260,29 +1419,21 @@ function attachBorderControls(border: HTMLDivElement): void {
 
     const startX = event.clientX;
     const startY = event.clientY;
-    const startLeft = currentRegion.x;
-    const startTop = currentRegion.y;
+    const startRegion = resolveRegionToViewport(currentRegion);
+    const startLeft = startRegion.x;
+    const startTop = startRegion.y;
     const bounds = getVideoSelectionRect();
     if (!bounds) {
       return;
     }
-    const width = Math.min(currentRegion.width, bounds.width);
-    const height = Math.min(currentRegion.height, bounds.height);
+    const width = Math.min(startRegion.width, bounds.width);
+    const height = Math.min(startRegion.height, bounds.height);
 
     const onMove = (moveEvent: PointerEvent) => {
       const left = clamp(startLeft + moveEvent.clientX - startX, bounds.left, bounds.right - width);
       const top = clamp(startTop + moveEvent.clientY - startY, bounds.top, bounds.bottom - height);
 
-      currentRegion = {
-        x: left,
-        y: top,
-        width,
-        height,
-        viewportWidth: window.innerWidth,
-        viewportHeight: window.innerHeight,
-        devicePixelRatio: window.devicePixelRatio || 1,
-        selectedAt: Date.now(),
-      };
+      currentRegion = buildRegionSelection(left, top, width, height);
       applyBorderGeometry(border, currentRegion);
     };
 
@@ -1316,10 +1467,11 @@ function attachBorderControls(border: HTMLDivElement): void {
 
     const startX = event.clientX;
     const startY = event.clientY;
-    const startLeft = currentRegion.x;
-    const startTop = currentRegion.y;
-    const startRight = currentRegion.x + currentRegion.width;
-    const startBottom = currentRegion.y + currentRegion.height;
+    const startRegion = resolveRegionToViewport(currentRegion);
+    const startLeft = startRegion.x;
+    const startTop = startRegion.y;
+    const startRight = startRegion.x + startRegion.width;
+    const startBottom = startRegion.y + startRegion.height;
     const bounds = getVideoSelectionRect();
     if (!bounds) {
       return;
@@ -1348,16 +1500,7 @@ function attachBorderControls(border: HTMLDivElement): void {
         bottom = clamp(startBottom + dy, top + minHeight, bounds.bottom);
       }
 
-      currentRegion = {
-        x: left,
-        y: top,
-        width: right - left,
-        height: bottom - top,
-        viewportWidth: window.innerWidth,
-        viewportHeight: window.innerHeight,
-        devicePixelRatio: window.devicePixelRatio || 1,
-        selectedAt: Date.now(),
-      };
+      currentRegion = buildRegionSelection(left, top, right - left, bottom - top);
       applyBorderGeometry(border, currentRegion);
     };
 
@@ -1423,12 +1566,26 @@ function normalizeRegion(raw: unknown): RegionSelection | null {
   if (fields.some((item) => !Number.isFinite(Number(item)))) {
     return null;
   }
+  const relative = value.videoRelative;
+  const videoRelative =
+    relative &&
+    [relative.x, relative.y, relative.width, relative.height].every((item) => Number.isFinite(Number(item))) &&
+    Number(relative.width) > 0 &&
+    Number(relative.height) > 0
+      ? {
+          x: Number(relative.x),
+          y: Number(relative.y),
+          width: Number(relative.width),
+          height: Number(relative.height),
+        }
+      : undefined;
 
   return {
     x: Number(value.x),
     y: Number(value.y),
     width: Number(value.width),
     height: Number(value.height),
+    ...(videoRelative ? { videoRelative } : {}),
     viewportWidth: Math.max(1, Number(value.viewportWidth)),
     viewportHeight: Math.max(1, Number(value.viewportHeight)),
     devicePixelRatio: Math.max(0.1, Number(value.devicePixelRatio)),
@@ -1542,7 +1699,7 @@ function cancelSelection(message?: string): void {
 
 async function commitSelection(region: RegionSelection): Promise<void> {
   const bounds = getVideoSelectionRect();
-  const nextRegion = bounds ? clampRegionToRect(region, bounds) : region;
+  const nextRegion = bounds ? clampRegionToRect(region, bounds) : buildRegionSelection(region.x, region.y, region.width, region.height);
   const saved = await saveRegion(nextRegion);
   if (!saved) {
     setOverlayError("확장 프로그램이 새로고침되었습니다. 페이지를 새로고침한 뒤 다시 시도하세요.");
@@ -1555,6 +1712,10 @@ async function commitSelection(region: RegionSelection): Promise<void> {
 }
 
 function getCurrentRegionGeometry(): RegionSelection | null {
+  if (currentRegion?.videoRelative) {
+    return resolveRegionToViewport(currentRegion);
+  }
+
   const sourceRect = currentBorder?.getBoundingClientRect();
   if (!sourceRect && !currentRegion) {
     return null;
@@ -1575,16 +1736,7 @@ function getCurrentRegionGeometry(): RegionSelection | null {
   const width = clamp(right, x + 1, limitRight) - x;
   const height = clamp(bottom, y + 1, limitBottom) - y;
 
-  return {
-    x,
-    y,
-    width,
-    height,
-    viewportWidth: window.innerWidth,
-    viewportHeight: window.innerHeight,
-    devicePixelRatio: window.devicePixelRatio || 1,
-    selectedAt: Date.now(),
-  };
+  return buildRegionSelection(x, y, width, height);
 }
 
 function startSelection(): void {
@@ -1675,18 +1827,7 @@ function startSelection(): void {
       return;
     }
 
-    const region: RegionSelection = {
-      x,
-      y,
-      width,
-      height,
-      viewportWidth: window.innerWidth,
-      viewportHeight: window.innerHeight,
-      devicePixelRatio: window.devicePixelRatio || 1,
-      selectedAt: Date.now(),
-    };
-
-    await commitSelection(region);
+    await commitSelection(buildRegionSelection(x, y, width, height));
   };
 
   const onKeyDown = (event: KeyboardEvent) => {
@@ -2129,6 +2270,12 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 window.addEventListener("resize", () => {
   void refreshBorder();
 });
+
+window.addEventListener("scroll", () => {
+  if (currentBorder && currentRegion) {
+    applyBorderGeometry(currentBorder, currentRegion);
+  }
+}, true);
 
 window.addEventListener("pagehide", () => {
   stopDirectRecordingForUnload();
