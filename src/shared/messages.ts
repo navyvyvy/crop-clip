@@ -1,4 +1,4 @@
-import type { DownloadFormat, RecordingRecord, RegionSelection, Settings } from "./types.js";
+import type { RecordingRecord, RegionSelection, Settings } from "./types.js";
 
 export type PopupCommand =
   | { type: "SELECT_REGION" }
@@ -37,33 +37,8 @@ export type StoreRecordingPartMessage = {
   part: import("./types.js").RecordingPartRecord;
 };
 
-export type PlayerStatusResponse = {
-  ok: true;
-  data: {
-    available: boolean;
-    muted: boolean;
-    volume: number;
-    paused: boolean;
-    hasAudioTracks: boolean;
-    label: string;
-  };
-} | {
-  ok: false;
-  error: string;
-};
-
-export type RuntimeMessage =
-  | PopupCommand
-  | ContentCommand
-  | RecordingFinishedMessage
-  | RecordingErrorMessage
-  | StoreRecordingPartMessage
-  | PlayerStatusRequest
-  | DeletionScheduleRequest
-  | DeletionCancelRequest;
-
-export type OkResponse<T = undefined> = { ok: true; data?: T };
-export type ErrorResponse = { ok: false; error: string };
+type OkResponse<T = undefined> = { ok: true; data?: T };
+type ErrorResponse = { ok: false; error: string };
 export type MessageResponse<T = undefined> = OkResponse<T> | ErrorResponse;
 
 export function ok<T = undefined>(data?: T): MessageResponse<T> {
@@ -72,8 +47,4 @@ export function ok<T = undefined>(data?: T): MessageResponse<T> {
 
 export function fail(error: string): MessageResponse {
   return { ok: false, error };
-}
-
-export function isDownloadFormat(value: unknown): value is DownloadFormat {
-  return value === "auto" || value === "webm" || value === "mp4";
 }

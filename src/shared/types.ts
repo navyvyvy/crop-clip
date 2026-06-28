@@ -82,6 +82,8 @@ export const BITRATE_PRESET_VALUES: Record<Exclude<BitratePreset, "custom">, num
   high: 4_000_000,
   veryHigh: 6_000_000,
 };
+export const MIN_VIDEO_BITS_PER_SECOND = 100_000;
+export const MAX_VIDEO_BITS_PER_SECOND = 20_000_000;
 
 export const DEFAULT_SETTINGS: Settings = {
   outputFormat: "webm",
@@ -100,7 +102,3 @@ export const DEFAULT_SETTINGS: Settings = {
 export const DEFAULT_RECORDING_STATE: RecordingState = {
   status: "idle",
 };
-
-export function isTargetHeight(value: unknown): value is TargetHeight {
-  return value === "source" || value === 480 || value === 720 || value === 1080;
-}

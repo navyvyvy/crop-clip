@@ -2,6 +2,8 @@ import {
   BITRATE_PRESET_VALUES,
   DEFAULT_RECORDING_STATE,
   DEFAULT_SETTINGS,
+  MAX_VIDEO_BITS_PER_SECOND,
+  MIN_VIDEO_BITS_PER_SECOND,
   type AppState,
   type BitratePreset,
   type RecordingState,
@@ -46,9 +48,9 @@ export function normalizeSettings(raw: Partial<Settings> | undefined): Settings 
     outputFormat,
     bitratePreset,
     videoBitsPerSecond: bitratePreset === "custom"
-      ? clamp(Math.round(coerceNumber(rawVideoBitsPerSecond, presetValue)), 100_000, 20_000_000)
+      ? clamp(Math.round(coerceNumber(rawVideoBitsPerSecond, presetValue)), MIN_VIDEO_BITS_PER_SECOND, MAX_VIDEO_BITS_PER_SECOND)
       : presetValue,
-    customVideoBitsPerSecond: clamp(Math.round(coerceNumber(rawCustomVideoBitsPerSecond ?? presetValue, presetValue)), 100_000, 20_000_000),
+    customVideoBitsPerSecond: clamp(Math.round(coerceNumber(rawCustomVideoBitsPerSecond ?? presetValue, presetValue)), MIN_VIDEO_BITS_PER_SECOND, MAX_VIDEO_BITS_PER_SECOND),
     enable60fps: Boolean(raw?.enable60fps),
     targetHeight: DEFAULT_SETTINGS.targetHeight,
     includeAudio: raw?.includeAudio ?? DEFAULT_SETTINGS.includeAudio,
@@ -119,10 +121,6 @@ export async function loadRecordingState(): Promise<RecordingState> {
 
 export async function saveSettings(settings: Settings): Promise<void> {
   await chrome.storage.local.set({ [STORAGE_KEYS.settings]: normalizeSettings(settings) });
-}
-
-export async function saveRegion(region: RegionSelection | null): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEYS.region]: normalizeRegion(region) });
 }
 
 export async function saveRecordingState(recordingState: RecordingState): Promise<void> {

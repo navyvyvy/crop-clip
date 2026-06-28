@@ -1,4 +1,4 @@
-import { BITRATE_PRESET_VALUES, DEFAULT_SETTINGS, type AppState, type DownloadFormat, type Settings } from "../shared/types.js";
+import { BITRATE_PRESET_VALUES, DEFAULT_SETTINGS, MAX_VIDEO_BITS_PER_SECOND, MIN_VIDEO_BITS_PER_SECOND, type AppState, type DownloadFormat, type Settings } from "../shared/types.js";
 import { loadAppState, normalizeRecordingState, normalizeRegion, normalizeSettings, saveSettings } from "../shared/storage.js";
 import type { MessageResponse } from "../shared/messages.js";
 
@@ -15,6 +15,8 @@ const elements = {
 };
 
 elements.versionBadge.textContent = `v${chrome.runtime.getManifest().version}`;
+elements.customVideoBitrateInput.min = String(MIN_VIDEO_BITS_PER_SECOND);
+elements.customVideoBitrateInput.max = String(MAX_VIDEO_BITS_PER_SECOND);
 
 let appState: AppState = {
   settings: DEFAULT_SETTINGS,

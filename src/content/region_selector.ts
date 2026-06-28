@@ -9,12 +9,14 @@
 
 const OVERLAY_ID = "crop-clip-overlay";
 const BORDER_ID = "crop-clip-border";
+const SCREENSHOT_STACK_ID = "crop-clip-screenshot-stack";
 const STYLE_ID = "crop-clip-style";
 const MIN_WIDTH = 50;
 const MIN_HEIGHT = 50;
 const BORDER_WIDTH = 2;
 const RESIZE_HIT_SIZE = 22;
 const CROP_ACCENT = "#5bd6bf";
+const MAX_SCREENSHOT_PREVIEWS = 8;
 const MAX_PART_BYTES = 40 * 1024 * 1024;
 const MAX_PART_SECONDS = 45;
 const CHZZK_TOOL_BUTTON_ID = "crop-clip-chzzk-tool-button";
@@ -289,6 +291,13 @@ function ensureStyle(): void {
       border-color: rgba(238, 244, 251, 0.54);
     }
 
+    #${BORDER_ID} .region-tool svg {
+      display: block;
+      width: 14px;
+      height: 14px;
+      pointer-events: none;
+    }
+
     #${BORDER_ID} .region-tool:disabled {
       opacity: 0.42;
       cursor: not-allowed;
@@ -338,6 +347,65 @@ function ensureStyle(): void {
 
     #${BORDER_ID} .clear-region {
       color: rgba(255, 215, 215, 0.96);
+    }
+
+    #${SCREENSHOT_STACK_ID} {
+      position: fixed;
+      z-index: 2147483645;
+      width: min(240px, 42vw);
+      pointer-events: auto;
+    }
+
+    #${SCREENSHOT_STACK_ID} .screenshot-card {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 100%;
+      overflow: hidden;
+      border: 1px solid rgba(91, 214, 191, 0.5);
+      border-radius: 8px;
+      background: rgba(5, 10, 16, 0.9);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.38);
+    }
+
+    #${SCREENSHOT_STACK_ID} img {
+      display: block;
+      width: 100%;
+      max-height: 150px;
+      object-fit: contain;
+      background: #000;
+    }
+
+    #${SCREENSHOT_STACK_ID} .screenshot-actions {
+      position: absolute;
+      top: 4px;
+      right: 4px;
+      display: flex;
+      gap: 4px;
+    }
+
+    #${SCREENSHOT_STACK_ID} .screenshot-action {
+      width: 22px;
+      height: 22px;
+      border: 1px solid rgba(238, 244, 251, 0.52);
+      border-radius: 7px;
+      background: rgba(6, 13, 20, 0.84);
+      color: #f4fbff;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+    }
+
+    #${SCREENSHOT_STACK_ID} .screenshot-action:hover {
+      background: rgba(15, 26, 36, 0.94);
+    }
+
+    #${SCREENSHOT_STACK_ID} .screenshot-action svg {
+      width: 14px;
+      height: 14px;
+      pointer-events: none;
     }
 
     .crop-clip-pzp-button {
@@ -587,6 +655,144 @@ function buildBaseName(): string {
   const date = new Date();
   const pad = (value: number) => String(value).padStart(2, "0");
   return `cropClip_${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}_${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+}
+
+function getCameraIconSvg(): string {
+  return `
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+      <path d="M7.5 7.5L9 5.5H15L16.5 7.5H19C20.1 7.5 21 8.4 21 9.5V18C21 19.1 20.1 20 19 20H5C3.9 20 3 19.1 3 18V9.5C3 8.4 3.9 7.5 5 7.5H7.5Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+      <circle cx="12" cy="13.5" r="3.2" stroke="currentColor" stroke-width="2"/>
+    </svg>
+  `;
+}
+
+function getDownloadIconSvg(): string {
+  return `
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+      <path d="M12 4V15M12 15L7.5 10.5M12 15L16.5 10.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M5 19H19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+  `;
+}
+
+function blobFromCanvas(canvas: HTMLCanvasElement): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) {
+        resolve(blob);
+        return;
+      }
+
+      reject(new Error("스크린샷 이미지를 만들지 못했습니다."));
+    }, "image/png");
+  });
+}
+
+function positionScreenshotStack(stack: HTMLElement): void {
+  const rect = getVideoSelectionRect();
+  const left = rect ? rect.left + 10 : 10;
+  const top = rect ? rect.top + 10 : 10;
+  stack.style.left = `${clamp(left, 8, Math.max(8, window.innerWidth - 80))}px`;
+  stack.style.top = `${clamp(top, 8, Math.max(8, window.innerHeight - 80))}px`;
+}
+
+function getScreenshotStack(): HTMLDivElement {
+  let stack = document.getElementById(SCREENSHOT_STACK_ID) as HTMLDivElement | null;
+  if (!stack) {
+    stack = document.createElement("div");
+    stack.id = SCREENSHOT_STACK_ID;
+    document.body.appendChild(stack);
+  }
+
+  positionScreenshotStack(stack);
+  return stack;
+}
+
+function removeScreenshotCard(card: HTMLElement): void {
+  if (card.dataset.objectUrl) {
+    URL.revokeObjectURL(card.dataset.objectUrl);
+  }
+  const stack = card.parentElement;
+  card.remove();
+  if (stack?.childElementCount === 0) {
+    stack.remove();
+  }
+}
+
+function showScreenshotPreview(blob: Blob): void {
+  const stack = getScreenshotStack();
+  const objectUrl = URL.createObjectURL(blob);
+  const filename = `${buildBaseName()}_screenshot.png`;
+  const card = document.createElement("div");
+  card.className = "screenshot-card";
+  card.dataset.objectUrl = objectUrl;
+  card.style.zIndex = String(Math.max(0, ...Array.from(stack.children, (item) => Number(getComputedStyle(item).zIndex) || 0)) + 1);
+  card.innerHTML = `
+    <img alt="스크린샷 미리보기" src="${objectUrl}">
+    <div class="screenshot-actions">
+      <button class="screenshot-action save" type="button" aria-label="스크린샷 저장" title="스크린샷 저장">${getDownloadIconSvg()}</button>
+      <button class="screenshot-action close" type="button" aria-label="스크린샷 닫기" title="스크린샷 닫기">×</button>
+    </div>
+  `;
+
+  card.querySelector<HTMLButtonElement>(".save")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = filename;
+    link.click();
+  });
+  card.querySelector<HTMLButtonElement>(".close")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    removeScreenshotCard(card);
+  });
+
+  stack.prepend(card);
+  while (stack.childElementCount > MAX_SCREENSHOT_PREVIEWS) {
+    const oldest = stack.lastElementChild;
+    if (!(oldest instanceof HTMLElement)) {
+      break;
+    }
+    removeScreenshotCard(oldest);
+  }
+}
+
+async function captureRegionScreenshot(): Promise<void> {
+  const region = getCurrentRegionGeometry();
+  const video = findPrimaryVideoElement();
+  if (!region || !video) {
+    window.alert("스크린샷을 찍을 영역을 찾지 못했습니다.");
+    return;
+  }
+
+  if (video.videoWidth <= 0 || video.videoHeight <= 0) {
+    window.alert("비디오 크기를 확인할 수 없습니다.");
+    return;
+  }
+
+  const crop = computeDirectCrop(region, video);
+  if (!crop) {
+    window.alert("선택 영역이 비디오 화면과 겹치지 않습니다.");
+    return;
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = crop.width;
+  canvas.height = crop.height;
+  const context = canvas.getContext("2d", { alpha: false });
+  if (!context) {
+    window.alert("스크린샷 캔버스를 만들지 못했습니다.");
+    return;
+  }
+
+  try {
+    context.drawImage(video, crop.x, crop.y, crop.width, crop.height, 0, 0, crop.width, crop.height);
+    showScreenshotPreview(await blobFromCanvas(canvas));
+  } catch {
+    window.alert("이 영상은 브라우저 보안 제한으로 스크린샷 저장을 지원하지 않습니다.");
+  }
 }
 
 function buildDirectFilename(session: DirectRecordingSession): string {
@@ -909,6 +1115,7 @@ function showSelectionBorder(region: RegionSelection | null): void {
     <div class="region-toolbar">
       <span class="record-time" hidden>00:00</span>
       <button class="region-tool record-region" type="button" aria-label="녹화 시작" title="녹화 시작">⏺</button>
+      <button class="region-tool screenshot-region" type="button" aria-label="스크린샷" title="스크린샷">${getCameraIconSvg()}</button>
       <button class="region-tool move-region" type="button" aria-label="영역 이동" title="영역 이동">✥</button>
       <button class="region-tool clear-region" type="button" aria-label="영역 해제" title="영역 해제">×</button>
     </div>
@@ -944,6 +1151,7 @@ function attachBorderControls(border: HTMLDivElement): void {
   const cleanupCallbacks: Array<() => void> = [];
   const recordTime = border.querySelector<HTMLElement>(".record-time");
   const recordButton = border.querySelector<HTMLButtonElement>(".record-region");
+  const screenshotButton = border.querySelector<HTMLButtonElement>(".screenshot-region");
   const clearButton = border.querySelector<HTMLButtonElement>(".clear-region");
   const moveButton = border.querySelector<HTMLButtonElement>(".move-region");
 
@@ -1005,6 +1213,18 @@ function attachBorderControls(border: HTMLDivElement): void {
   recordButton?.addEventListener("click", onRecord);
   if (recordButton) {
     cleanupCallbacks.push(() => recordButton.removeEventListener("click", onRecord));
+  }
+
+  const onScreenshot = (event: MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    void captureRegionScreenshot();
+  };
+
+  screenshotButton?.addEventListener("click", onScreenshot);
+  if (screenshotButton) {
+    cleanupCallbacks.push(() => screenshotButton.removeEventListener("click", onScreenshot));
   }
 
   if (currentRecordingState.status === "recording") {

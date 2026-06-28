@@ -193,17 +193,20 @@ async function convertPartWithFfmpeg(part: LoadedPart, outputFormat: ConvertForm
   const inputName = `input.${part.extension}`;
   const outputName = `output.${outputFormat}`;
   await clearFfmpegOutputs(ffmpeg);
-  await ffmpeg.writeFile(inputName, await getSourceBytes(getPartSource(part)));
-  const args = outputFormat === "gif"
+  try {
+    await ffmpeg.writeFile(inputName, await getSourceBytes(getPartSource(part)));
+    const args = outputFormat === "gif"
       ? ["-i", inputName, "-an", outputName]
       : ["-i", inputName, "-c", "copy", outputName];
-  const code = await ffmpeg.exec(args);
-  if (code !== 0) {
-    throw new Error("빠른 변환에 실패했습니다.");
+    const code = await ffmpeg.exec(args);
+    if (code !== 0) {
+      throw new Error("빠른 변환에 실패했습니다.");
+    }
+    const blob = await readFfmpegBlob(ffmpeg, outputName, getConvertedMimeType(outputFormat));
+    return { source: blob, filename: `${getFilenameBase(part.filename)}.${outputFormat}` };
+  } finally {
+    await clearFfmpegOutputs(ffmpeg);
   }
-  const blob = await readFfmpegBlob(ffmpeg, outputName, getConvertedMimeType(outputFormat));
-  await clearFfmpegOutputs(ffmpeg);
-  return { source: blob, filename: `${getFilenameBase(part.filename)}.${outputFormat}` };
 }
 
 function getFilenameBase(filename: string): string {
@@ -445,24 +448,31 @@ async function recordVideoRange(video: HTMLVideoElement, startSeconds: number, e
     };
   });
 
-  recorder.start(1_000);
-  await video.play();
-  await new Promise<void>((resolve) => {
-    const check = () => {
-      if (video.currentTime >= endSeconds || video.ended) {
-        video.removeEventListener("timeupdate", check);
-        resolve();
-      }
-    };
-    video.addEventListener("timeupdate", check);
-    window.setTimeout(check, Math.max(250, (endSeconds - startSeconds) * 1000 + 500));
-  });
-  video.pause();
-  if (recorder.state !== "inactive") {
-    recorder.stop();
+  try {
+    recorder.start(1_000);
+    await video.play();
+    await new Promise<void>((resolve) => {
+      const check = () => {
+        if (video.currentTime >= endSeconds || video.ended) {
+          video.removeEventListener("timeupdate", check);
+          resolve();
+        }
+      };
+      video.addEventListener("timeupdate", check);
+      window.setTimeout(check, Math.max(250, (endSeconds - startSeconds) * 1000 + 500));
+    });
+    video.pause();
+    if (recorder.state !== "inactive") {
+      recorder.stop();
+    }
+    return await stopped;
+  } finally {
+    video.pause();
+    if (recorder.state !== "inactive") {
+      recorder.stop();
+    }
+    stream.getTracks().forEach((track) => track.stop());
   }
-  stream.getTracks().forEach((track) => track.stop());
-  return await stopped;
 }
 
 async function createDurationSplitWithRecorder(part: LoadedPart, segmentSeconds: number, outputFormat: OutputFormat): Promise<SplitSegment[]> {
@@ -514,39 +524,42 @@ async function createDurationSplitWithFfmpeg(part: LoadedPart, segmentSeconds: n
   const ffmpeg = await loadFfmpeg();
   const inputName = `input.${part.extension}`;
   await clearFfmpegOutputs(ffmpeg);
-  await ffmpeg.writeFile(inputName, await getSourceBytes(getPartSource(part)));
-  const pattern = `output%03d.${outputFormat}`;
-  const code = await ffmpeg.exec([
-    "-i", inputName,
-    "-map", "0",
-    "-f", "segment",
-    "-segment_time", String(segmentSeconds),
-    "-c", "copy",
-    "-reset_timestamps", "1",
-    pattern,
-  ]);
-  if (code !== 0) {
-    throw new Error("빠른 파일 나누기에 실패했습니다.");
-  }
+  try {
+    await ffmpeg.writeFile(inputName, await getSourceBytes(getPartSource(part)));
+    const pattern = `output%03d.${outputFormat}`;
+    const code = await ffmpeg.exec([
+      "-i", inputName,
+      "-map", "0",
+      "-f", "segment",
+      "-segment_time", String(segmentSeconds),
+      "-c", "copy",
+      "-reset_timestamps", "1",
+      pattern,
+    ]);
+    if (code !== 0) {
+      throw new Error("빠른 파일 나누기에 실패했습니다.");
+    }
 
-  const files = (await ffmpeg.listDir("."))
-    .filter((file) => !file.isDir && file.name.startsWith("output") && file.name.endsWith(`.${outputFormat}`))
-    .sort((a, b) => a.name.localeCompare(b.name));
-  const segments: SplitSegment[] = [];
-  for (let index = 0; index < files.length; index += 1) {
-    const start = index * segmentSeconds;
-    const end = Math.min(duration, start + segmentSeconds);
-    segments.push({
-      blob: await readFfmpegBlob(ffmpeg, files[index].name, `video/${outputFormat}`),
-      filename: `${getFilenameBase(part.filename)}_split_${String(index + 1).padStart(3, "0")}.${outputFormat}`,
-      index: index + 1,
-      startSeconds: start,
-      endSeconds: end,
-    });
-    setSplitProgress(index + 1, files.length);
+    const files = (await ffmpeg.listDir("."))
+      .filter((file) => !file.isDir && file.name.startsWith("output") && file.name.endsWith(`.${outputFormat}`))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    const segments: SplitSegment[] = [];
+    for (let index = 0; index < files.length; index += 1) {
+      const start = index * segmentSeconds;
+      const end = Math.min(duration, start + segmentSeconds);
+      segments.push({
+        blob: await readFfmpegBlob(ffmpeg, files[index].name, `video/${outputFormat}`),
+        filename: `${getFilenameBase(part.filename)}_split_${String(index + 1).padStart(3, "0")}.${outputFormat}`,
+        index: index + 1,
+        startSeconds: start,
+        endSeconds: end,
+      });
+      setSplitProgress(index + 1, files.length);
+    }
+    return segments;
+  } finally {
+    await clearFfmpegOutputs(ffmpeg);
   }
-  await clearFfmpegOutputs(ffmpeg);
-  return segments;
 }
 
 async function createDurationSplit(part: LoadedPart, segmentSeconds: number, outputFormat: OutputFormat): Promise<SplitSegment[]> {
