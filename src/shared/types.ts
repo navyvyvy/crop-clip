@@ -1,11 +1,13 @@
 export type RecordingFormat = "webm" | "mp4";
 export type DownloadFormat = RecordingFormat | "auto";
 export type RecordingStatus = "idle" | "recording" | "completed" | "error";
+export type RecordingMode = "region" | "full";
 
 export interface Settings {
   outputFormat: RecordingFormat;
   videoBitsPerSecond: number;
   enable60fps: boolean;
+  enableFullRecordButton: boolean;
 }
 
 export interface RegionSelection {
@@ -32,6 +34,7 @@ export interface RecordingState {
   startedAt?: number;
   endedAt?: number;
   lastError?: string;
+  mode?: RecordingMode;
   requestedOutputFormat?: DownloadFormat;
   actualOutputFormat?: RecordingFormat;
   actualMimeType?: string;
@@ -82,6 +85,7 @@ export const DEFAULT_SETTINGS: Settings = {
   outputFormat: "webm",
   videoBitsPerSecond: DEFAULT_VIDEO_BITS_PER_SECOND,
   enable60fps: false,
+  enableFullRecordButton: false,
 };
 
 export const DEFAULT_RECORDING_STATE: RecordingState = {

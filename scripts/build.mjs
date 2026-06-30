@@ -8,20 +8,7 @@ const root = process.cwd();
 const srcDir = path.join(root, "src");
 const distDir = path.join(root, "dist");
 const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
-let buildVersion = process.env.BUILD_VERSION?.trim() || "";
-
-if (!buildVersion) {
-  try {
-    const taggedRef = execFileSync(
-      "git",
-      ["describe", "--tags", "--exact-match", "--match", "v*"],
-      { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    ).trim();
-    buildVersion = taggedRef.startsWith("v") ? taggedRef.slice(1) : taggedRef;
-  } catch {
-    buildVersion = packageJson.version;
-  }
-}
+const buildVersion = process.env.BUILD_VERSION?.trim() || packageJson.version;
 
 await rm(distDir, { recursive: true, force: true });
 await mkdir(distDir, { recursive: true });

@@ -32,6 +32,7 @@ export function normalizeSettings(raw: Partial<Settings> | undefined): Settings 
     outputFormat,
     videoBitsPerSecond: clamp(Math.round(videoBitsPerSecond), MIN_VIDEO_BITS_PER_SECOND, MAX_VIDEO_BITS_PER_SECOND),
     enable60fps: Boolean(raw?.enable60fps),
+    enableFullRecordButton: Boolean(raw?.enableFullRecordButton),
   };
 }
 
@@ -82,6 +83,7 @@ export function normalizeRecordingState(raw: Partial<RecordingState> | undefined
     startedAt: Number.isFinite(raw?.startedAt as number) ? Number(raw?.startedAt) : undefined,
     endedAt: Number.isFinite(raw?.endedAt as number) ? Number(raw?.endedAt) : undefined,
     lastError: typeof raw?.lastError === "string" ? raw.lastError : undefined,
+    mode: raw?.mode === "region" || raw?.mode === "full" ? raw.mode : undefined,
     requestedOutputFormat: raw?.requestedOutputFormat === "auto" || raw?.requestedOutputFormat === "webm" || raw?.requestedOutputFormat === "mp4" ? raw.requestedOutputFormat : undefined,
     actualOutputFormat: raw?.actualOutputFormat === "webm" || raw?.actualOutputFormat === "mp4" ? raw.actualOutputFormat : undefined,
     actualMimeType: typeof raw?.actualMimeType === "string" ? raw.actualMimeType : undefined,

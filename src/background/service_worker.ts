@@ -146,6 +146,10 @@ async function getCurrentRegionGeometry(tabId: number): Promise<MessageResponse<
   return await sendCommandToContentScript<RegionSelection>(tabId, { type: "GET_REGION_GEOMETRY" });
 }
 
+async function getPlayerRegionGeometry(tabId: number): Promise<MessageResponse<RegionSelection>> {
+  return await sendCommandToContentScript<RegionSelection>(tabId, { type: "GET_PLAYER_REGION_GEOMETRY" });
+}
+
 async function startDirectRecording(tabId: number, recordingId: string, region: RegionSelection, settings: Settings): Promise<MessageResponse> {
   return await sendCommandToContentScript(tabId, {
     type: "START_DIRECT_RECORDING",
@@ -159,7 +163,7 @@ async function stopDirectRecording(tabId: number): Promise<MessageResponse> {
   return await sendCommandToContentScript(tabId, { type: "STOP_DIRECT_RECORDING" });
 }
 
-async function startRecording(): Promise<MessageResponse<{ recordingId: string }>> {
+async function startRecording(fullPlayer = false): Promise<MessageResponse<{ recordingId: string }>> {
   const tab = await getActiveRecordableTab();
   const tabId = tab.id;
   if (typeof tabId !== "number") {
@@ -168,7 +172,7 @@ async function startRecording(): Promise<MessageResponse<{ recordingId: string }
   const state = await loadAppState();
   const storedRegion = state.region;
 
-  if (!storedRegion) {
+  if (!fullPlayer && !storedRegion) {
     return fail("먼저 녹화 영역을 선택하세요.");
   }
 
@@ -184,6 +188,7 @@ async function startRecording(): Promise<MessageResponse<{ recordingId: string }
     recordingId,
     tabId,
     startedAt: Date.now(),
+    mode: fullPlayer ? "full" : "region",
     requestedOutputFormat: settings.outputFormat,
   });
 
@@ -210,9 +215,9 @@ async function startRecording(): Promise<MessageResponse<{ recordingId: string }
       return fail(error);
     }
 
-    const regionResponse = await getCurrentRegionGeometry(tabId);
+    const regionResponse = fullPlayer ? await getPlayerRegionGeometry(tabId) : await getCurrentRegionGeometry(tabId);
     if (!regionResponse.ok || !regionResponse.data) {
-      const error = regionResponse.ok ? "현재 선택된 녹화 영역을 찾지 못했습니다." : regionResponse.error;
+      const error = regionResponse.ok ? "녹화할 비디오 영역을 찾지 못했습니다." : regionResponse.error;
       await patchRecordingState({
         status: "error",
         recordingId,
@@ -345,6 +350,11 @@ chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingFinishedM
 
     if (message.type === "START_RECORDING") {
       sendResponse(await startRecording());
+      return;
+    }
+
+    if (message.type === "START_FULL_RECORDING") {
+      sendResponse(await startRecording(true));
       return;
     }
 

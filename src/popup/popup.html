@@ -21,7 +21,7 @@
         <div class="action-row">
           <button id="select-region-button" class="button secondary" type="button">녹화 영역 선택</button>
           <button id="clear-region-button" class="button secondary" type="button">영역 해제</button>
-          <button id="record-toggle-button" class="button primary" type="button">녹화 시작</button>
+          <button id="record-toggle-button" class="button primary" type="button">영역 녹화</button>
         </div>
 
         <section class="panel">
@@ -31,7 +31,7 @@
                 <span class="setting-title">저장 형식</span>
                 <span class="setting-desc">기본은 WebM입니다.</span>
               </span>
-              <span class="segmented" id="output-format-group">
+              <span class="segmented">
                 <label>
                   <input type="radio" name="output-format" value="webm" />
                   <span>WebM</span>
@@ -61,13 +61,30 @@
                 <span class="setting-title">60fps 녹화</span>
                 <span class="setting-desc">움직임이 많은 화면에 사용합니다.</span>
               </span>
-              <span class="segmented" id="fps-mode-group">
+              <span class="segmented">
                 <label>
                   <input type="radio" name="fps-mode" value="off" />
                   <span>OFF</span>
                 </label>
                 <label>
                   <input type="radio" name="fps-mode" value="on" />
+                  <span>ON</span>
+                </label>
+              </span>
+            </label>
+
+            <label class="setting-row">
+              <span class="setting-copy">
+                <span class="setting-title">전체 녹화 버튼</span>
+                <span class="setting-desc">플레이어 녹화 버튼 표시</span>
+              </span>
+              <span class="segmented">
+                <label>
+                  <input type="radio" name="full-record-mode" value="off" />
+                  <span>OFF</span>
+                </label>
+                <label>
+                  <input type="radio" name="full-record-mode" value="on" />
                   <span>ON</span>
                 </label>
               </span>

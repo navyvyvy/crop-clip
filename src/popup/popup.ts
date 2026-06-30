@@ -10,6 +10,7 @@ const elements = {
   recordToggleButton: document.getElementById("record-toggle-button") as HTMLButtonElement,
   outputFormatInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='output-format']")),
   fpsModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='fps-mode']")),
+  fullRecordModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='full-record-mode']")),
   bitrateDecreaseButton: document.getElementById("bitrate-decrease-button") as HTMLButtonElement,
   bitrateIncreaseButton: document.getElementById("bitrate-increase-button") as HTMLButtonElement,
   customVideoBitrateInput: document.getElementById("custom-video-bitrate-input") as HTMLInputElement,
@@ -100,6 +101,9 @@ function syncPresetUi(settings: Settings): void {
   for (const input of elements.fpsModeInputs) {
     input.checked = input.value === (settings.enable60fps ? "on" : "off");
   }
+  for (const input of elements.fullRecordModeInputs) {
+    input.checked = input.value === (settings.enableFullRecordButton ? "on" : "off");
+  }
   elements.customVideoBitrateInput.value = formatBitrateMbps(settings.videoBitsPerSecond / BITS_PER_MEGABIT);
   showFpsWarning(settings);
 }
@@ -109,7 +113,7 @@ function renderState(): void {
   elements.selectRegionButton.disabled = isRecording || sendingCommand;
   elements.clearRegionButton.disabled = isRecording || sendingCommand || !appState.region;
   elements.recordToggleButton.disabled = sendingCommand;
-  elements.recordToggleButton.textContent = isRecording ? "녹화 정지" : "녹화 시작";
+  elements.recordToggleButton.textContent = isRecording ? "녹화 정지" : "영역 녹화";
   elements.recordToggleButton.classList.toggle("primary", false);
   elements.recordToggleButton.classList.toggle("secondary", true);
   elements.recordToggleButton.classList.toggle("recording", isRecording);
@@ -118,6 +122,7 @@ function renderState(): void {
   const controls = [
     ...elements.outputFormatInputs,
     ...elements.fpsModeInputs,
+    ...elements.fullRecordModeInputs,
     elements.bitrateDecreaseButton,
     elements.bitrateIncreaseButton,
     elements.customVideoBitrateInput,
@@ -157,6 +162,7 @@ async function refreshAppState(): Promise<void> {
 function readSettingsFromUi(): Settings {
   const outputFormat = (elements.outputFormatInputs.find((input) => input.checked)?.value ?? DEFAULT_SETTINGS.outputFormat) as RecordingFormat;
   const enable60fps = elements.fpsModeInputs.find((input) => input.checked)?.value === "on";
+  const enableFullRecordButton = elements.fullRecordModeInputs.find((input) => input.checked)?.value !== "off";
   const fallbackBitrateMbps = (appState.settings.videoBitsPerSecond ?? DEFAULT_SETTINGS.videoBitsPerSecond) / BITS_PER_MEGABIT;
   const videoBitsPerSecond = Math.round(Number(elements.customVideoBitrateInput.value || fallbackBitrateMbps) * BITS_PER_MEGABIT);
 
@@ -164,6 +170,7 @@ function readSettingsFromUi(): Settings {
     outputFormat,
     videoBitsPerSecond,
     enable60fps,
+    enableFullRecordButton,
   });
 }
 
@@ -269,7 +276,7 @@ elements.recordToggleButton.addEventListener("click", () => {
   });
 });
 
-for (const element of [...elements.outputFormatInputs, ...elements.fpsModeInputs]) {
+for (const element of [...elements.outputFormatInputs, ...elements.fpsModeInputs, ...elements.fullRecordModeInputs]) {
   element.addEventListener("change", () => {
     void persistUiSettings();
   });
