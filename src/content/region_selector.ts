@@ -20,6 +20,7 @@ const MAX_SCREENSHOT_PREVIEWS = 8;
 const AUDIO_BITS_PER_SECOND = 128_000;
 const CHZZK_RECORD_BUTTON_ID = "crop-clip-chzzk-record-button";
 const CHZZK_RECORD_TIME_ID = "crop-clip-chzzk-record-time";
+const CHZZK_SCREENSHOT_BUTTON_ID = "crop-clip-chzzk-screenshot-button";
 const CHZZK_TOOL_BUTTON_ID = "crop-clip-chzzk-tool-button";
 const CHZZK_TOOL_BUTTON_CLASS = "pzp-button pzp-pc-setting-button pzp-pc__setting-button pzp-pc-ui-button crop-clip-pzp-button";
 const PLAYER_TOOL_LABEL = "녹화 영역 선택";
@@ -78,6 +79,7 @@ let currentBorder: HTMLDivElement | null = null;
 let currentRegion: RegionSelection | null = null;
 let selectionActive = false;
 let fullRecordButtonEnabled = false;
+let fullScreenshotButtonEnabled = false;
 let removeSelectionHandlers: (() => void) | null = null;
 let removeBorderHandlers: (() => void) | null = null;
 let currentRecordingState: LocalRecordingState = { status: "idle" };
@@ -86,6 +88,7 @@ let chzzkToolObserver: MutationObserver | null = null;
 let chzzkToolSyncFrame: number | null = null;
 let chzzkRecordTimerId: number | null = null;
 let lastRecordPointerActivationAt = 0;
+let lastScreenshotPointerActivationAt = 0;
 let regionLayoutTimerId: number | null = null;
 let lastVideoLayoutKey = "";
 
@@ -704,11 +707,10 @@ function showScreenshotPreview(blob: Blob): void {
   }
 }
 
-async function captureRegionScreenshot(): Promise<void> {
-  const region = getCurrentRegionGeometry();
+async function captureScreenshot(region: RegionSelection | null, missingMessage: string): Promise<void> {
   const video = findPrimaryVideoElement();
   if (!region || !video) {
-    window.alert("스크린샷을 찍을 영역을 찾지 못했습니다.");
+    window.alert(missingMessage);
     return;
   }
 
@@ -738,6 +740,14 @@ async function captureRegionScreenshot(): Promise<void> {
   } catch {
     window.alert("이 영상은 브라우저 보안 제한으로 스크린샷 저장을 지원하지 않습니다.");
   }
+}
+
+async function captureRegionScreenshot(): Promise<void> {
+  await captureScreenshot(getCurrentRegionGeometry(), "스크린샷을 찍을 영역을 찾지 못했습니다.");
+}
+
+async function captureFullScreenshot(): Promise<void> {
+  await captureScreenshot(getPlayerRegionGeometry(), "스크린샷을 찍을 비디오 영역을 찾지 못했습니다.");
 }
 
 function buildDirectFilename(session: DirectRecordingSession): string {
@@ -1384,12 +1394,13 @@ function attachBorderControls(border: HTMLDivElement): void {
   };
 }
 
-async function loadState(): Promise<{ region: RegionSelection | null; recordingState: LocalRecordingState; fullRecordButtonEnabled: boolean }> {
+async function loadState(): Promise<{ region: RegionSelection | null; recordingState: LocalRecordingState; fullRecordButtonEnabled: boolean; fullScreenshotButtonEnabled: boolean }> {
   if (!isExtensionContextAvailable()) {
     return {
       region: null,
       recordingState: { status: "idle" },
       fullRecordButtonEnabled: false,
+      fullScreenshotButtonEnabled: false,
     };
   }
 
@@ -1405,6 +1416,7 @@ async function loadState(): Promise<{ region: RegionSelection | null; recordingS
       region: null,
       recordingState: { status: "idle" },
       fullRecordButtonEnabled: false,
+      fullScreenshotButtonEnabled: false,
     };
   }
 
@@ -1412,6 +1424,7 @@ async function loadState(): Promise<{ region: RegionSelection | null; recordingS
     region: normalizeRegion(result.region),
     recordingState: normalizeRecordingState(result.recordingState),
     fullRecordButtonEnabled: Boolean(result.settings?.enableFullRecordButton),
+    fullScreenshotButtonEnabled: Boolean(result.settings?.enableFullScreenshotButton),
   };
 }
 
@@ -1496,6 +1509,7 @@ async function refreshBorder(): Promise<void> {
   currentRegion = state.region;
   currentRecordingState = state.recordingState;
   fullRecordButtonEnabled = state.fullRecordButtonEnabled;
+  fullScreenshotButtonEnabled = state.fullScreenshotButtonEnabled;
   showSelectionBorder(currentRegion);
 
   if (state.recordingState.status === "recording" && selectionActive) {
@@ -1507,6 +1521,7 @@ async function initializePageState(): Promise<void> {
   const state = await loadState();
   currentRecordingState = state.recordingState;
   fullRecordButtonEnabled = state.fullRecordButtonEnabled;
+  fullScreenshotButtonEnabled = state.fullScreenshotButtonEnabled;
 
   if (state.recordingState.status !== "recording" && state.region) {
     await clearRegion();
@@ -1776,6 +1791,17 @@ function setChzzkRecordButtonContent(button: HTMLElement): void {
   `;
 }
 
+function setChzzkScreenshotButtonContent(button: HTMLElement): void {
+  const label = "전체 스크린샷";
+  button.setAttribute("aria-label", label);
+  button.setAttribute("type", "button");
+  button.removeAttribute("title");
+  button.innerHTML = `
+    <span class="pzp-button__tooltip pzp-button__tooltip--top">${label}</span>
+    <span class="pzp-ui-icon pzp-pc-setting-button__icon">${getCameraIconSvg()}</span>
+  `;
+}
+
 function setChzzkButtonContent(button: HTMLElement): void {
   button.setAttribute("aria-label", PLAYER_TOOL_LABEL);
   button.setAttribute("type", "button");
@@ -1784,6 +1810,26 @@ function setChzzkButtonContent(button: HTMLElement): void {
     <span class="pzp-button__tooltip pzp-button__tooltip--top">${PLAYER_TOOL_LABEL}</span>
     <span class="pzp-ui-icon pzp-pc-setting-button__icon">${getCropIconSvg()}</span>
   `;
+}
+
+function handlePlayerScreenshotActivation(event: MouseEvent): void {
+  if (event.button !== 0) {
+    return;
+  }
+
+  const now = Date.now();
+  if (event.type === "click" && now - lastScreenshotPointerActivationAt < 500) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
+  if (event.type === "pointerdown") {
+    lastScreenshotPointerActivationAt = now;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  void captureFullScreenshot();
 }
 
 function handlePlayerToolActivation(event: MouseEvent): void {
@@ -1840,6 +1886,16 @@ function handlePlayerRecordActivation(event: MouseEvent): void {
     .catch(() => {});
 }
 
+function bindDirectPlayerScreenshotActivation(button: HTMLElement): void {
+  if (button.dataset.cropClipBound === "true") {
+    return;
+  }
+
+  button.dataset.cropClipBound = "true";
+  button.addEventListener("pointerdown", handlePlayerScreenshotActivation);
+  button.addEventListener("click", handlePlayerScreenshotActivation);
+}
+
 function bindDirectPlayerToolActivation(button: HTMLElement): void {
   if (button.dataset.cropClipBound === "true") {
     return;
@@ -1870,7 +1926,7 @@ function getVisiblePzpButtons(root: ParentNode = document): HTMLElement[] {
     root.querySelectorAll<HTMLElement>(
       ".pzp-button, button[class*='pzp'][class*='button'], [role='button'][class*='pzp'][class*='button']",
     ),
-  ).filter((button) => button.id !== CHZZK_TOOL_BUTTON_ID && button.id !== CHZZK_RECORD_BUTTON_ID && isVisibleElement(button));
+  ).filter((button) => button.id !== CHZZK_TOOL_BUTTON_ID && button.id !== CHZZK_RECORD_BUTTON_ID && button.id !== CHZZK_SCREENSHOT_BUTTON_ID && isVisibleElement(button));
 }
 
 function compareBottomRight(a: DOMRect, b: DOMRect): number {
@@ -1945,11 +2001,13 @@ function syncChzzkToolButton(): void {
   const existing = document.getElementById(CHZZK_TOOL_BUTTON_ID) as HTMLButtonElement | null;
   const existingRecord = document.getElementById(CHZZK_RECORD_BUTTON_ID) as HTMLButtonElement | null;
   const existingTime = document.getElementById(CHZZK_RECORD_TIME_ID) as HTMLSpanElement | null;
+  const existingScreenshot = document.getElementById(CHZZK_SCREENSHOT_BUTTON_ID) as HTMLButtonElement | null;
   const target = findChzzkButtonHost();
   if (!target) {
     existing?.remove();
     existingRecord?.remove();
     existingTime?.remove();
+    existingScreenshot?.remove();
     return;
   }
 
@@ -1957,6 +2015,9 @@ function syncChzzkToolButton(): void {
   if (!fullRecordButtonEnabled) {
     existingRecord?.remove();
     existingTime?.remove();
+  }
+  if (!fullScreenshotButtonEnabled) {
+    existingScreenshot?.remove();
   }
   const isFullRecording = currentRecordingState.status === "recording" && currentRecordingState.mode === "full";
   const timeBadge = fullRecordButtonEnabled && isFullRecording ? existingTime ?? document.createElement("span") : null;
@@ -1979,6 +2040,15 @@ function syncChzzkToolButton(): void {
     bindDirectPlayerRecordActivation(recordButton);
   }
 
+  const screenshotButton = fullScreenshotButtonEnabled ? existingScreenshot ?? document.createElement("button") : null;
+  if (screenshotButton) {
+    screenshotButton.id = CHZZK_SCREENSHOT_BUTTON_ID;
+    screenshotButton.className = CHZZK_TOOL_BUTTON_CLASS;
+    screenshotButton.type = "button";
+    setChzzkScreenshotButtonContent(screenshotButton);
+    bindDirectPlayerScreenshotActivation(screenshotButton);
+  }
+
   const selectButton = existing ?? document.createElement("button");
   selectButton.id = CHZZK_TOOL_BUTTON_ID;
   selectButton.className = CHZZK_TOOL_BUTTON_CLASS;
@@ -1987,22 +2057,29 @@ function syncChzzkToolButton(): void {
   bindDirectPlayerToolActivation(selectButton);
 
   const needsReinsert = (recordButton ? recordButton.parentElement !== host : false)
+    || (screenshotButton ? screenshotButton.parentElement !== host : false)
     || selectButton.parentElement !== host
     || (timeBadge && recordButton ? timeBadge.parentElement !== host || timeBadge.nextElementSibling !== recordButton : false)
-    || (recordButton ? recordButton.nextElementSibling !== selectButton : false);
+    || (recordButton && screenshotButton ? recordButton.nextElementSibling !== screenshotButton : false)
+    || (recordButton && !screenshotButton ? recordButton.nextElementSibling !== selectButton : false)
+    || (screenshotButton ? screenshotButton.nextElementSibling !== selectButton : false);
 
   if (needsReinsert) {
     timeBadge?.remove();
     recordButton?.remove();
+    screenshotButton?.remove();
     selectButton.remove();
     const firstControl = Array.from(host.children).find(
-      (child) => child instanceof HTMLElement && child.id !== CHZZK_TOOL_BUTTON_ID && child.id !== CHZZK_RECORD_BUTTON_ID && child.id !== CHZZK_RECORD_TIME_ID,
+      (child) => child instanceof HTMLElement && child.id !== CHZZK_TOOL_BUTTON_ID && child.id !== CHZZK_RECORD_BUTTON_ID && child.id !== CHZZK_SCREENSHOT_BUTTON_ID && child.id !== CHZZK_RECORD_TIME_ID,
     );
     if (timeBadge) {
       host.insertBefore(timeBadge, firstControl ?? null);
     }
     if (recordButton) {
       host.insertBefore(recordButton, firstControl ?? null);
+    }
+    if (screenshotButton) {
+      host.insertBefore(screenshotButton, firstControl ?? null);
     }
     host.insertBefore(selectButton, firstControl ?? null);
   }
@@ -2171,6 +2248,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (changes.settings) {
     const settings = changes.settings.newValue as Partial<Settings> | undefined;
     fullRecordButtonEnabled = Boolean(settings?.enableFullRecordButton);
+    fullScreenshotButtonEnabled = Boolean(settings?.enableFullScreenshotButton);
     requestChzzkToolSync();
     syncChzzkRecordTimer();
   }

@@ -33,6 +33,7 @@ export function normalizeSettings(raw: Partial<Settings> | undefined): Settings 
     videoBitsPerSecond: clamp(Math.round(videoBitsPerSecond), MIN_VIDEO_BITS_PER_SECOND, MAX_VIDEO_BITS_PER_SECOND),
     enable60fps: Boolean(raw?.enable60fps),
     enableFullRecordButton: Boolean(raw?.enableFullRecordButton),
+    enableFullScreenshotButton: Boolean(raw?.enableFullScreenshotButton),
   };
 }
 

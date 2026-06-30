@@ -8,6 +8,7 @@ export interface Settings {
   videoBitsPerSecond: number;
   enable60fps: boolean;
   enableFullRecordButton: boolean;
+  enableFullScreenshotButton: boolean;
 }
 
 export interface RegionSelection {
@@ -86,6 +87,7 @@ export const DEFAULT_SETTINGS: Settings = {
   videoBitsPerSecond: DEFAULT_VIDEO_BITS_PER_SECOND,
   enable60fps: false,
   enableFullRecordButton: false,
+  enableFullScreenshotButton: false,
 };
 
 export const DEFAULT_RECORDING_STATE: RecordingState = {
