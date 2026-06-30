@@ -20,8 +20,6 @@ const MAX_SCREENSHOT_PREVIEWS = 8;
 const AUDIO_BITS_PER_SECOND = 128_000;
 const CHZZK_TOOL_BUTTON_ID = "crop-clip-chzzk-tool-button";
 const CHZZK_TOOL_BUTTON_CLASS = "pzp-button pzp-pc-setting-button pzp-pc__setting-button pzp-pc-ui-button crop-clip-pzp-button";
-const YOUTUBE_TOOL_BUTTON_ID = "crop-clip-youtube-tool-button";
-const YOUTUBE_TOOL_BUTTON_CLASS = "ytp-button";
 const PLAYER_TOOL_LABEL = "녹화 영역 선택";
 
 type ContentCommand = import("../shared/messages.js").ContentCommand;
@@ -83,7 +81,6 @@ let currentRecordingState: LocalRecordingState = { status: "idle" };
 let directSession: DirectRecordingSession | null = null;
 let chzzkToolObserver: MutationObserver | null = null;
 let chzzkToolSyncFrame: number | null = null;
-let youtubeToolSyncTimer: number | null = null;
 let regionLayoutTimerId: number | null = null;
 let lastVideoLayoutKey = "";
 
@@ -382,69 +379,6 @@ function ensureStyle(): void {
       pointer-events: none;
     }
 
-    @media (max-width: 543px) {
-      #${YOUTUBE_TOOL_BUTTON_ID} {
-        top: -4px;
-      }
-
-      #${YOUTUBE_TOOL_BUTTON_ID} .crop-clip-ytp-tooltip {
-        top: -52px !important;
-      }
-    }
-
-    #${YOUTUBE_TOOL_BUTTON_ID} {
-      position: relative;
-      color: #fff;
-      overflow: visible !important;
-      display: inline-flex !important;
-      align-items: center;
-      justify-content: center;
-      padding: 0 !important;
-      margin: 0 !important;
-      vertical-align: middle;
-    }
-
-    #${YOUTUBE_TOOL_BUTTON_ID} svg {
-      display: block;
-      width: 36px;
-      height: 36px;
-      pointer-events: none;
-    }
-
-    #${YOUTUBE_TOOL_BUTTON_ID} .crop-clip-ytp-tooltip {
-      position: absolute;
-      left: 50%;
-      top: -48px;
-      z-index: 100000;
-      display: block;
-      padding: 0;
-      border-radius: 8px;
-      background: transparent;
-      color: #fff;
-      font: 500 13px/1.2 Roboto, Arial, sans-serif;
-      white-space: nowrap;
-      opacity: 0;
-      pointer-events: none;
-      transform: translateX(-50%);
-      transition: opacity 0.08s cubic-bezier(0, 0, 0.2, 1);
-    }
-
-    #${YOUTUBE_TOOL_BUTTON_ID} .ytp-tooltip-bottom-text {
-      display: block;
-      padding: 6px 10px;
-      border-radius: 8px;
-      background: hsla(0, 0%, 6.7%, 0.4);
-      color: #fff;
-    }
-
-    #${YOUTUBE_TOOL_BUTTON_ID} .ytp-tooltip-text-wrapper {
-      display: block;
-    }
-
-    #${YOUTUBE_TOOL_BUTTON_ID}:hover .crop-clip-ytp-tooltip,
-    #${YOUTUBE_TOOL_BUTTON_ID}:focus-visible .crop-clip-ytp-tooltip {
-      opacity: 1;
-    }
   `;
 }
 
@@ -1777,36 +1711,6 @@ function setChzzkButtonContent(button: HTMLElement): void {
   `;
 }
 
-function setYoutubeButtonContent(button: HTMLElement): void {
-  button.id = YOUTUBE_TOOL_BUTTON_ID;
-  button.className = YOUTUBE_TOOL_BUTTON_CLASS;
-  button.setAttribute("type", "button");
-  button.hidden = false;
-  button.removeAttribute("style");
-  button.removeAttribute("disabled");
-  button.setAttribute("aria-label", PLAYER_TOOL_LABEL);
-  button.setAttribute("data-priority", "4");
-  button.setAttribute("data-title-no-tooltip", PLAYER_TOOL_LABEL);
-  button.setAttribute("data-tooltip-text", PLAYER_TOOL_LABEL);
-  button.setAttribute("data-tooltip-title", PLAYER_TOOL_LABEL);
-  button.removeAttribute("title");
-  button.removeAttribute("aria-keyshortcuts");
-  button.removeAttribute("aria-owns");
-  button.removeAttribute("aria-haspopup");
-  button.removeAttribute("aria-pressed");
-  button.removeAttribute("data-tooltip-target-id");
-  button.innerHTML = `
-    ${getCropIconSvg()}
-    <div class="crop-clip-ytp-tooltip ytp-tooltip" role="tooltip">
-      <div class="ytp-tooltip-text-wrapper">
-        <div class="ytp-tooltip-bottom-text">
-          <span class="ytp-tooltip-text">${PLAYER_TOOL_LABEL}</span>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
 function handlePlayerToolActivation(event: MouseEvent): void {
   if (event.button !== 0) {
     return;
@@ -1948,63 +1852,6 @@ function requestChzzkToolSync(): void {
   });
 }
 
-function isYoutubePage(): boolean {
-  return location.hostname.includes("youtube.com") || location.hostname.includes("youtu.be");
-}
-
-function findYoutubeButtonHost(): HTMLElement | null {
-  return document.querySelector<HTMLElement>(".ytp-right-controls-left")
-    ?? document.querySelector<HTMLElement>(".ytp-right-controls")
-    ?? document.querySelector<HTMLElement>(".ytp-chrome-bottom .ytp-right-controls")
-    ?? document.querySelector<HTMLElement>(".html5-video-player .ytp-right-controls");
-}
-
-function syncYoutubeToolButton(): void {
-  if (!isYoutubePage() || !location.pathname.startsWith("/watch")) {
-    document.getElementById(YOUTUBE_TOOL_BUTTON_ID)?.remove();
-    return;
-  }
-
-  const host = findYoutubeButtonHost();
-  if (!host) {
-    return;
-  }
-
-  const existingButtons = Array.from(document.querySelectorAll<HTMLButtonElement>(`#${YOUTUBE_TOOL_BUTTON_ID}`));
-  const existing = existingButtons.find((item) => item.parentElement === host) ?? existingButtons[0];
-  const button = existing ?? document.createElement("button");
-  for (const extraButton of existingButtons) {
-    if (extraButton !== button) {
-      extraButton.remove();
-    }
-  }
-
-  setYoutubeButtonContent(button);
-  bindDirectPlayerToolActivation(button);
-
-  if (button.parentElement !== host) {
-    const insertionPoint = Array.from(host.children).find(
-      (child) => child instanceof HTMLElement && child.id !== YOUTUBE_TOOL_BUTTON_ID,
-    );
-    if (insertionPoint && insertionPoint.parentElement === host) {
-      host.insertBefore(button, insertionPoint);
-    } else {
-      host.appendChild(button);
-    }
-  }
-}
-
-function requestYoutubeToolSync(delay = 100): void {
-  if (youtubeToolSyncTimer !== null) {
-    window.clearTimeout(youtubeToolSyncTimer);
-  }
-
-  youtubeToolSyncTimer = window.setTimeout(() => {
-    youtubeToolSyncTimer = null;
-    syncYoutubeToolButton();
-  }, delay);
-}
-
 function installChzzkToolButton(): void {
   if (!location.hostname.includes("chzzk.naver.com")) {
     return;
@@ -2017,21 +1864,8 @@ function installChzzkToolButton(): void {
   chzzkToolObserver.observe(document.documentElement, { childList: true, subtree: true });
 }
 
-function installYoutubeToolButton(): void {
-  if (!isYoutubePage()) {
-    return;
-  }
-
-  ensureStyle();
-  requestYoutubeToolSync(0);
-  window.addEventListener("yt-navigate-finish", () => requestYoutubeToolSync(300), true);
-  window.setTimeout(() => requestYoutubeToolSync(0), 800);
-  window.setTimeout(() => requestYoutubeToolSync(0), 2000);
-}
-
 function installPlayerToolButtons(): void {
   installChzzkToolButton();
-  installYoutubeToolButton();
 }
 
 function isRecordingState(value: LocalRecordingState): boolean {

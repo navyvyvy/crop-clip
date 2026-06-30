@@ -1,6 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CropClip",
+  "description": "치지직 방송 화면에서 원하는 영역만 선택해 로컬로 녹화하고 미리보기, 저장, 파일 나누기를 지원합니다.",
   "version": "0.1.1",
   "minimum_chrome_version": "116",
   "icons": {
@@ -27,10 +28,10 @@
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
   },
   "permissions": ["activeTab", "scripting", "storage", "alarms"],
-  "host_permissions": ["*://*.chzzk.naver.com/*", "*://*.youtube.com/*", "*://*.youtu.be/*"],
+  "host_permissions": ["*://*.chzzk.naver.com/*"],
   "content_scripts": [
     {
-      "matches": ["*://*.chzzk.naver.com/*", "*://*.youtube.com/*", "*://*.youtu.be/*"],
+      "matches": ["*://*.chzzk.naver.com/*"],
       "js": ["content/region_selector.js"],
       "run_at": "document_idle"
     }

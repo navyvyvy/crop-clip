@@ -79,6 +79,13 @@ await writeFile(
   ),
 );
 
+const ffmpegCorePath = path.join(distDir, "vendor", "ffmpeg", "core", "ffmpeg-core.js");
+const ffmpegCore = await readFile(ffmpegCorePath, "utf8");
+await writeFile(
+  ffmpegCorePath,
+  ffmpegCore.replace(/https:\/\/[^"']*Dynamic-Linking\.html/g, "Emscripten dynamic linking documentation"),
+);
+
 function makeCrcTable() {
   const table = new Uint32Array(256);
   for (let index = 0; index < table.length; index += 1) {
