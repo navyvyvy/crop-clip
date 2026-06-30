@@ -69,6 +69,16 @@ await mkdir(path.join(distDir, "vendor", "ffmpeg", "core"), { recursive: true })
 await copyFile(path.join(root, "node_modules", "@ffmpeg", "core", "dist", "esm", "ffmpeg-core.js"), path.join(distDir, "vendor", "ffmpeg", "core", "ffmpeg-core.js"));
 await copyFile(path.join(root, "node_modules", "@ffmpeg", "core", "dist", "esm", "ffmpeg-core.wasm"), path.join(distDir, "vendor", "ffmpeg", "core", "ffmpeg-core.wasm"));
 
+const ffmpegConstPath = path.join(distDir, "vendor", "ffmpeg", "ffmpeg", "const.js");
+const ffmpegConst = await readFile(ffmpegConstPath, "utf8");
+await writeFile(
+  ffmpegConstPath,
+  ffmpegConst.replace(
+    /export const CORE_URL = .*?;/,
+    'export const CORE_URL = "../core/ffmpeg-core.js";',
+  ),
+);
+
 function makeCrcTable() {
   const table = new Uint32Array(256);
   for (let index = 0; index < table.length; index += 1) {
