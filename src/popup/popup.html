@@ -19,9 +19,13 @@
 
       <section class="stack">
         <div class="action-row">
-          <button id="select-region-button" class="button secondary" type="button">녹화 영역 선택</button>
-          <button id="clear-region-button" class="button secondary" type="button">영역 해제</button>
-          <button id="record-toggle-button" class="button primary" type="button">영역 녹화</button>
+          <button id="select-region-button" class="button secondary" type="button" title="녹화할 영역을 선택합니다.">녹화 영역 선택</button>
+          <button id="clear-region-button" class="button secondary" type="button" title="선택된 영역을 해제합니다.">영역 해제</button>
+          <button id="record-toggle-button" class="button primary" type="button" title="선택한 영역 녹화를 시작하거나 정지합니다.">영역 녹화</button>
+        </div>
+        <div id="full-action-row" class="action-row two-col">
+          <button id="full-record-toggle-button" class="button secondary" type="button" title="비디오 전체 화면 녹화를 시작하거나 정지합니다.">전체 녹화</button>
+          <button id="full-screenshot-button" class="button secondary" type="button" title="비디오 전체 화면 스크린샷을 캡처합니다.">전체 스크린샷</button>
         </div>
 
         <section class="panel">
@@ -127,7 +131,7 @@
             <label class="setting-row">
               <span class="setting-copy">
                 <span class="setting-title">단축키</span>
-                <span class="setting-desc">a/x/r/s/f/c 키를 사용합니다.</span>
+                <span class="setting-desc">설정한 키로 페이지에서 실행</span>
               </span>
               <span class="segmented">
                 <label>
@@ -144,6 +148,17 @@
           <p id="fps-warning" class="warning"></p>
 
           <footer class="footer-links" aria-label="외부 링크">
+            <button id="shortcut-settings-button" class="icon-link" type="button" title="단축키 설정" aria-label="단축키 설정">
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M4 7h16v10H4z"/>
+                <path fill="currentColor" d="M7 10h2v2H7zm4 0h2v2h-2zm4 0h2v2h-2zM8 14h8v1.6H8z"/>
+              </svg>
+            </button>
+            <button id="reset-settings-button" class="icon-link" type="button" title="전체 초기화" aria-label="전체 초기화">
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M5 12a7 7 0 1 0 2-4.9M5 5v5h5"/>
+              </svg>
+            </button>
             <a class="icon-link" href="https://github.com/navyvyvy/crop-clip" target="_blank" rel="noreferrer" aria-label="GitHub">
               <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                 <path fill="currentColor" d="M12 2a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.8c-2.9.6-3.5-1.2-3.5-1.2-.5-1.1-1.1-1.4-1.1-1.4-.9-.6.1-.6.1-.6 1 0 1.6 1.1 1.6 1.1.9 1.5 2.4 1.1 3 .8.1-.7.4-1.1.7-1.3-2.3-.3-4.7-1.2-4.7-5A3.9 3.9 0 0 1 6.6 9c-.1-.3-.5-1.3.1-2.7 0 0 .9-.3 2.8 1a9.8 9.8 0 0 1 5 0c1.9-1.3 2.8-1 2.8-1 .6 1.4.2 2.4.1 2.7a3.9 3.9 0 0 1 1 2.7c0 3.9-2.4 4.8-4.7 5 .4.3.7 1 .7 2v2.3c0 .3.2.6.7.5A10 10 0 0 0 12 2Z"/>
@@ -159,6 +174,16 @@
         </section>
       </section>
     </main>
+    <dialog id="shortcut-dialog" class="shortcut-dialog" tabindex="-1">
+      <form method="dialog">
+        <header class="dialog-head">
+          <strong>단축키 설정</strong>
+          <button id="shortcut-close-button" class="dialog-close" type="button" title="닫기" aria-label="닫기">×</button>
+        </header>
+        <div id="shortcut-list" class="shortcut-list"></div>
+        <button id="shortcut-reset-button" class="button secondary full-width" type="button">단축키 초기화</button>
+      </form>
+    </dialog>
     <script type="module" src="./popup.js"></script>
   </body>
 </html>

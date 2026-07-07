@@ -127,19 +127,36 @@ async function startSelection(): Promise<MessageResponse> {
 }
 
 async function clearRegion(): Promise<MessageResponse> {
-  await chrome.storage.local.set({ region: null });
+  const state = await loadAppState();
+  if (state.recordingState.status === "recording") {
+    return fail("녹화 중에는 영역을 해제할 수 없습니다.");
+  }
 
   try {
     const tab = await getActiveRecordableTab();
     const tabId = tab.id;
     if (typeof tabId === "number") {
-      await sendCommandToContentScript(tabId, { type: "CLEAR_REGION" });
+      const response = await sendCommandToContentScript(tabId, { type: "CLEAR_REGION" });
+      if (!response.ok) {
+        return response;
+      }
     }
   } catch {
     // Storage is the source of truth, so clearing the page border is best-effort.
   }
 
+  await chrome.storage.local.set({ region: null });
   return ok();
+}
+
+async function captureFullScreenshot(): Promise<MessageResponse> {
+  const tab = await getActiveRecordableTab();
+  const tabId = tab.id;
+  if (typeof tabId !== "number") {
+    return fail("스크린샷을 찍을 수 있는 웹 탭에서만 사용할 수 있습니다.");
+  }
+
+  return await sendCommandToContentScript(tabId, { type: "CAPTURE_FULL_SCREENSHOT" });
 }
 
 async function getCurrentRegionGeometry(tabId: number): Promise<MessageResponse<RegionSelection>> {
@@ -356,6 +373,11 @@ chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingFinishedM
 
     if (message.type === "START_FULL_RECORDING") {
       sendResponse(await startRecording(true));
+      return;
+    }
+
+    if (message.type === "CAPTURE_FULL_SCREENSHOT") {
+      sendResponse(await captureFullScreenshot());
       return;
     }
 

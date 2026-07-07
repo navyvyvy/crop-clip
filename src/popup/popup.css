@@ -112,6 +112,10 @@ h1 {
   gap: 6px;
 }
 
+.action-row.two-col {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .button {
   border: 1px solid transparent;
   border-radius: 9px;
@@ -185,6 +189,7 @@ h1 {
   color: var(--muted);
   font-size: 11px;
   line-height: 1.35;
+  white-space: nowrap;
 }
 
 .bitrate-field {
@@ -309,6 +314,8 @@ h1 {
   border-radius: 999px;
   color: var(--muted);
   text-decoration: none;
+  background: transparent;
+  cursor: pointer;
 }
 
 .icon-link:hover {
@@ -316,7 +323,87 @@ h1 {
   color: var(--accent-strong);
 }
 
+.icon-link:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .icon-link svg {
   width: 16px;
   height: 16px;
+}
+
+.shortcut-dialog {
+  width: 312px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--bg);
+  color: var(--text);
+  outline: none;
+  padding: 10px;
+}
+
+.shortcut-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.dialog-head,
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dialog-close,
+.shortcut-key,
+.shortcut-cancel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.dialog-close {
+  width: 26px;
+  height: 26px;
+}
+
+.shortcut-list {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0;
+}
+
+.shortcut-row {
+  font-size: 12px;
+}
+
+.shortcut-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.shortcut-key {
+  min-width: 44px;
+  padding: 5px 8px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.shortcut-cancel {
+  padding: 5px 7px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.shortcut-key[data-waiting="true"] {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+.full-width {
+  width: 100%;
 }

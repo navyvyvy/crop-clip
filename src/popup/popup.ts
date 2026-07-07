@@ -1,4 +1,4 @@
-import { DEFAULT_SETTINGS, FPS_WARNING_VIDEO_BITS_PER_SECOND, MAX_VIDEO_BITS_PER_SECOND, MIN_VIDEO_BITS_PER_SECOND, type AppState, type RecordingFormat, type Settings } from "../shared/types.js";
+import { DEFAULT_SETTINGS, DEFAULT_SHORTCUT_KEYS, FPS_WARNING_VIDEO_BITS_PER_SECOND, MAX_VIDEO_BITS_PER_SECOND, MIN_VIDEO_BITS_PER_SECOND, type AppState, type RecordingFormat, type Settings, type ShortcutAction } from "../shared/types.js";
 import { loadAppState, normalizeRecordingState, normalizeRegion, normalizeSettings, saveSettings } from "../shared/storage.js";
 import type { MessageResponse } from "../shared/messages.js";
 
@@ -8,6 +8,9 @@ const elements = {
   selectRegionButton: document.getElementById("select-region-button") as HTMLButtonElement,
   clearRegionButton: document.getElementById("clear-region-button") as HTMLButtonElement,
   recordToggleButton: document.getElementById("record-toggle-button") as HTMLButtonElement,
+  fullActionRow: document.getElementById("full-action-row") as HTMLDivElement,
+  fullRecordToggleButton: document.getElementById("full-record-toggle-button") as HTMLButtonElement,
+  fullScreenshotButton: document.getElementById("full-screenshot-button") as HTMLButtonElement,
   outputFormatInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='output-format']")),
   fpsModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='fps-mode']")),
   fullRecordModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='full-record-mode']")),
@@ -18,12 +21,26 @@ const elements = {
   bitrateIncreaseButton: document.getElementById("bitrate-increase-button") as HTMLButtonElement,
   customVideoBitrateInput: document.getElementById("custom-video-bitrate-input") as HTMLInputElement,
   fpsWarning: document.getElementById("fps-warning") as HTMLParagraphElement,
+  shortcutSettingsButton: document.getElementById("shortcut-settings-button") as HTMLButtonElement,
+  resetSettingsButton: document.getElementById("reset-settings-button") as HTMLButtonElement,
+  shortcutDialog: document.getElementById("shortcut-dialog") as HTMLDialogElement,
+  shortcutList: document.getElementById("shortcut-list") as HTMLDivElement,
+  shortcutResetButton: document.getElementById("shortcut-reset-button") as HTMLButtonElement,
+  shortcutCloseButton: document.getElementById("shortcut-close-button") as HTMLButtonElement,
 };
 
 const BITS_PER_MEGABIT = 1_000_000;
 const BITRATE_STEP_MEGABITS_PER_SECOND = 0.5;
 const MIN_VIDEO_MEGABITS_PER_SECOND = MIN_VIDEO_BITS_PER_SECOND / BITS_PER_MEGABIT;
 const MAX_VIDEO_MEGABITS_PER_SECOND = MAX_VIDEO_BITS_PER_SECOND / BITS_PER_MEGABIT;
+const SHORTCUT_LABELS: Record<ShortcutAction, string> = {
+  selectRegion: "영역 선택",
+  clearRegion: "영역 해제",
+  regionRecord: "영역 녹화",
+  regionScreenshot: "영역 스크린샷",
+  fullRecord: "전체 녹화",
+  fullScreenshot: "전체 스크린샷",
+};
 
 elements.versionBadge.textContent = `v${chrome.runtime.getManifest().version}`;
 
@@ -35,6 +52,7 @@ let appState: AppState = {
 
 let sendingCommand = false;
 let recordingTimerId: number | null = null;
+let waitingShortcutAction: ShortcutAction | null = null;
 
 function formatElapsed(ms: number): string {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
@@ -117,18 +135,29 @@ function syncPresetUi(settings: Settings): void {
     input.checked = input.value === (settings.enableShortcuts ? "on" : "off");
   }
   elements.customVideoBitrateInput.value = formatBitrateMbps(settings.videoBitsPerSecond / BITS_PER_MEGABIT);
+  renderShortcutList();
   showFpsWarning(settings);
 }
 
 function renderState(): void {
   const isRecording = appState.recordingState.status === "recording";
+  const isFullRecording = appState.recordingState.status === "recording" && appState.recordingState.mode === "full";
+  const isRegionRecording = isRecording && !isFullRecording;
   elements.selectRegionButton.disabled = isRecording || sendingCommand;
   elements.clearRegionButton.disabled = isRecording || sendingCommand || !appState.region;
-  elements.recordToggleButton.disabled = sendingCommand;
-  elements.recordToggleButton.textContent = isRecording ? "녹화 정지" : "영역 녹화";
+  elements.recordToggleButton.disabled = sendingCommand || isFullRecording;
+  elements.recordToggleButton.textContent = isRegionRecording ? "녹화 정지" : "영역 녹화";
   elements.recordToggleButton.classList.toggle("primary", false);
   elements.recordToggleButton.classList.toggle("secondary", true);
-  elements.recordToggleButton.classList.toggle("recording", isRecording);
+  elements.recordToggleButton.classList.toggle("recording", isRegionRecording);
+  elements.fullRecordToggleButton.hidden = !appState.settings.enableFullRecordButton;
+  elements.fullScreenshotButton.hidden = !appState.settings.enableFullScreenshotButton;
+  elements.fullActionRow.hidden = !appState.settings.enableFullRecordButton && !appState.settings.enableFullScreenshotButton;
+  elements.fullRecordToggleButton.disabled = sendingCommand || (isRecording && !isFullRecording);
+  elements.fullScreenshotButton.disabled = sendingCommand;
+  elements.fullRecordToggleButton.textContent = isFullRecording ? "전체 녹화 정지" : "전체 녹화";
+  elements.shortcutSettingsButton.disabled = isRecording || sendingCommand;
+  elements.resetSettingsButton.disabled = isRecording || sendingCommand;
 
   const lockControls = isRecording;
   const controls = [
@@ -192,7 +221,49 @@ function readSettingsFromUi(): Settings {
     enableFullScreenshotButton,
     enableStreamerFilename,
     enableShortcuts,
+    shortcutKeys: appState.settings.shortcutKeys,
   });
+}
+
+function renderShortcutList(): void {
+  elements.shortcutList.innerHTML = "";
+  for (const action of Object.keys(SHORTCUT_LABELS) as ShortcutAction[]) {
+    const isWaiting = waitingShortcutAction === action;
+    const row = document.createElement("div");
+    row.className = "shortcut-row";
+    const label = document.createElement("span");
+    label.textContent = SHORTCUT_LABELS[action];
+    const controls = document.createElement("span");
+    controls.className = "shortcut-controls";
+    const button = document.createElement("button");
+    button.className = "shortcut-key";
+    button.type = "button";
+    button.dataset.action = action;
+    button.dataset.waiting = isWaiting ? "true" : "false";
+    button.textContent = isWaiting ? "입력..." : appState.settings.shortcutKeys[action].toUpperCase();
+    button.title = `${SHORTCUT_LABELS[action]} 단축키 변경`;
+    button.addEventListener("click", () => {
+      waitingShortcutAction = action;
+      renderShortcutList();
+      elements.shortcutDialog.focus();
+    });
+    controls.appendChild(button);
+    if (isWaiting) {
+      const cancelButton = document.createElement("button");
+      cancelButton.className = "shortcut-cancel";
+      cancelButton.type = "button";
+      cancelButton.textContent = "취소";
+      cancelButton.title = "단축키 입력 취소";
+      cancelButton.addEventListener("click", () => {
+        waitingShortcutAction = null;
+        renderShortcutList();
+        elements.shortcutDialog.focus();
+      });
+      controls.appendChild(cancelButton);
+    }
+    row.append(label, controls);
+    elements.shortcutList.appendChild(row);
+  }
 }
 
 function sanitizeBitrateInput(): void {
@@ -297,6 +368,25 @@ elements.recordToggleButton.addEventListener("click", () => {
   });
 });
 
+elements.fullRecordToggleButton.addEventListener("click", () => {
+  void withCommandInFlight(async () => {
+    const type = appState.recordingState.status === "recording" && appState.recordingState.mode === "full" ? "STOP_RECORDING" : "START_FULL_RECORDING";
+    const response = await sendCommand<{ recordingId: string }>({ type });
+    if (!response.ok) {
+      showError(response.error);
+    }
+  });
+});
+
+elements.fullScreenshotButton.addEventListener("click", () => {
+  void withCommandInFlight(async () => {
+    const response = await sendCommand({ type: "CAPTURE_FULL_SCREENSHOT" });
+    if (!response.ok) {
+      showError(response.error);
+    }
+  });
+});
+
 for (const element of [...elements.outputFormatInputs, ...elements.fpsModeInputs, ...elements.fullRecordModeInputs, ...elements.fullScreenshotModeInputs, ...elements.streamerFilenameModeInputs, ...elements.shortcutModeInputs]) {
   element.addEventListener("change", () => {
     void persistUiSettings();
@@ -317,6 +407,78 @@ elements.bitrateDecreaseButton.addEventListener("click", () => {
 
 elements.bitrateIncreaseButton.addEventListener("click", () => {
   void stepBitrate(1);
+});
+
+elements.shortcutSettingsButton.addEventListener("click", () => {
+  waitingShortcutAction = null;
+  renderShortcutList();
+  elements.shortcutDialog.showModal();
+  elements.shortcutDialog.focus();
+});
+
+elements.shortcutCloseButton.addEventListener("click", () => {
+  waitingShortcutAction = null;
+  elements.shortcutDialog.close();
+});
+
+elements.shortcutDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+});
+
+elements.shortcutDialog.addEventListener("keydown", (event) => {
+  event.stopPropagation();
+  if (!waitingShortcutAction || event.key === "Escape") {
+    event.preventDefault();
+    return;
+  }
+
+  const key = event.key.toLowerCase();
+  if (!/^[a-z0-9]$/.test(key) || event.ctrlKey || event.metaKey || event.altKey) {
+    event.preventDefault();
+    return;
+  }
+
+  const used = Object.entries(appState.settings.shortcutKeys).find(([action, value]) => action !== waitingShortcutAction && value === key);
+  if (used) {
+    window.alert("이미 사용 중인 단축키입니다.");
+    event.preventDefault();
+    return;
+  }
+
+  void (async () => {
+    appState.settings = normalizeSettings({
+      ...appState.settings,
+      shortcutKeys: { ...appState.settings.shortcutKeys, [waitingShortcutAction]: key },
+    });
+    waitingShortcutAction = null;
+    await saveSettings(appState.settings);
+    syncPresetUi(appState.settings);
+    renderState();
+  })();
+  event.preventDefault();
+});
+
+elements.shortcutResetButton.addEventListener("click", () => {
+  void (async () => {
+    waitingShortcutAction = null;
+    appState.settings = normalizeSettings({ ...appState.settings, shortcutKeys: DEFAULT_SHORTCUT_KEYS });
+    await saveSettings(appState.settings);
+    syncPresetUi(appState.settings);
+    renderState();
+  })();
+});
+
+elements.resetSettingsButton.addEventListener("click", () => {
+  void (async () => {
+    if (!window.confirm("CropClip 설정을 전체 초기화할까요?")) {
+      return;
+    }
+    waitingShortcutAction = null;
+    appState.settings = normalizeSettings(DEFAULT_SETTINGS);
+    await saveSettings(appState.settings);
+    syncPresetUi(appState.settings);
+    renderState();
+  })();
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {

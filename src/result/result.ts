@@ -102,6 +102,13 @@ function formatDuration(seconds: number): string {
     : `${minutes}:${paddedSeconds}`;
 }
 
+function getStreamerNameFromFilename(): string {
+  const filename = parts[0]?.filename ?? "";
+  const match = filename.match(/^(.+)_\d{8}_\d{6}/);
+  const name = match?.[1]?.replace(/_/g, " ").trim() ?? "";
+  return name && name !== "cropClip" ? name : "";
+}
+
 function createObjectUrlSource(source: Blob | string): { url: string; revoke: boolean } {
   return typeof source === "string"
     ? { url: source, revoke: false }
@@ -679,7 +686,8 @@ function renderHeader(): void {
 
   elements.title.textContent = "녹화 결과";
   const duration = recordingDurationSeconds || getRecordingDurationFallback();
-  const summary = `${recording.actualExtension.toUpperCase()} · ${formatBytes(recording.totalSize)} · ${formatDuration(duration)}`;
+  const streamer = getStreamerNameFromFilename();
+  const summary = [streamer, recording.actualExtension.toUpperCase(), formatBytes(recording.totalSize), formatDuration(duration)].filter(Boolean).join(" · ");
   elements.formatChip.textContent = summary;
 }
 
@@ -762,7 +770,7 @@ function renderParts(): void {
 }
 
 async function downloadSourcesSequentially(items: Array<{ source: Blob | string; filename: string }>): Promise<void> {
-  for (const item of items) {
+  for (const item of [...items].sort((a, b) => a.filename.localeCompare(b.filename, undefined, { numeric: true }))) {
     const { url, revoke } = createObjectUrlSource(item.source);
     const anchor = document.createElement("a");
     anchor.href = url;
@@ -790,6 +798,12 @@ async function scheduleDeletionOnClose(): Promise<void> {
     await chrome.runtime.sendMessage(message);
   } catch {
     // The service worker may already be asleep.
+  }
+}
+
+function restoreSourceTab(): void {
+  if (Number.isFinite(sourceTabId) && sourceTabId > 0) {
+    void chrome.tabs.update(sourceTabId, { active: true }).catch(() => {});
   }
 }
 
@@ -839,9 +853,7 @@ elements.downloadCurrentButton.addEventListener("click", () => {
 });
 
 elements.closeButton.addEventListener("click", () => {
-  if (Number.isFinite(sourceTabId) && sourceTabId > 0) {
-    void chrome.tabs.update(sourceTabId, { active: true }).catch(() => {});
-  }
+  restoreSourceTab();
   window.close();
 });
 
@@ -918,10 +930,12 @@ elements.splitButton.addEventListener("click", () => {
 });
 
 window.addEventListener("pagehide", () => {
+  restoreSourceTab();
   void scheduleDeletionOnClose();
 });
 
 window.addEventListener("beforeunload", () => {
+  restoreSourceTab();
   void scheduleDeletionOnClose();
 });
 

@@ -4,6 +4,7 @@ export type PopupCommand =
   | { type: "SELECT_REGION" }
   | { type: "CLEAR_REGION" }
   | { type: "START_FULL_RECORDING" }
+  | { type: "CAPTURE_FULL_SCREENSHOT" }
   | { type: "START_RECORDING" }
   | { type: "STOP_RECORDING" };
 
@@ -12,6 +13,7 @@ export type ContentCommand =
   | { type: "CLEAR_REGION" }
   | { type: "GET_REGION_GEOMETRY" }
   | { type: "GET_PLAYER_REGION_GEOMETRY" }
+  | { type: "CAPTURE_FULL_SCREENSHOT" }
   | {
       type: "START_DIRECT_RECORDING";
       recordingId: string;

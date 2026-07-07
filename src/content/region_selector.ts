@@ -24,6 +24,14 @@ const CHZZK_SCREENSHOT_BUTTON_ID = "crop-clip-chzzk-screenshot-button";
 const CHZZK_TOOL_BUTTON_ID = "crop-clip-chzzk-tool-button";
 const CHZZK_TOOL_BUTTON_CLASS = "pzp-button pzp-pc-setting-button pzp-pc__setting-button pzp-pc-ui-button crop-clip-pzp-button";
 const PLAYER_TOOL_LABEL = "녹화 영역 선택";
+const DEFAULT_CONTENT_SHORTCUT_KEYS: ShortcutKeys = {
+  selectRegion: "a",
+  clearRegion: "x",
+  regionRecord: "r",
+  regionScreenshot: "s",
+  fullRecord: "e",
+  fullScreenshot: "d",
+};
 
 type ContentCommand = import("../shared/messages.js").ContentCommand;
 type MessageResponse<T = undefined> = import("../shared/messages.js").MessageResponse<T>;
@@ -31,6 +39,8 @@ type PlayerStatusRequest = import("../shared/messages.js").PlayerStatusRequest;
 type RecordingState = import("../shared/types.js").RecordingState;
 type RegionSelection = import("../shared/types.js").RegionSelection;
 type Settings = import("../shared/types.js").Settings;
+type ShortcutAction = import("../shared/types.js").ShortcutAction;
+type ShortcutKeys = import("../shared/types.js").ShortcutKeys;
 type LocalRecordingState = Pick<RecordingState, "status" | "startedAt" | "mode">;
 
 type PlayerStatusResponse =
@@ -82,6 +92,7 @@ let fullRecordButtonEnabled = false;
 let fullScreenshotButtonEnabled = false;
 let streamerFilenameEnabled = false;
 let shortcutsEnabled = false;
+let shortcutKeys: ShortcutKeys = DEFAULT_CONTENT_SHORTCUT_KEYS;
 let removeSelectionHandlers: (() => void) | null = null;
 let removeBorderHandlers: (() => void) | null = null;
 let currentRecordingState: LocalRecordingState = { status: "idle" };
@@ -782,6 +793,7 @@ async function captureFullScreenshot(): Promise<void> {
 
 async function toggleRegionRecording(): Promise<void> {
   if (currentRecordingState.status === "recording" && currentRecordingState.mode === "full") {
+    window.alert("전체 녹화 중에는 영역 녹화를 시작할 수 없습니다.");
     return;
   }
 
@@ -794,6 +806,7 @@ async function toggleRegionRecording(): Promise<void> {
 
 async function toggleFullRecording(): Promise<void> {
   if (currentRecordingState.status === "recording" && currentRecordingState.mode !== "full") {
+    window.alert("영역 녹화 중에는 전체 녹화를 시작할 수 없습니다.");
     return;
   }
 
@@ -1205,18 +1218,18 @@ function attachBorderControls(border: HTMLDivElement): void {
     const isRegionRecording = currentRecordingState.status === "recording" && currentRecordingState.mode !== "full";
     const isRecording = isAnyRecording();
     const isFullRecording = currentRecordingState.status === "recording" && currentRecordingState.mode === "full";
-    const label = withShortcut(isRegionRecording ? "녹화 중지" : "녹화 시작", "r");
+    const label = withShortcut(isRegionRecording ? "녹화 중지" : "녹화 시작", "regionRecord");
     recordButton.innerHTML = getRecordIconSvg(isRegionRecording);
     recordButton.setAttribute("aria-label", label);
     recordButton.title = label;
     recordButton.disabled = isFullRecording;
     if (screenshotButton) {
-      const screenshotLabel = withShortcut("스크린샷", "s");
+      const screenshotLabel = withShortcut("스크린샷", "regionScreenshot");
       screenshotButton.setAttribute("aria-label", screenshotLabel);
       screenshotButton.title = screenshotLabel;
     }
     if (clearButton) {
-      const clearLabel = withShortcut("영역 해제", "x");
+      const clearLabel = withShortcut("영역 해제", "clearRegion");
       clearButton.setAttribute("aria-label", clearLabel);
       clearButton.title = clearLabel;
     }
@@ -1459,7 +1472,7 @@ function attachBorderControls(border: HTMLDivElement): void {
   };
 }
 
-async function loadState(): Promise<{ region: RegionSelection | null; recordingState: LocalRecordingState; fullRecordButtonEnabled: boolean; fullScreenshotButtonEnabled: boolean; streamerFilenameEnabled: boolean; shortcutsEnabled: boolean }> {
+async function loadState(): Promise<{ region: RegionSelection | null; recordingState: LocalRecordingState; fullRecordButtonEnabled: boolean; fullScreenshotButtonEnabled: boolean; streamerFilenameEnabled: boolean; shortcutsEnabled: boolean; shortcutKeys: ShortcutKeys }> {
   if (!isExtensionContextAvailable()) {
     return {
       region: null,
@@ -1468,6 +1481,7 @@ async function loadState(): Promise<{ region: RegionSelection | null; recordingS
       fullScreenshotButtonEnabled: false,
       streamerFilenameEnabled: false,
       shortcutsEnabled: false,
+      shortcutKeys: DEFAULT_CONTENT_SHORTCUT_KEYS,
     };
   }
 
@@ -1486,6 +1500,7 @@ async function loadState(): Promise<{ region: RegionSelection | null; recordingS
       fullScreenshotButtonEnabled: false,
       streamerFilenameEnabled: false,
       shortcutsEnabled: false,
+      shortcutKeys: DEFAULT_CONTENT_SHORTCUT_KEYS,
     };
   }
 
@@ -1496,6 +1511,7 @@ async function loadState(): Promise<{ region: RegionSelection | null; recordingS
     fullScreenshotButtonEnabled: Boolean(result.settings?.enableFullScreenshotButton),
     streamerFilenameEnabled: Boolean(result.settings?.enableStreamerFilename),
     shortcutsEnabled: Boolean(result.settings?.enableShortcuts),
+    shortcutKeys: normalizeShortcutKeys(result.settings?.shortcutKeys),
   };
 }
 
@@ -1549,6 +1565,10 @@ function normalizeRecordingState(raw: unknown): LocalRecordingState {
   return { status: "idle" };
 }
 
+function normalizeShortcutKeys(raw: Partial<ShortcutKeys> | undefined): ShortcutKeys {
+  return { ...DEFAULT_CONTENT_SHORTCUT_KEYS, ...raw };
+}
+
 async function saveRegion(region: RegionSelection): Promise<boolean> {
   if (!isExtensionContextAvailable()) {
     return false;
@@ -1583,6 +1603,7 @@ async function refreshBorder(): Promise<void> {
   fullScreenshotButtonEnabled = state.fullScreenshotButtonEnabled;
   streamerFilenameEnabled = state.streamerFilenameEnabled;
   shortcutsEnabled = state.shortcutsEnabled;
+  shortcutKeys = state.shortcutKeys;
   showSelectionBorder(currentRegion);
 
   if (state.recordingState.status === "recording" && selectionActive) {
@@ -1597,6 +1618,7 @@ async function initializePageState(): Promise<void> {
   fullScreenshotButtonEnabled = state.fullScreenshotButtonEnabled;
   streamerFilenameEnabled = state.streamerFilenameEnabled;
   shortcutsEnabled = state.shortcutsEnabled;
+  shortcutKeys = state.shortcutKeys;
 
   if (state.recordingState.status !== "recording" && state.region) {
     await clearRegion();
@@ -1849,14 +1871,14 @@ function getRecordIconSvg(recording = false): string {
     `;
 }
 
-function withShortcut(label: string, key: string): string {
-  return shortcutsEnabled ? `${label} (${key})` : label;
+function withShortcut(label: string, action: ShortcutAction): string {
+  return shortcutsEnabled ? `${label} (${shortcutKeys[action]})` : label;
 }
 
 function setChzzkRecordButtonContent(button: HTMLElement): void {
   const isFullRecording = currentRecordingState.status === "recording" && currentRecordingState.mode === "full";
   const isRegionRecording = currentRecordingState.status === "recording" && currentRecordingState.mode !== "full";
-  const label = withShortcut(isFullRecording ? "전체 녹화 정지" : "전체 녹화 시작", "f");
+  const label = withShortcut(isFullRecording ? "전체 녹화 정지" : "전체 녹화 시작", "fullRecord");
   button.setAttribute("aria-label", label);
   button.setAttribute("type", "button");
   button.removeAttribute("title");
@@ -1871,7 +1893,7 @@ function setChzzkRecordButtonContent(button: HTMLElement): void {
 }
 
 function setChzzkScreenshotButtonContent(button: HTMLElement): void {
-  const label = withShortcut("전체 스크린샷", "c");
+  const label = withShortcut("전체 스크린샷", "fullScreenshot");
   button.setAttribute("aria-label", label);
   button.setAttribute("type", "button");
   button.removeAttribute("title");
@@ -1882,7 +1904,7 @@ function setChzzkScreenshotButtonContent(button: HTMLElement): void {
 }
 
 function setChzzkButtonContent(button: HTMLElement): void {
-  const label = withShortcut(PLAYER_TOOL_LABEL, "a");
+  const label = withShortcut(PLAYER_TOOL_LABEL, "selectRegion");
   button.setAttribute("aria-label", label);
   button.setAttribute("type", "button");
   button.removeAttribute("title");
@@ -2229,13 +2251,13 @@ function handleShortcut(event: KeyboardEvent): void {
   }
 
   const key = event.key.toLowerCase();
-  if (key === "a") {
+  if (key === shortcutKeys.selectRegion) {
     event.preventDefault();
     if (isAnyRecording()) {
       return;
     }
     startSelection();
-  } else if (key === "x") {
+  } else if (key === shortcutKeys.clearRegion) {
     event.preventDefault();
     if (isAnyRecording()) {
       return;
@@ -2253,16 +2275,16 @@ function handleShortcut(event: KeyboardEvent): void {
       currentRegion = null;
       showSelectionBorder(null);
     })();
-  } else if (key === "r") {
+  } else if (key === shortcutKeys.regionRecord) {
     event.preventDefault();
     void toggleRegionRecording().catch((error: Error) => window.alert(error.message));
-  } else if (key === "s") {
+  } else if (key === shortcutKeys.regionScreenshot) {
     event.preventDefault();
     void captureRegionScreenshot();
-  } else if (key === "f" && fullRecordButtonEnabled) {
+  } else if (key === shortcutKeys.fullRecord && fullRecordButtonEnabled) {
     event.preventDefault();
     void toggleFullRecording().catch((error: Error) => window.alert(error.message));
-  } else if (key === "c" && fullScreenshotButtonEnabled) {
+  } else if (key === shortcutKeys.fullScreenshot && fullScreenshotButtonEnabled) {
     event.preventDefault();
     void captureFullScreenshot();
   }
@@ -2334,6 +2356,13 @@ chrome.runtime.onMessage.addListener((message: ContentCommand | PlayerStatusRequ
     return false;
   }
 
+  if (message.type === "CAPTURE_FULL_SCREENSHOT") {
+    void captureFullScreenshot()
+      .then(() => sendResponse({ ok: true }))
+      .catch((error: Error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
   if (message.type === "START_DIRECT_RECORDING") {
     void startDirectRecording(message)
       .then((response) => sendResponse(response))
@@ -2394,6 +2423,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     fullScreenshotButtonEnabled = Boolean(settings?.enableFullScreenshotButton);
     streamerFilenameEnabled = Boolean(settings?.enableStreamerFilename);
     shortcutsEnabled = Boolean(settings?.enableShortcuts);
+    shortcutKeys = normalizeShortcutKeys(settings?.shortcutKeys);
     requestChzzkToolSync();
     syncChzzkRecordTimer();
   }

@@ -1,12 +1,14 @@
 import {
   DEFAULT_RECORDING_STATE,
   DEFAULT_SETTINGS,
+  DEFAULT_SHORTCUT_KEYS,
   MAX_VIDEO_BITS_PER_SECOND,
   MIN_VIDEO_BITS_PER_SECOND,
   type AppState,
   type RecordingState,
   type RegionSelection,
   type Settings,
+  type ShortcutKeys,
 } from "./types.js";
 
 const STORAGE_KEYS = {
@@ -23,6 +25,17 @@ function coerceNumber(value: unknown, fallback: number): number {
   return Number.isFinite(value as number) ? Number(value) : fallback;
 }
 
+function normalizeShortcutKeys(raw: Partial<ShortcutKeys> | undefined): ShortcutKeys {
+  return {
+    selectRegion: typeof raw?.selectRegion === "string" && raw.selectRegion ? raw.selectRegion : DEFAULT_SHORTCUT_KEYS.selectRegion,
+    clearRegion: typeof raw?.clearRegion === "string" && raw.clearRegion ? raw.clearRegion : DEFAULT_SHORTCUT_KEYS.clearRegion,
+    regionRecord: typeof raw?.regionRecord === "string" && raw.regionRecord ? raw.regionRecord : DEFAULT_SHORTCUT_KEYS.regionRecord,
+    regionScreenshot: typeof raw?.regionScreenshot === "string" && raw.regionScreenshot ? raw.regionScreenshot : DEFAULT_SHORTCUT_KEYS.regionScreenshot,
+    fullRecord: typeof raw?.fullRecord === "string" && raw.fullRecord ? raw.fullRecord : DEFAULT_SHORTCUT_KEYS.fullRecord,
+    fullScreenshot: typeof raw?.fullScreenshot === "string" && raw.fullScreenshot ? raw.fullScreenshot : DEFAULT_SHORTCUT_KEYS.fullScreenshot,
+  };
+}
+
 export function normalizeSettings(raw: Partial<Settings> | undefined): Settings {
   const outputFormat = raw?.outputFormat === "webm" || raw?.outputFormat === "mp4" ? raw.outputFormat : DEFAULT_SETTINGS.outputFormat;
   const rawSettings = raw as Partial<Settings> & { customVideoBitsPerSecond?: number };
@@ -36,6 +49,7 @@ export function normalizeSettings(raw: Partial<Settings> | undefined): Settings 
     enableFullScreenshotButton: Boolean(raw?.enableFullScreenshotButton),
     enableStreamerFilename: Boolean(raw?.enableStreamerFilename),
     enableShortcuts: Boolean(raw?.enableShortcuts),
+    shortcutKeys: normalizeShortcutKeys(raw?.shortcutKeys),
   };
 }
 
