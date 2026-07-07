@@ -823,14 +823,28 @@ function buildDirectFilename(session: DirectRecordingSession): string {
 
 function sendRuntimeMessage<T = undefined>(message: Record<string, unknown>): Promise<MessageResponse & { data?: T }> {
   return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage(message, (response?: MessageResponse & { data?: T }) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
+    if (!isExtensionContextAvailable()) {
+      reject(new Error("확장 프로그램이 새로고침되었습니다. 페이지를 새로고침한 뒤 다시 시도하세요."));
+      return;
+    }
+
+    try {
+      chrome.runtime.sendMessage(message, (response?: MessageResponse & { data?: T }) => {
+        const lastError = chrome.runtime.lastError;
+        if (lastError) {
+          reject(new Error(lastError.message));
+          return;
+        }
+
+        resolve(response ?? { ok: true });
+      });
+    } catch (error) {
+      if (error instanceof Error) {
+        reject(error);
         return;
       }
-
-      resolve(response ?? { ok: true });
-    });
+      reject(new Error("확장 프로그램이 새로고침되었습니다. 페이지를 새로고침한 뒤 다시 시도하세요."));
+    }
   });
 }
 
@@ -1260,11 +1274,6 @@ function attachBorderControls(border: HTMLDivElement): void {
     }
 
     const type = currentRecordingState.status === "recording" && currentRecordingState.mode !== "full" ? "STOP_RECORDING" : "START_RECORDING";
-    if (!isExtensionContextAvailable()) {
-      window.alert("확장 프로그램이 새로고침되었습니다. 페이지를 새로고침한 뒤 다시 시도하세요.");
-      return;
-    }
-
     if (type === "START_RECORDING") {
       currentRecordingState = { status: "recording", startedAt: Date.now(), mode: "region" };
       updateRecordButton();
@@ -1276,32 +1285,10 @@ function attachBorderControls(border: HTMLDivElement): void {
       updateRecordButton();
     }
 
-    try {
-      chrome.runtime.sendMessage({ type }, (response?: MessageResponse) => {
-        if (chrome.runtime.lastError) {
-          if (type === "START_RECORDING") {
-            currentRecordingState = { status: "idle" };
-            updateRecordButton();
-          } else if (type === "STOP_RECORDING") {
-            currentRecordingState = previousRecordingState;
-            updateRecordButton();
-          }
-          window.alert(chrome.runtime.lastError.message);
-          return;
-        }
-
-        if (response && !response.ok) {
-          if (type === "START_RECORDING") {
-            currentRecordingState = { status: "idle" };
-            updateRecordButton();
-          } else if (type === "STOP_RECORDING") {
-            currentRecordingState = previousRecordingState;
-            updateRecordButton();
-          }
-          window.alert(response.error);
-        }
-      });
-    } catch {
+    void sendRuntimeMessage({ type }).then((response) => {
+      if (response.ok) {
+        return;
+      }
       if (type === "START_RECORDING") {
         currentRecordingState = { status: "idle" };
         updateRecordButton();
@@ -1309,8 +1296,17 @@ function attachBorderControls(border: HTMLDivElement): void {
         currentRecordingState = previousRecordingState;
         updateRecordButton();
       }
-      window.alert("확장 프로그램이 새로고침되었습니다. 페이지를 새로고침한 뒤 다시 시도하세요.");
-    }
+      window.alert(response.error);
+    }).catch((error: Error) => {
+      if (type === "START_RECORDING") {
+        currentRecordingState = { status: "idle" };
+        updateRecordButton();
+      } else if (type === "STOP_RECORDING") {
+        currentRecordingState = previousRecordingState;
+        updateRecordButton();
+      }
+      window.alert(error.message);
+    });
   };
 
   updateRecordButton();
@@ -1975,17 +1971,21 @@ function handlePlayerRecordActivation(event: MouseEvent): void {
   requestChzzkToolSync();
   syncChzzkRecordTimer();
 
-  void chrome.runtime
-    .sendMessage({ type })
-    .then((response: MessageResponse | undefined) => {
-      if (response && !response.ok) {
+  void sendRuntimeMessage({ type })
+    .then((response) => {
+      if (!response.ok) {
         currentRecordingState = previousRecordingState;
         requestChzzkToolSync();
         syncChzzkRecordTimer();
         window.alert(response.error);
       }
     })
-    .catch(() => {});
+    .catch((error: Error) => {
+      currentRecordingState = previousRecordingState;
+      requestChzzkToolSync();
+      syncChzzkRecordTimer();
+      window.alert(error.message);
+    });
 }
 
 function bindDirectPlayerScreenshotActivation(button: HTMLElement): void {

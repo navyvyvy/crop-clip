@@ -240,7 +240,7 @@ function renderShortcutList(): void {
     button.type = "button";
     button.dataset.action = action;
     button.dataset.waiting = isWaiting ? "true" : "false";
-    button.textContent = isWaiting ? "입력..." : appState.settings.shortcutKeys[action].toUpperCase();
+    button.textContent = isWaiting ? "입력" : appState.settings.shortcutKeys[action].toUpperCase();
     button.title = `${SHORTCUT_LABELS[action]} 단축키 변경`;
     button.addEventListener("click", () => {
       waitingShortcutAction = action;
