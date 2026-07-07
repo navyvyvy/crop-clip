@@ -44,14 +44,22 @@ jobs:
           test -n "$PUBLISHER_ID"
           test -n "$EXTENSION_ID"
 
-          TOKEN="$(
-            curl -fsS https://oauth2.googleapis.com/token \
+          oauth_token_response="$(mktemp)"
+          trap 'rm -f "$oauth_token_response"' EXIT
+          oauth_token_http_code="$(
+            curl -sS -o "$oauth_token_response" -w '%{http_code}' https://oauth2.googleapis.com/token \
               -d "client_id=$CLIENT_ID" \
               -d "client_secret=$CLIENT_SECRET" \
               -d "refresh_token=$REFRESH_TOKEN" \
-              -d "grant_type=refresh_token" |
-            node -e "let data='';process.stdin.on('data',c=>data+=c);process.stdin.on('end',()=>process.stdout.write(JSON.parse(data).access_token || ''));"
+              -d "grant_type=refresh_token"
           )"
+          TOKEN="$(
+            node -e "const fs=require('fs');const body=fs.readFileSync(process.argv[1],'utf8').trim();if(!body){process.exit(0);}const json=JSON.parse(body);if(json.access_token){process.stdout.write(json.access_token);}" "$oauth_token_response"
+          )"
+          if [ "$oauth_token_http_code" != "200" ] || [ -z "$TOKEN" ]; then
+            echo "OAuth token 발급 실패"
+            HTTP_CODE="$oauth_token_http_code" node -e 'const fs=require("fs");const path=process.argv[1];const raw=fs.readFileSync(path,"utf8").trim();let json;try{json=raw?JSON.parse(raw):{};}catch{json={raw}};const cause={invalid_client:"client_id / client_secret 조합이 잘못됐거나 다른 OAuth 클라이언트 값입니다.",invalid_grant:"refresh token이 폐기됐거나 만료됐거나, 다른 OAuth 클라이언트로 발급된 값입니다.",unauthorized_client:"OAuth 클라이언트 유형이나 사용 설정을 확인해야 합니다.",redirect_uri_mismatch:"redirect uri 설정이 맞지 않습니다."};console.log(`HTTP: ${process.env.HTTP_CODE}`);console.log(`error: ${json.error ?? "UNKNOWN"}`);if(json.error_description) console.log(`error_description: ${json.error_description}`);if(json.error_uri) console.log(`error_uri: ${json.error_uri}`);if(json.error) console.log(`추정 원인: ${cause[json.error] ?? "응답 메시지를 확인하세요."}`);if(json.raw) console.log(`raw: ${json.raw}`);process.exit(1);' "$oauth_token_response"
+          fi
           test -n "$TOKEN"
 
           ZIP_PATH="$(ls dist/crop-clip-*.zip | head -n 1)"
