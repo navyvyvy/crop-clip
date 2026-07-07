@@ -286,8 +286,9 @@ async function handleRecordingFinished(message: RecordingFinishedMessage): Promi
   });
 
   if (previousState.status === "recording") {
+    const source = typeof previousState.tabId === "number" ? `&sourceTabId=${previousState.tabId}` : "";
     await chrome.tabs.create({
-      url: chrome.runtime.getURL(`result/result.html?id=${encodeURIComponent(message.recording.id)}`),
+      url: chrome.runtime.getURL(`result/result.html?id=${encodeURIComponent(message.recording.id)}${source}`),
     });
   }
 

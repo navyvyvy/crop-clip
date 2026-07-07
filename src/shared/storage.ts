@@ -34,6 +34,8 @@ export function normalizeSettings(raw: Partial<Settings> | undefined): Settings 
     enable60fps: Boolean(raw?.enable60fps),
     enableFullRecordButton: Boolean(raw?.enableFullRecordButton),
     enableFullScreenshotButton: Boolean(raw?.enableFullScreenshotButton),
+    enableStreamerFilename: Boolean(raw?.enableStreamerFilename),
+    enableShortcuts: Boolean(raw?.enableShortcuts),
   };
 }
 

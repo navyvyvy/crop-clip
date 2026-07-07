@@ -4,6 +4,7 @@ import { DEFAULT_SETTINGS, type RecordingPartRecord, type RecordingRecord } from
 
 const params = new URLSearchParams(location.search);
 const recordingId = params.get("id") ?? "";
+const sourceTabId = Number(params.get("sourceTabId") ?? "");
 type OutputFormat = "webm" | "mp4";
 type ConvertFormat = OutputFormat | "gif";
 
@@ -838,6 +839,9 @@ elements.downloadCurrentButton.addEventListener("click", () => {
 });
 
 elements.closeButton.addEventListener("click", () => {
+  if (Number.isFinite(sourceTabId) && sourceTabId > 0) {
+    void chrome.tabs.update(sourceTabId, { active: true }).catch(() => {});
+  }
   window.close();
 });
 

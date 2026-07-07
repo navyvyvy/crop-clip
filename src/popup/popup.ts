@@ -12,6 +12,8 @@ const elements = {
   fpsModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='fps-mode']")),
   fullRecordModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='full-record-mode']")),
   fullScreenshotModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='full-screenshot-mode']")),
+  streamerFilenameModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='streamer-filename-mode']")),
+  shortcutModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='shortcut-mode']")),
   bitrateDecreaseButton: document.getElementById("bitrate-decrease-button") as HTMLButtonElement,
   bitrateIncreaseButton: document.getElementById("bitrate-increase-button") as HTMLButtonElement,
   customVideoBitrateInput: document.getElementById("custom-video-bitrate-input") as HTMLInputElement,
@@ -108,6 +110,12 @@ function syncPresetUi(settings: Settings): void {
   for (const input of elements.fullScreenshotModeInputs) {
     input.checked = input.value === (settings.enableFullScreenshotButton ? "on" : "off");
   }
+  for (const input of elements.streamerFilenameModeInputs) {
+    input.checked = input.value === (settings.enableStreamerFilename ? "on" : "off");
+  }
+  for (const input of elements.shortcutModeInputs) {
+    input.checked = input.value === (settings.enableShortcuts ? "on" : "off");
+  }
   elements.customVideoBitrateInput.value = formatBitrateMbps(settings.videoBitsPerSecond / BITS_PER_MEGABIT);
   showFpsWarning(settings);
 }
@@ -128,6 +136,8 @@ function renderState(): void {
     ...elements.fpsModeInputs,
     ...elements.fullRecordModeInputs,
     ...elements.fullScreenshotModeInputs,
+    ...elements.streamerFilenameModeInputs,
+    ...elements.shortcutModeInputs,
     elements.bitrateDecreaseButton,
     elements.bitrateIncreaseButton,
     elements.customVideoBitrateInput,
@@ -169,6 +179,8 @@ function readSettingsFromUi(): Settings {
   const enable60fps = elements.fpsModeInputs.find((input) => input.checked)?.value === "on";
   const enableFullRecordButton = elements.fullRecordModeInputs.find((input) => input.checked)?.value !== "off";
   const enableFullScreenshotButton = elements.fullScreenshotModeInputs.find((input) => input.checked)?.value !== "off";
+  const enableStreamerFilename = elements.streamerFilenameModeInputs.find((input) => input.checked)?.value !== "off";
+  const enableShortcuts = elements.shortcutModeInputs.find((input) => input.checked)?.value !== "off";
   const fallbackBitrateMbps = (appState.settings.videoBitsPerSecond ?? DEFAULT_SETTINGS.videoBitsPerSecond) / BITS_PER_MEGABIT;
   const videoBitsPerSecond = Math.round(Number(elements.customVideoBitrateInput.value || fallbackBitrateMbps) * BITS_PER_MEGABIT);
 
@@ -178,6 +190,8 @@ function readSettingsFromUi(): Settings {
     enable60fps,
     enableFullRecordButton,
     enableFullScreenshotButton,
+    enableStreamerFilename,
+    enableShortcuts,
   });
 }
 
@@ -283,7 +297,7 @@ elements.recordToggleButton.addEventListener("click", () => {
   });
 });
 
-for (const element of [...elements.outputFormatInputs, ...elements.fpsModeInputs, ...elements.fullRecordModeInputs, ...elements.fullScreenshotModeInputs]) {
+for (const element of [...elements.outputFormatInputs, ...elements.fpsModeInputs, ...elements.fullRecordModeInputs, ...elements.fullScreenshotModeInputs, ...elements.streamerFilenameModeInputs, ...elements.shortcutModeInputs]) {
   element.addEventListener("change", () => {
     void persistUiSettings();
   });

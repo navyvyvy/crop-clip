@@ -80,6 +80,8 @@ let currentRegion: RegionSelection | null = null;
 let selectionActive = false;
 let fullRecordButtonEnabled = false;
 let fullScreenshotButtonEnabled = false;
+let streamerFilenameEnabled = false;
+let shortcutsEnabled = false;
 let removeSelectionHandlers: (() => void) | null = null;
 let removeBorderHandlers: (() => void) | null = null;
 let currentRecordingState: LocalRecordingState = { status: "idle" };
@@ -602,7 +604,35 @@ function selectDirectMimeType(settings: Settings): { mimeType: string; extension
 function buildBaseName(): string {
   const date = new Date();
   const pad = (value: number) => String(value).padStart(2, "0");
-  return `cropClip_${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}_${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+  const rawName = streamerFilenameEnabled ? getStreamerName() : "";
+  const prefix = rawName ? sanitizeFilenamePart(rawName) || "cropClip" : "cropClip";
+  return `${prefix}_${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}_${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+}
+
+function sanitizeFilenamePart(value: string): string {
+  return value.replace(/[\\/:*?"<>|]/g, "").replace(/\s+/g, "_").trim().slice(0, 60);
+}
+
+function getStreamerName(): string {
+  const title = document.querySelector<HTMLMetaElement>('meta[property="og:title"]')?.content || document.title;
+  const titleName = title.split(/[-|]/)[0]?.replace(/치지직|CHZZK/gi, "").trim();
+  if (titleName) {
+    return titleName;
+  }
+
+  const selectors = [
+    "[class*='channel'][class*='name']",
+    "[class*='profile'][class*='name']",
+    "[class*='live'][class*='name']",
+  ];
+  for (const selector of selectors) {
+    const text = document.querySelector<HTMLElement>(selector)?.textContent?.trim();
+    if (text && text.length <= 60) {
+      return text;
+    }
+  }
+
+  return document.title.split(/[-|]/)[0]?.trim() ?? "";
 }
 
 function getCameraIconSvg(): string {
@@ -748,6 +778,30 @@ async function captureRegionScreenshot(): Promise<void> {
 
 async function captureFullScreenshot(): Promise<void> {
   await captureScreenshot(getPlayerRegionGeometry(), "스크린샷을 찍을 비디오 영역을 찾지 못했습니다.");
+}
+
+async function toggleRegionRecording(): Promise<void> {
+  if (currentRecordingState.status === "recording" && currentRecordingState.mode === "full") {
+    return;
+  }
+
+  const type = currentRecordingState.status === "recording" && currentRecordingState.mode !== "full" ? "STOP_RECORDING" : "START_RECORDING";
+  const response = await sendRuntimeMessage({ type });
+  if (!response.ok) {
+    window.alert(response.error);
+  }
+}
+
+async function toggleFullRecording(): Promise<void> {
+  if (currentRecordingState.status === "recording" && currentRecordingState.mode !== "full") {
+    return;
+  }
+
+  const type = currentRecordingState.status === "recording" ? "STOP_RECORDING" : "START_FULL_RECORDING";
+  const response = await sendRuntimeMessage({ type });
+  if (!response.ok) {
+    window.alert(response.error);
+  }
 }
 
 function buildDirectFilename(session: DirectRecordingSession): string {
@@ -1149,12 +1203,23 @@ function attachBorderControls(border: HTMLDivElement): void {
     }
 
     const isRegionRecording = currentRecordingState.status === "recording" && currentRecordingState.mode !== "full";
+    const isRecording = isAnyRecording();
     const isFullRecording = currentRecordingState.status === "recording" && currentRecordingState.mode === "full";
-    const label = isRegionRecording ? "녹화 중지" : "녹화 시작";
+    const label = withShortcut(isRegionRecording ? "녹화 중지" : "녹화 시작", "r");
     recordButton.innerHTML = getRecordIconSvg(isRegionRecording);
     recordButton.setAttribute("aria-label", label);
     recordButton.title = label;
     recordButton.disabled = isFullRecording;
+    if (screenshotButton) {
+      const screenshotLabel = withShortcut("스크린샷", "s");
+      screenshotButton.setAttribute("aria-label", screenshotLabel);
+      screenshotButton.title = screenshotLabel;
+    }
+    if (clearButton) {
+      const clearLabel = withShortcut("영역 해제", "x");
+      clearButton.setAttribute("aria-label", clearLabel);
+      clearButton.title = clearLabel;
+    }
     if (isRegionRecording) {
       recordButton.dataset.recording = "true";
       border.dataset.recording = "true";
@@ -1163,7 +1228,7 @@ function attachBorderControls(border: HTMLDivElement): void {
       delete border.dataset.recording;
     }
     if (clearButton) {
-      clearButton.disabled = isRegionRecording;
+      clearButton.disabled = isRecording;
     }
     if (moveButton) {
       moveButton.disabled = isRegionRecording;
@@ -1259,7 +1324,7 @@ function attachBorderControls(border: HTMLDivElement): void {
   const onClear = (event: MouseEvent) => {
     event.preventDefault();
     event.stopPropagation();
-    if (currentRecordingState.status === "recording" && currentRecordingState.mode !== "full") {
+    if (isAnyRecording()) {
       return;
     }
 
@@ -1394,13 +1459,15 @@ function attachBorderControls(border: HTMLDivElement): void {
   };
 }
 
-async function loadState(): Promise<{ region: RegionSelection | null; recordingState: LocalRecordingState; fullRecordButtonEnabled: boolean; fullScreenshotButtonEnabled: boolean }> {
+async function loadState(): Promise<{ region: RegionSelection | null; recordingState: LocalRecordingState; fullRecordButtonEnabled: boolean; fullScreenshotButtonEnabled: boolean; streamerFilenameEnabled: boolean; shortcutsEnabled: boolean }> {
   if (!isExtensionContextAvailable()) {
     return {
       region: null,
       recordingState: { status: "idle" },
       fullRecordButtonEnabled: false,
       fullScreenshotButtonEnabled: false,
+      streamerFilenameEnabled: false,
+      shortcutsEnabled: false,
     };
   }
 
@@ -1417,6 +1484,8 @@ async function loadState(): Promise<{ region: RegionSelection | null; recordingS
       recordingState: { status: "idle" },
       fullRecordButtonEnabled: false,
       fullScreenshotButtonEnabled: false,
+      streamerFilenameEnabled: false,
+      shortcutsEnabled: false,
     };
   }
 
@@ -1425,6 +1494,8 @@ async function loadState(): Promise<{ region: RegionSelection | null; recordingS
     recordingState: normalizeRecordingState(result.recordingState),
     fullRecordButtonEnabled: Boolean(result.settings?.enableFullRecordButton),
     fullScreenshotButtonEnabled: Boolean(result.settings?.enableFullScreenshotButton),
+    streamerFilenameEnabled: Boolean(result.settings?.enableStreamerFilename),
+    shortcutsEnabled: Boolean(result.settings?.enableShortcuts),
   };
 }
 
@@ -1510,6 +1581,8 @@ async function refreshBorder(): Promise<void> {
   currentRecordingState = state.recordingState;
   fullRecordButtonEnabled = state.fullRecordButtonEnabled;
   fullScreenshotButtonEnabled = state.fullScreenshotButtonEnabled;
+  streamerFilenameEnabled = state.streamerFilenameEnabled;
+  shortcutsEnabled = state.shortcutsEnabled;
   showSelectionBorder(currentRegion);
 
   if (state.recordingState.status === "recording" && selectionActive) {
@@ -1522,6 +1595,8 @@ async function initializePageState(): Promise<void> {
   currentRecordingState = state.recordingState;
   fullRecordButtonEnabled = state.fullRecordButtonEnabled;
   fullScreenshotButtonEnabled = state.fullScreenshotButtonEnabled;
+  streamerFilenameEnabled = state.streamerFilenameEnabled;
+  shortcutsEnabled = state.shortcutsEnabled;
 
   if (state.recordingState.status !== "recording" && state.region) {
     await clearRegion();
@@ -1626,7 +1701,7 @@ function getPlayerRegionGeometry(): RegionSelection | null {
 }
 
 function startSelection(): void {
-  if (selectionActive) {
+  if (selectionActive || isAnyRecording()) {
     return;
   }
 
@@ -1774,10 +1849,14 @@ function getRecordIconSvg(recording = false): string {
     `;
 }
 
+function withShortcut(label: string, key: string): string {
+  return shortcutsEnabled ? `${label} (${key})` : label;
+}
+
 function setChzzkRecordButtonContent(button: HTMLElement): void {
   const isFullRecording = currentRecordingState.status === "recording" && currentRecordingState.mode === "full";
   const isRegionRecording = currentRecordingState.status === "recording" && currentRecordingState.mode !== "full";
-  const label = isFullRecording ? "전체 녹화 정지" : "전체 녹화 시작";
+  const label = withShortcut(isFullRecording ? "전체 녹화 정지" : "전체 녹화 시작", "f");
   button.setAttribute("aria-label", label);
   button.setAttribute("type", "button");
   button.removeAttribute("title");
@@ -1792,7 +1871,7 @@ function setChzzkRecordButtonContent(button: HTMLElement): void {
 }
 
 function setChzzkScreenshotButtonContent(button: HTMLElement): void {
-  const label = "전체 스크린샷";
+  const label = withShortcut("전체 스크린샷", "c");
   button.setAttribute("aria-label", label);
   button.setAttribute("type", "button");
   button.removeAttribute("title");
@@ -1803,11 +1882,12 @@ function setChzzkScreenshotButtonContent(button: HTMLElement): void {
 }
 
 function setChzzkButtonContent(button: HTMLElement): void {
-  button.setAttribute("aria-label", PLAYER_TOOL_LABEL);
+  const label = withShortcut(PLAYER_TOOL_LABEL, "a");
+  button.setAttribute("aria-label", label);
   button.setAttribute("type", "button");
   button.removeAttribute("title");
   button.innerHTML = `
-    <span class="pzp-button__tooltip pzp-button__tooltip--top">${PLAYER_TOOL_LABEL}</span>
+    <span class="pzp-button__tooltip pzp-button__tooltip--top">${label}</span>
     <span class="pzp-ui-icon pzp-pc-setting-button__icon">${getCropIconSvg()}</span>
   `;
 }
@@ -2053,6 +2133,7 @@ function syncChzzkToolButton(): void {
   selectButton.id = CHZZK_TOOL_BUTTON_ID;
   selectButton.className = CHZZK_TOOL_BUTTON_CLASS;
   selectButton.type = "button";
+  selectButton.disabled = isAnyRecording();
   setChzzkButtonContent(selectButton);
   bindDirectPlayerToolActivation(selectButton);
 
@@ -2131,6 +2212,62 @@ function isRecordingState(value: LocalRecordingState): boolean {
   return value.status === "recording";
 }
 
+function isAnyRecording(): boolean {
+  return currentRecordingState.status === "recording";
+}
+
+function isEditableShortcutTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLInputElement
+    || target instanceof HTMLTextAreaElement
+    || target instanceof HTMLSelectElement
+    || (target instanceof HTMLElement && target.isContentEditable);
+}
+
+function handleShortcut(event: KeyboardEvent): void {
+  if (!shortcutsEnabled || event.repeat || event.ctrlKey || event.metaKey || event.altKey || isEditableShortcutTarget(event.target)) {
+    return;
+  }
+
+  const key = event.key.toLowerCase();
+  if (key === "a") {
+    event.preventDefault();
+    if (isAnyRecording()) {
+      return;
+    }
+    startSelection();
+  } else if (key === "x") {
+    event.preventDefault();
+    if (isAnyRecording()) {
+      return;
+    }
+    if (selectionActive) {
+      cancelSelection();
+      return;
+    }
+
+    void (async () => {
+      if (!(await clearRegion())) {
+        window.alert("영역을 해제하지 못했습니다.");
+        return;
+      }
+      currentRegion = null;
+      showSelectionBorder(null);
+    })();
+  } else if (key === "r") {
+    event.preventDefault();
+    void toggleRegionRecording().catch((error: Error) => window.alert(error.message));
+  } else if (key === "s") {
+    event.preventDefault();
+    void captureRegionScreenshot();
+  } else if (key === "f" && fullRecordButtonEnabled) {
+    event.preventDefault();
+    void toggleFullRecording().catch((error: Error) => window.alert(error.message));
+  } else if (key === "c" && fullScreenshotButtonEnabled) {
+    event.preventDefault();
+    void captureFullScreenshot();
+  }
+}
+
 function findPrimaryVideoElement(): HTMLVideoElement | null {
   const videos = Array.from(document.querySelectorAll("video"));
   if (videos.length === 0) {
@@ -2172,6 +2309,12 @@ chrome.runtime.onMessage.addListener((message: ContentCommand | PlayerStatusRequ
 
   if (message.type === "CLEAR_REGION") {
     void (async () => {
+      const state = await loadState();
+      if (isRecordingState(state.recordingState)) {
+        sendResponse({ ok: false, error: "녹화 중에는 영역을 해제할 수 없습니다." });
+        return;
+      }
+
       await clearRegion();
       showSelectionBorder(null);
       sendResponse({ ok: true });
@@ -2249,6 +2392,8 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     const settings = changes.settings.newValue as Partial<Settings> | undefined;
     fullRecordButtonEnabled = Boolean(settings?.enableFullRecordButton);
     fullScreenshotButtonEnabled = Boolean(settings?.enableFullScreenshotButton);
+    streamerFilenameEnabled = Boolean(settings?.enableStreamerFilename);
+    shortcutsEnabled = Boolean(settings?.enableShortcuts);
     requestChzzkToolSync();
     syncChzzkRecordTimer();
   }
@@ -2277,6 +2422,11 @@ window.addEventListener("beforeunload", () => {
 });
 
 window.addEventListener("keydown", (event) => {
+  handleShortcut(event);
+  if (event.defaultPrevented) {
+    return;
+  }
+
   if (!directSession) {
     return;
   }

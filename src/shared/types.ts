@@ -9,6 +9,8 @@ export interface Settings {
   enable60fps: boolean;
   enableFullRecordButton: boolean;
   enableFullScreenshotButton: boolean;
+  enableStreamerFilename: boolean;
+  enableShortcuts: boolean;
 }
 
 export interface RegionSelection {
@@ -88,6 +90,8 @@ export const DEFAULT_SETTINGS: Settings = {
   enable60fps: false,
   enableFullRecordButton: false,
   enableFullScreenshotButton: false,
+  enableStreamerFilename: false,
+  enableShortcuts: false,
 };
 
 export const DEFAULT_RECORDING_STATE: RecordingState = {
