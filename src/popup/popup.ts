@@ -1,4 +1,4 @@
-import { DEFAULT_SETTINGS, DEFAULT_SHORTCUT_KEYS, FPS_WARNING_VIDEO_BITS_PER_SECOND, MAX_VIDEO_BITS_PER_SECOND, MIN_VIDEO_BITS_PER_SECOND, type AppState, type RecordingFormat, type Settings, type ShortcutAction } from "../shared/types.js";
+import { DEFAULT_SEEK_SECONDS, DEFAULT_SETTINGS, DEFAULT_SHORTCUT_KEYS, FPS_WARNING_VIDEO_BITS_PER_SECOND, MAX_SEEK_SECONDS, MAX_VIDEO_BITS_PER_SECOND, MIN_SEEK_SECONDS, MIN_VIDEO_BITS_PER_SECOND, type AppState, type RecordingFormat, type Settings, type ShortcutAction } from "../shared/types.js";
 import { loadAppState, normalizeRecordingState, normalizeRegion, normalizeSettings, saveSettings } from "../shared/storage.js";
 import type { MessageResponse } from "../shared/messages.js";
 
@@ -15,6 +15,11 @@ const elements = {
   fpsModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='fps-mode']")),
   fullRecordModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='full-record-mode']")),
   fullScreenshotModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='full-screenshot-mode']")),
+  seekButtonModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='seek-button-mode']")),
+  seekSecondsRow: document.getElementById("seek-seconds-row") as HTMLDivElement,
+  seekDecreaseButton: document.getElementById("seek-decrease-button") as HTMLButtonElement,
+  seekIncreaseButton: document.getElementById("seek-increase-button") as HTMLButtonElement,
+  seekSecondsInput: document.getElementById("seek-seconds-input") as HTMLInputElement,
   streamerFilenameModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='streamer-filename-mode']")),
   shortcutModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='shortcut-mode']")),
   bitrateDecreaseButton: document.getElementById("bitrate-decrease-button") as HTMLButtonElement,
@@ -128,6 +133,11 @@ function syncPresetUi(settings: Settings): void {
   for (const input of elements.fullScreenshotModeInputs) {
     input.checked = input.value === (settings.enableFullScreenshotButton ? "on" : "off");
   }
+  for (const input of elements.seekButtonModeInputs) {
+    input.checked = input.value === (settings.enableSeek ? "on" : "off");
+  }
+  elements.seekSecondsRow.hidden = !settings.enableSeek;
+  elements.seekSecondsInput.value = String(settings.seekSeconds);
   for (const input of elements.streamerFilenameModeInputs) {
     input.checked = input.value === (settings.enableStreamerFilename ? "on" : "off");
   }
@@ -165,6 +175,10 @@ function renderState(): void {
     ...elements.fpsModeInputs,
     ...elements.fullRecordModeInputs,
     ...elements.fullScreenshotModeInputs,
+    ...elements.seekButtonModeInputs,
+    elements.seekDecreaseButton,
+    elements.seekIncreaseButton,
+    elements.seekSecondsInput,
     ...elements.streamerFilenameModeInputs,
     ...elements.shortcutModeInputs,
     elements.bitrateDecreaseButton,
@@ -192,6 +206,13 @@ async function stepBitrate(direction: -1 | 1): Promise<void> {
   await persistUiSettings();
 }
 
+async function stepSeekSeconds(direction: -1 | 1): Promise<void> {
+  const current = Number(elements.seekSecondsInput.value || DEFAULT_SEEK_SECONDS);
+  const next = Math.min(MAX_SEEK_SECONDS, Math.max(MIN_SEEK_SECONDS, (Number.isFinite(current) ? current : DEFAULT_SEEK_SECONDS) + direction));
+  elements.seekSecondsInput.value = String(next);
+  await persistUiSettings();
+}
+
 async function sendCommand<T = undefined>(message: { type: string }): Promise<MessageResponse<T>> {
   return (await chrome.runtime.sendMessage(message)) as MessageResponse<T>;
 }
@@ -208,6 +229,8 @@ function readSettingsFromUi(): Settings {
   const enable60fps = elements.fpsModeInputs.find((input) => input.checked)?.value === "on";
   const enableFullRecordButton = elements.fullRecordModeInputs.find((input) => input.checked)?.value !== "off";
   const enableFullScreenshotButton = elements.fullScreenshotModeInputs.find((input) => input.checked)?.value !== "off";
+  const enableSeek = elements.seekButtonModeInputs.find((input) => input.checked)?.value !== "off";
+  const seekSeconds = Number(elements.seekSecondsInput.value || DEFAULT_SEEK_SECONDS);
   const enableStreamerFilename = elements.streamerFilenameModeInputs.find((input) => input.checked)?.value !== "off";
   const enableShortcuts = elements.shortcutModeInputs.find((input) => input.checked)?.value !== "off";
   const fallbackBitrateMbps = (appState.settings.videoBitsPerSecond ?? DEFAULT_SETTINGS.videoBitsPerSecond) / BITS_PER_MEGABIT;
@@ -219,6 +242,8 @@ function readSettingsFromUi(): Settings {
     enable60fps,
     enableFullRecordButton,
     enableFullScreenshotButton,
+    enableSeek,
+    seekSeconds,
     enableStreamerFilename,
     enableShortcuts,
     shortcutKeys: appState.settings.shortcutKeys,
@@ -282,6 +307,8 @@ function sanitizeBitrateInput(): void {
 
 async function persistUiSettings(): Promise<void> {
   sanitizeBitrateInput();
+  const rawSeekSeconds = Number(elements.seekSecondsInput.value || DEFAULT_SEEK_SECONDS);
+  elements.seekSecondsInput.value = String(Math.min(MAX_SEEK_SECONDS, Math.max(MIN_SEEK_SECONDS, Math.round(Number.isFinite(rawSeekSeconds) ? rawSeekSeconds : DEFAULT_SEEK_SECONDS))));
   if (!elements.customVideoBitrateInput.value) {
     syncPresetUi(appState.settings);
     return;
@@ -387,7 +414,7 @@ elements.fullScreenshotButton.addEventListener("click", () => {
   });
 });
 
-for (const element of [...elements.outputFormatInputs, ...elements.fpsModeInputs, ...elements.fullRecordModeInputs, ...elements.fullScreenshotModeInputs, ...elements.streamerFilenameModeInputs, ...elements.shortcutModeInputs]) {
+for (const element of [...elements.outputFormatInputs, ...elements.fpsModeInputs, ...elements.fullRecordModeInputs, ...elements.fullScreenshotModeInputs, ...elements.seekButtonModeInputs, ...elements.streamerFilenameModeInputs, ...elements.shortcutModeInputs]) {
   element.addEventListener("change", () => {
     void persistUiSettings();
   });
@@ -401,12 +428,24 @@ elements.customVideoBitrateInput.addEventListener("change", () => {
   void persistUiSettings();
 });
 
+elements.seekSecondsInput.addEventListener("change", () => {
+  void persistUiSettings();
+});
+
 elements.bitrateDecreaseButton.addEventListener("click", () => {
   void stepBitrate(-1);
 });
 
 elements.bitrateIncreaseButton.addEventListener("click", () => {
   void stepBitrate(1);
+});
+
+elements.seekDecreaseButton.addEventListener("click", () => {
+  void stepSeekSeconds(-1);
+});
+
+elements.seekIncreaseButton.addEventListener("click", () => {
+  void stepSeekSeconds(1);
 });
 
 elements.shortcutSettingsButton.addEventListener("click", () => {

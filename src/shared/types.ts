@@ -11,6 +11,8 @@ export interface Settings {
   enable60fps: boolean;
   enableFullRecordButton: boolean;
   enableFullScreenshotButton: boolean;
+  enableSeek: boolean;
+  seekSeconds: number;
   enableStreamerFilename: boolean;
   enableShortcuts: boolean;
   shortcutKeys: ShortcutKeys;
@@ -86,6 +88,9 @@ export const MIN_VIDEO_BITS_PER_SECOND = 100_000;
 export const MAX_VIDEO_BITS_PER_SECOND = 12_000_000;
 export const DEFAULT_VIDEO_BITS_PER_SECOND = 4_000_000;
 export const FPS_WARNING_VIDEO_BITS_PER_SECOND = DEFAULT_VIDEO_BITS_PER_SECOND;
+export const MIN_SEEK_SECONDS = 1;
+export const MAX_SEEK_SECONDS = 60;
+export const DEFAULT_SEEK_SECONDS = 5;
 export const DEFAULT_SHORTCUT_KEYS: ShortcutKeys = {
   selectRegion: "a",
   clearRegion: "x",
@@ -101,6 +106,8 @@ export const DEFAULT_SETTINGS: Settings = {
   enable60fps: false,
   enableFullRecordButton: false,
   enableFullScreenshotButton: false,
+  enableSeek: false,
+  seekSeconds: DEFAULT_SEEK_SECONDS,
   enableStreamerFilename: false,
   enableShortcuts: false,
   shortcutKeys: DEFAULT_SHORTCUT_KEYS,

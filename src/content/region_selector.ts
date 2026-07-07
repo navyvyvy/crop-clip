@@ -9,6 +9,7 @@
 
 const OVERLAY_ID = "crop-clip-overlay";
 const BORDER_ID = "crop-clip-border";
+const SEEK_FEEDBACK_ID = "crop-clip-seek-feedback";
 const SCREENSHOT_STACK_ID = "crop-clip-screenshot-stack";
 const STYLE_ID = "crop-clip-style";
 const MIN_WIDTH = 50;
@@ -90,6 +91,8 @@ let currentRegion: RegionSelection | null = null;
 let selectionActive = false;
 let fullRecordButtonEnabled = false;
 let fullScreenshotButtonEnabled = false;
+let seekEnabled = false;
+let seekSeconds = 5;
 let streamerFilenameEnabled = false;
 let shortcutsEnabled = false;
 let shortcutKeys: ShortcutKeys = DEFAULT_CONTENT_SHORTCUT_KEYS;
@@ -100,6 +103,7 @@ let directSession: DirectRecordingSession | null = null;
 let chzzkToolObserver: MutationObserver | null = null;
 let chzzkToolSyncFrame: number | null = null;
 let chzzkRecordTimerId: number | null = null;
+let seekFeedbackTimerId: number | null = null;
 let lastRecordPointerActivationAt = 0;
 let lastScreenshotPointerActivationAt = 0;
 let regionLayoutTimerId: number | null = null;
@@ -417,6 +421,29 @@ function ensureStyle(): void {
 
     #${CHZZK_RECORD_TIME_ID}[hidden] {
       display: none !important;
+    }
+
+    #${SEEK_FEEDBACK_ID} {
+      position: fixed;
+      z-index: 2147483644;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      padding: 8px 12px;
+      border: 1px solid rgba(238, 244, 251, 0.16);
+      border-radius: 10px;
+      background: rgba(6, 13, 20, 0.42);
+      color: rgba(244, 251, 255, 0.78);
+      font-size: 17px;
+      font-weight: 900;
+      line-height: 1;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 120ms ease;
+    }
+
+    #${SEEK_FEEDBACK_ID}[data-visible="true"] {
+      opacity: 1;
     }
 
   `;
@@ -1468,13 +1495,15 @@ function attachBorderControls(border: HTMLDivElement): void {
   };
 }
 
-async function loadState(): Promise<{ region: RegionSelection | null; recordingState: LocalRecordingState; fullRecordButtonEnabled: boolean; fullScreenshotButtonEnabled: boolean; streamerFilenameEnabled: boolean; shortcutsEnabled: boolean; shortcutKeys: ShortcutKeys }> {
+async function loadState(): Promise<{ region: RegionSelection | null; recordingState: LocalRecordingState; fullRecordButtonEnabled: boolean; fullScreenshotButtonEnabled: boolean; seekEnabled: boolean; seekSeconds: number; streamerFilenameEnabled: boolean; shortcutsEnabled: boolean; shortcutKeys: ShortcutKeys }> {
   if (!isExtensionContextAvailable()) {
     return {
       region: null,
       recordingState: { status: "idle" },
       fullRecordButtonEnabled: false,
       fullScreenshotButtonEnabled: false,
+      seekEnabled: false,
+      seekSeconds: 5,
       streamerFilenameEnabled: false,
       shortcutsEnabled: false,
       shortcutKeys: DEFAULT_CONTENT_SHORTCUT_KEYS,
@@ -1494,6 +1523,8 @@ async function loadState(): Promise<{ region: RegionSelection | null; recordingS
       recordingState: { status: "idle" },
       fullRecordButtonEnabled: false,
       fullScreenshotButtonEnabled: false,
+      seekEnabled: false,
+      seekSeconds: 5,
       streamerFilenameEnabled: false,
       shortcutsEnabled: false,
       shortcutKeys: DEFAULT_CONTENT_SHORTCUT_KEYS,
@@ -1505,6 +1536,8 @@ async function loadState(): Promise<{ region: RegionSelection | null; recordingS
     recordingState: normalizeRecordingState(result.recordingState),
     fullRecordButtonEnabled: Boolean(result.settings?.enableFullRecordButton),
     fullScreenshotButtonEnabled: Boolean(result.settings?.enableFullScreenshotButton),
+    seekEnabled: Boolean(result.settings?.enableSeek ?? (result.settings as Partial<Settings> & { enableSeekButtons?: boolean } | undefined)?.enableSeekButtons),
+    seekSeconds: Number.isFinite(result.settings?.seekSeconds) ? Number(result.settings?.seekSeconds) : 5,
     streamerFilenameEnabled: Boolean(result.settings?.enableStreamerFilename),
     shortcutsEnabled: Boolean(result.settings?.enableShortcuts),
     shortcutKeys: normalizeShortcutKeys(result.settings?.shortcutKeys),
@@ -1597,6 +1630,8 @@ async function refreshBorder(): Promise<void> {
   currentRecordingState = state.recordingState;
   fullRecordButtonEnabled = state.fullRecordButtonEnabled;
   fullScreenshotButtonEnabled = state.fullScreenshotButtonEnabled;
+  seekEnabled = state.seekEnabled;
+  seekSeconds = state.seekSeconds;
   streamerFilenameEnabled = state.streamerFilenameEnabled;
   shortcutsEnabled = state.shortcutsEnabled;
   shortcutKeys = state.shortcutKeys;
@@ -1612,6 +1647,8 @@ async function initializePageState(): Promise<void> {
   currentRecordingState = state.recordingState;
   fullRecordButtonEnabled = state.fullRecordButtonEnabled;
   fullScreenshotButtonEnabled = state.fullScreenshotButtonEnabled;
+  seekEnabled = state.seekEnabled;
+  seekSeconds = state.seekSeconds;
   streamerFilenameEnabled = state.streamerFilenameEnabled;
   shortcutsEnabled = state.shortcutsEnabled;
   shortcutKeys = state.shortcutKeys;
@@ -1910,6 +1947,31 @@ function setChzzkButtonContent(button: HTMLElement): void {
   `;
 }
 
+function showSeekFeedback(deltaSeconds: number): void {
+  ensureStyle();
+  const videoRect = findPrimaryVideoElement()?.getBoundingClientRect();
+  const feedback = document.getElementById(SEEK_FEEDBACK_ID) ?? document.createElement("div");
+  feedback.id = SEEK_FEEDBACK_ID;
+  feedback.textContent = `${deltaSeconds > 0 ? "+" : ""}${deltaSeconds}초`;
+  if (videoRect && videoRect.width > 0 && videoRect.height > 0) {
+    feedback.style.left = `${videoRect.left + videoRect.width / 2}px`;
+    feedback.style.top = `${videoRect.top + videoRect.height / 2}px`;
+  } else {
+    feedback.style.left = "50%";
+    feedback.style.top = "50%";
+  }
+  document.body.appendChild(feedback);
+  feedback.dataset.visible = "true";
+
+  if (seekFeedbackTimerId !== null) {
+    window.clearTimeout(seekFeedbackTimerId);
+  }
+  seekFeedbackTimerId = window.setTimeout(() => {
+    feedback.dataset.visible = "false";
+    seekFeedbackTimerId = null;
+  }, 650);
+}
+
 function handlePlayerScreenshotActivation(event: MouseEvent): void {
   if (event.button !== 0) {
     return;
@@ -1928,6 +1990,20 @@ function handlePlayerScreenshotActivation(event: MouseEvent): void {
   event.preventDefault();
   event.stopPropagation();
   void captureFullScreenshot();
+}
+
+function seekPrimaryVideo(deltaSeconds: number): void {
+  const video = findPrimaryVideoElement();
+  if (!video) {
+    window.alert("이동할 비디오를 찾지 못했습니다.");
+    return;
+  }
+
+  const nextTime = video.currentTime + deltaSeconds;
+  video.currentTime = Number.isFinite(video.duration)
+    ? clamp(nextTime, 0, video.duration)
+    : Math.max(0, nextTime);
+  showSeekFeedback(deltaSeconds);
 }
 
 function handlePlayerToolActivation(event: MouseEvent): void {
@@ -2028,7 +2104,12 @@ function getVisiblePzpButtons(root: ParentNode = document): HTMLElement[] {
     root.querySelectorAll<HTMLElement>(
       ".pzp-button, button[class*='pzp'][class*='button'], [role='button'][class*='pzp'][class*='button']",
     ),
-  ).filter((button) => button.id !== CHZZK_TOOL_BUTTON_ID && button.id !== CHZZK_RECORD_BUTTON_ID && button.id !== CHZZK_SCREENSHOT_BUTTON_ID && isVisibleElement(button));
+  ).filter((button) =>
+    button.id !== CHZZK_TOOL_BUTTON_ID &&
+    button.id !== CHZZK_RECORD_BUTTON_ID &&
+    button.id !== CHZZK_SCREENSHOT_BUTTON_ID &&
+    isVisibleElement(button)
+  );
 }
 
 function compareBottomRight(a: DOMRect, b: DOMRect): number {
@@ -2173,7 +2254,12 @@ function syncChzzkToolButton(): void {
     screenshotButton?.remove();
     selectButton.remove();
     const firstControl = Array.from(host.children).find(
-      (child) => child instanceof HTMLElement && child.id !== CHZZK_TOOL_BUTTON_ID && child.id !== CHZZK_RECORD_BUTTON_ID && child.id !== CHZZK_SCREENSHOT_BUTTON_ID && child.id !== CHZZK_RECORD_TIME_ID,
+      (child) =>
+        child instanceof HTMLElement &&
+        child.id !== CHZZK_TOOL_BUTTON_ID &&
+        child.id !== CHZZK_RECORD_BUTTON_ID &&
+        child.id !== CHZZK_SCREENSHOT_BUTTON_ID &&
+        child.id !== CHZZK_RECORD_TIME_ID,
     );
     if (timeBadge) {
       host.insertBefore(timeBadge, firstControl ?? null);
@@ -2246,7 +2332,17 @@ function isEditableShortcutTarget(target: EventTarget | null): boolean {
 }
 
 function handleShortcut(event: KeyboardEvent): void {
-  if (!shortcutsEnabled || event.repeat || event.ctrlKey || event.metaKey || event.altKey || isEditableShortcutTarget(event.target)) {
+  if (event.repeat || event.ctrlKey || event.metaKey || event.altKey || isEditableShortcutTarget(event.target)) {
+    return;
+  }
+
+  if (seekEnabled && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+    event.preventDefault();
+    seekPrimaryVideo(event.key === "ArrowLeft" ? -seekSeconds : seekSeconds);
+    return;
+  }
+
+  if (!shortcutsEnabled) {
     return;
   }
 
@@ -2322,112 +2418,116 @@ function getPlayerStatus(): PlayerStatusResponse {
   return { ok: true, data: { muted: video.muted, volume: video.volume } };
 }
 
-chrome.runtime.onMessage.addListener((message: ContentCommand | PlayerStatusRequest, _sender, sendResponse: (response: MessageResponse | PlayerStatusResponse | RegionGeometryResponse) => void) => {
-  if (message.type === "GET_PLAYER_STATUS") {
-    const status = getPlayerStatus();
-    sendResponse(status.ok && status.data.muted ? { ok: false, error: "현재 탭의 영상이 음소거되어 있습니다." } : status);
-    return false;
-  }
+if (isExtensionContextAvailable()) {
+  chrome.runtime.onMessage.addListener((message: ContentCommand | PlayerStatusRequest, _sender, sendResponse: (response: MessageResponse | PlayerStatusResponse | RegionGeometryResponse) => void) => {
+    if (message.type === "GET_PLAYER_STATUS") {
+      const status = getPlayerStatus();
+      sendResponse(status.ok && status.data.muted ? { ok: false, error: "현재 탭의 영상이 음소거되어 있습니다." } : status);
+      return false;
+    }
 
-  if (message.type === "CLEAR_REGION") {
+    if (message.type === "CLEAR_REGION") {
+      void (async () => {
+        const state = await loadState();
+        if (isRecordingState(state.recordingState)) {
+          sendResponse({ ok: false, error: "녹화 중에는 영역을 해제할 수 없습니다." });
+          return;
+        }
+
+        await clearRegion();
+        showSelectionBorder(null);
+        sendResponse({ ok: true });
+      })();
+      return true;
+    }
+
+    if (message.type === "GET_REGION_GEOMETRY") {
+      const region = getCurrentRegionGeometry();
+      sendResponse(region ? { ok: true, data: region } : { ok: false, error: "현재 선택된 녹화 영역을 찾지 못했습니다." });
+      return false;
+    }
+
+    if (message.type === "GET_PLAYER_REGION_GEOMETRY") {
+      const region = getPlayerRegionGeometry();
+      sendResponse(region ? { ok: true, data: region } : { ok: false, error: "재생 가능한 비디오 영역을 찾지 못했습니다." });
+      return false;
+    }
+
+    if (message.type === "CAPTURE_FULL_SCREENSHOT") {
+      void captureFullScreenshot()
+        .then(() => sendResponse({ ok: true }))
+        .catch((error: Error) => sendResponse({ ok: false, error: error.message }));
+      return true;
+    }
+
+    if (message.type === "START_DIRECT_RECORDING") {
+      void startDirectRecording(message)
+        .then((response) => sendResponse(response))
+        .catch((error: Error) => sendResponse({ ok: false, error: error.message }));
+      return true;
+    }
+
+    if (message.type === "STOP_DIRECT_RECORDING") {
+      void stopDirectRecording()
+        .then((response) => sendResponse(response))
+        .catch((error: Error) => sendResponse({ ok: false, error: error.message }));
+      return true;
+    }
+
+    if (message.type !== "START_SELECTION") {
+      return false;
+    }
+
     void (async () => {
       const state = await loadState();
+
       if (isRecordingState(state.recordingState)) {
-        sendResponse({ ok: false, error: "녹화 중에는 영역을 해제할 수 없습니다." });
+        sendResponse({ ok: false, error: "녹화 중에는 영역을 선택할 수 없습니다." });
         return;
       }
 
-      await clearRegion();
-      showSelectionBorder(null);
+      startSelection();
       sendResponse({ ok: true });
     })();
+
     return true;
-  }
+  });
 
-  if (message.type === "GET_REGION_GEOMETRY") {
-    const region = getCurrentRegionGeometry();
-    sendResponse(region ? { ok: true, data: region } : { ok: false, error: "현재 선택된 녹화 영역을 찾지 못했습니다." });
-    return false;
-  }
-
-  if (message.type === "GET_PLAYER_REGION_GEOMETRY") {
-    const region = getPlayerRegionGeometry();
-    sendResponse(region ? { ok: true, data: region } : { ok: false, error: "재생 가능한 비디오 영역을 찾지 못했습니다." });
-    return false;
-  }
-
-  if (message.type === "CAPTURE_FULL_SCREENSHOT") {
-    void captureFullScreenshot()
-      .then(() => sendResponse({ ok: true }))
-      .catch((error: Error) => sendResponse({ ok: false, error: error.message }));
-    return true;
-  }
-
-  if (message.type === "START_DIRECT_RECORDING") {
-    void startDirectRecording(message)
-      .then((response) => sendResponse(response))
-      .catch((error: Error) => sendResponse({ ok: false, error: error.message }));
-    return true;
-  }
-
-  if (message.type === "STOP_DIRECT_RECORDING") {
-    void stopDirectRecording()
-      .then((response) => sendResponse(response))
-      .catch((error: Error) => sendResponse({ ok: false, error: error.message }));
-    return true;
-  }
-
-  if (message.type !== "START_SELECTION") {
-    return false;
-  }
-
-  void (async () => {
-    const state = await loadState();
-
-    if (isRecordingState(state.recordingState)) {
-      sendResponse({ ok: false, error: "녹화 중에는 영역을 선택할 수 없습니다." });
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== "local") {
       return;
     }
 
-    startSelection();
-    sendResponse({ ok: true });
-  })();
-
-  return true;
-});
-
-chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName !== "local") {
-    return;
-  }
-
-  if (changes.region) {
-    currentRegion = normalizeRegion(changes.region.newValue);
-    void refreshBorder();
-  }
-
-  if (changes.recordingState) {
-    const nextState = normalizeRecordingState(changes.recordingState.newValue);
-    currentRecordingState = nextState;
-    if (nextState.status === "recording" && selectionActive) {
-      cancelSelection("녹화 중에는 영역을 다시 선택할 수 없습니다.");
+    if (changes.region) {
+      currentRegion = normalizeRegion(changes.region.newValue);
+      void refreshBorder();
     }
-    showSelectionBorder(currentRegion);
-    requestChzzkToolSync();
-    syncChzzkRecordTimer();
-  }
 
-  if (changes.settings) {
-    const settings = changes.settings.newValue as Partial<Settings> | undefined;
-    fullRecordButtonEnabled = Boolean(settings?.enableFullRecordButton);
-    fullScreenshotButtonEnabled = Boolean(settings?.enableFullScreenshotButton);
-    streamerFilenameEnabled = Boolean(settings?.enableStreamerFilename);
-    shortcutsEnabled = Boolean(settings?.enableShortcuts);
-    shortcutKeys = normalizeShortcutKeys(settings?.shortcutKeys);
-    requestChzzkToolSync();
-    syncChzzkRecordTimer();
-  }
-});
+    if (changes.recordingState) {
+      const nextState = normalizeRecordingState(changes.recordingState.newValue);
+      currentRecordingState = nextState;
+      if (nextState.status === "recording" && selectionActive) {
+        cancelSelection("녹화 중에는 영역을 다시 선택할 수 없습니다.");
+      }
+      showSelectionBorder(currentRegion);
+      requestChzzkToolSync();
+      syncChzzkRecordTimer();
+    }
+
+    if (changes.settings) {
+      const settings = changes.settings.newValue as Partial<Settings> | undefined;
+      fullRecordButtonEnabled = Boolean(settings?.enableFullRecordButton);
+      fullScreenshotButtonEnabled = Boolean(settings?.enableFullScreenshotButton);
+      seekEnabled = Boolean(settings?.enableSeek ?? (settings as Partial<Settings> & { enableSeekButtons?: boolean } | undefined)?.enableSeekButtons);
+      seekSeconds = Number.isFinite(settings?.seekSeconds) ? Number(settings?.seekSeconds) : 5;
+      streamerFilenameEnabled = Boolean(settings?.enableStreamerFilename);
+      shortcutsEnabled = Boolean(settings?.enableShortcuts);
+      shortcutKeys = normalizeShortcutKeys(settings?.shortcutKeys);
+      requestChzzkToolSync();
+      syncChzzkRecordTimer();
+    }
+  });
+}
 
 window.addEventListener("resize", () => {
   void refreshBorder();
