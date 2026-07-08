@@ -18,6 +18,9 @@ const MIN_HEIGHT = 50;
 const BORDER_WIDTH = 2;
 const RESIZE_HIT_SIZE = 22;
 const SNAP_DISTANCE = 10;
+const LINE_LAYOUT_THRESHOLD = 0.6;
+const LINE_FLOW_OVERLAP_THRESHOLD = 0.35;
+const LINE_GROUP_OVERLAP_THRESHOLD = 0.25;
 const MAX_ACTIVE_REGIONS = 4;
 const DEFAULT_MULTI_REGION_COUNT = 2;
 const CROP_ACCENT = "#5bd6bf";
@@ -775,6 +778,81 @@ function composeVertical(layouts: DirectLayout[]): DirectLayout {
   return { output: { width, height: Math.max(1, y) }, placements };
 }
 
+function getOverlapRatio(startA: number, endA: number, startB: number, endB: number): number {
+  const overlap = Math.max(0, Math.min(endA, endB) - Math.max(startA, startB));
+  return overlap / Math.max(1, Math.min(endA - startA, endB - startB));
+}
+
+function getLineLayout(crops: Array<{ x: number; y: number; width: number; height: number }>): "horizontal" | "vertical" | null {
+  const centersX = crops.map((crop) => crop.x + crop.width / 2);
+  const centersY = crops.map((crop) => crop.y + crop.height / 2);
+  const xSpread = Math.max(...centersX) - Math.min(...centersX);
+  const ySpread = Math.max(...centersY) - Math.min(...centersY);
+  const totalWidth = Math.max(...crops.map((crop) => crop.x + crop.width)) - Math.min(...crops.map((crop) => crop.x));
+  const totalHeight = Math.max(...crops.map((crop) => crop.y + crop.height)) - Math.min(...crops.map((crop) => crop.y));
+  const horizontalDominant = totalWidth >= totalHeight;
+  const widest = Math.max(...crops.map((crop) => crop.width));
+  const tallest = Math.max(...crops.map((crop) => crop.height));
+  const horizontalScore = ySpread / Math.max(1, tallest);
+  const verticalScore = xSpread / Math.max(1, widest);
+  const isHorizontal = horizontalScore <= LINE_LAYOUT_THRESHOLD;
+  const isVertical = verticalScore <= LINE_LAYOUT_THRESHOLD;
+  const orderedByX = [...crops].sort((a, b) => a.x - b.x);
+  const orderedByY = [...crops].sort((a, b) => a.y - b.y);
+  const firstXPair = orderedByX[1]
+    ? getOverlapRatio(orderedByX[0].y, orderedByX[0].y + orderedByX[0].height, orderedByX[1].y, orderedByX[1].y + orderedByX[1].height)
+    : 1;
+  const firstYPair = orderedByY[1]
+    ? getOverlapRatio(orderedByY[0].x, orderedByY[0].x + orderedByY[0].width, orderedByY[1].x, orderedByY[1].x + orderedByY[1].width)
+    : 1;
+  const horizontalFlowAllowed = firstXPair > LINE_GROUP_OVERLAP_THRESHOLD;
+  const verticalFlowAllowed = firstYPair > LINE_GROUP_OVERLAP_THRESHOLD;
+
+  if (horizontalFlowAllowed && verticalFlowAllowed && isHorizontal && isVertical) {
+    return horizontalScore <= verticalScore ? "horizontal" : "vertical";
+  }
+  if (horizontalFlowAllowed && isHorizontal) {
+    return "horizontal";
+  }
+  if (verticalFlowAllowed && isVertical) {
+    return "vertical";
+  }
+
+  const xOverlap = orderedByX.slice(1).reduce((sum, crop, index) => sum + Math.max(0, orderedByX[index].x + orderedByX[index].width - crop.x), 0);
+  const yOverlap = orderedByY.slice(1).reduce((sum, crop, index) => sum + Math.max(0, orderedByY[index].y + orderedByY[index].height - crop.y), 0);
+  const horizontalFlowScore = xOverlap / Math.max(1, widest);
+  const verticalFlowScore = yOverlap / Math.max(1, tallest);
+  const isHorizontalFlow = horizontalFlowScore <= LINE_FLOW_OVERLAP_THRESHOLD;
+  const isVerticalFlow = verticalFlowScore <= LINE_FLOW_OVERLAP_THRESHOLD;
+
+  if (horizontalFlowAllowed && verticalFlowAllowed && isHorizontalFlow && isVerticalFlow) {
+    return horizontalDominant ? "horizontal" : "vertical";
+  }
+  if (horizontalDominant && horizontalFlowAllowed && isHorizontalFlow) {
+    return "horizontal";
+  }
+  return !horizontalDominant && verticalFlowAllowed && isVerticalFlow ? "vertical" : null;
+}
+
+function hasTwoColumnLayout(crops: Array<{ x: number; y: number; width: number; height: number }>): boolean {
+  if (crops.length < 4) {
+    return false;
+  }
+
+  const ordered = [...crops].sort((a, b) => (a.x + a.width / 2) - (b.x + b.width / 2));
+  const split = Math.ceil(ordered.length / 2);
+  const groups = [ordered.slice(0, split), ordered.slice(split)];
+  return groups.every((group) => {
+    const centersX = group.map((crop) => crop.x + crop.width / 2);
+    const centersY = group.map((crop) => crop.y + crop.height / 2);
+    const averageHeight = group.reduce((sum, crop) => sum + crop.height, 0) / group.length;
+    const widest = Math.max(...group.map((crop) => crop.width));
+    const xSpread = Math.max(...centersX) - Math.min(...centersX);
+    const ySpread = Math.max(...centersY) - Math.min(...centersY);
+    return xSpread <= widest && ySpread > averageHeight * LINE_LAYOUT_THRESHOLD;
+  });
+}
+
 function computeDirectLayout(crops: Array<{ x: number; y: number; width: number; height: number }>): DirectLayout {
   if (crops.length <= 1) {
     const crop = crops[0];
@@ -791,6 +869,14 @@ function computeDirectLayout(crops: Array<{ x: number; y: number; width: number;
   const horizontal = right - left >= bottom - top;
 
   if (crops.length > 2) {
+    const lineLayout = hasTwoColumnLayout(crops) ? null : getLineLayout(crops);
+    if (lineLayout === "horizontal") {
+      return composeHorizontal([...crops].sort((a, b) => a.x - b.x).map((crop) => computeDirectLayout([crop])));
+    }
+    if (lineLayout === "vertical") {
+      return composeVertical([...crops].sort((a, b) => a.y - b.y).map((crop) => computeDirectLayout([crop])));
+    }
+
     if (horizontal) {
       const ordered = [...crops].sort((a, b) => (a.x + a.width / 2) - (b.x + b.width / 2));
       const split = Math.ceil(ordered.length / 2);
