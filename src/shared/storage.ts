@@ -36,6 +36,7 @@ function normalizeShortcutKeys(raw: Partial<ShortcutKeys> | undefined): Shortcut
   return {
     selectRegion: typeof raw?.selectRegion === "string" && raw.selectRegion ? raw.selectRegion : DEFAULT_SHORTCUT_KEYS.selectRegion,
     clearRegion: typeof raw?.clearRegion === "string" && raw.clearRegion ? raw.clearRegion : DEFAULT_SHORTCUT_KEYS.clearRegion,
+    clearAllRegions: typeof raw?.clearAllRegions === "string" && raw.clearAllRegions ? raw.clearAllRegions : DEFAULT_SHORTCUT_KEYS.clearAllRegions,
     regionRecord: typeof raw?.regionRecord === "string" && raw.regionRecord ? raw.regionRecord : DEFAULT_SHORTCUT_KEYS.regionRecord,
     cancelRecording: typeof raw?.cancelRecording === "string" && raw.cancelRecording ? raw.cancelRecording : DEFAULT_SHORTCUT_KEYS.cancelRecording,
     regionScreenshot: typeof raw?.regionScreenshot === "string" && raw.regionScreenshot ? raw.regionScreenshot : DEFAULT_SHORTCUT_KEYS.regionScreenshot,

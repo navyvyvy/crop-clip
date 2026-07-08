@@ -46,6 +46,7 @@ const MAX_VIDEO_MEGABITS_PER_SECOND = MAX_VIDEO_BITS_PER_SECOND / BITS_PER_MEGAB
 const SHORTCUT_LABELS: Record<ShortcutAction, string> = {
   selectRegion: "영역 선택",
   clearRegion: "영역 해제",
+  clearAllRegions: "전체 영역 해제",
   regionRecord: "영역 녹화",
   cancelRecording: "녹화 취소",
   regionScreenshot: "영역 스크린샷",

@@ -39,6 +39,7 @@ const PLAYER_TOOL_LABEL = "녹화 영역 선택";
 const DEFAULT_CONTENT_SHORTCUT_KEYS: ShortcutKeys = {
   selectRegion: "a",
   clearRegion: "x",
+  clearAllRegions: "z",
   regionRecord: "r",
   cancelRecording: "c",
   regionScreenshot: "s",
@@ -2565,15 +2566,22 @@ function startSelection(): void {
     }
   };
 
+  const onContextMenu = (event: MouseEvent) => {
+    event.preventDefault();
+    cancelSelection();
+  };
+
   overlay.addEventListener("pointerdown", onPointerDown);
   overlay.addEventListener("pointermove", onPointerMove);
   overlay.addEventListener("pointerup", onPointerUp);
+  overlay.addEventListener("contextmenu", onContextMenu);
   window.addEventListener("keydown", onKeyDown, { once: false });
 
   const cleanup = () => {
     overlay.removeEventListener("pointerdown", onPointerDown);
     overlay.removeEventListener("pointermove", onPointerMove);
     overlay.removeEventListener("pointerup", onPointerUp);
+    overlay.removeEventListener("contextmenu", onContextMenu);
     window.removeEventListener("keydown", onKeyDown);
   };
 
@@ -3116,6 +3124,21 @@ function isAnyRecording(): boolean {
   return currentRecordingState.status === "recording";
 }
 
+function activateRegionAtPoint(x: number, y: number): void {
+  if (currentRecordingState.status === "recording" && currentRecordingState.mode !== "full") {
+    return;
+  }
+
+  const nextIndex = currentRegions.findIndex((region) => {
+    const displayRegion = resolveRegionToViewport(region);
+    return x >= displayRegion.x && x <= displayRegion.x + displayRegion.width
+      && y >= displayRegion.y && y <= displayRegion.y + displayRegion.height;
+  });
+  if (nextIndex >= 0) {
+    setActiveRegion(nextIndex);
+  }
+}
+
 function isEditableShortcutTarget(target: EventTarget | null): boolean {
   return target instanceof HTMLInputElement
     || target instanceof HTMLTextAreaElement
@@ -3170,6 +3193,15 @@ function handleShortcut(event: KeyboardEvent): void {
       }
       removeRegionAtIndex(activeRegionIndex);
     })();
+  } else if (key === shortcutKeys.clearAllRegions) {
+    event.preventDefault();
+    if (isAnyRecording()) {
+      return;
+    }
+    if (selectionActive) {
+      cancelSelection();
+    }
+    void clearRegion();
   } else if (key === shortcutKeys.regionRecord) {
     event.preventDefault();
     void toggleRegionRecording().catch((error: Error) => window.alert(error.message));
@@ -3377,6 +3409,13 @@ window.addEventListener("scroll", () => {
       }
     });
   }
+}, true);
+
+window.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || selectionActive || currentRegions.length === 0) {
+    return;
+  }
+  activateRegionAtPoint(event.clientX, event.clientY);
 }, true);
 
 window.addEventListener("pagehide", () => {
