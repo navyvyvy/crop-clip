@@ -12,12 +12,14 @@ export type ContentCommand =
   | { type: "START_SELECTION" }
   | { type: "CLEAR_REGION" }
   | { type: "GET_REGION_GEOMETRY" }
+  | { type: "GET_REGION_GEOMETRIES" }
   | { type: "GET_PLAYER_REGION_GEOMETRY" }
   | { type: "CAPTURE_FULL_SCREENSHOT" }
   | {
       type: "START_DIRECT_RECORDING";
       recordingId: string;
       region: RegionSelection;
+      regions?: RegionSelection[];
       settings: Settings;
     }
   | { type: "STOP_DIRECT_RECORDING" };

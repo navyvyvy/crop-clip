@@ -79,6 +79,36 @@
 
             <label class="setting-row">
               <span class="setting-copy">
+                <span class="setting-title">다중영역</span>
+                <span class="setting-desc">여러 영역을 이어 붙여 녹화합니다.</span>
+              </span>
+              <span class="segmented">
+                <label>
+                  <input type="radio" name="multi-region-mode" value="off" />
+                  <span>OFF</span>
+                </label>
+                <label>
+                  <input type="radio" name="multi-region-mode" value="on" />
+                  <span>ON</span>
+                </label>
+              </span>
+            </label>
+
+            <div id="multi-region-count-row" class="setting-row sub-setting-row">
+              <span class="setting-copy">
+                <span class="setting-title">다중영역 개수</span>
+                <span class="setting-desc">동시에 사용할 영역 수, 최대 4개</span>
+              </span>
+              <span class="count-field">
+                <button id="multi-region-count-decrease-button" type="button" aria-label="다중영역 개수 감소">−</button>
+                <input id="multi-region-count-input" type="text" inputmode="numeric" pattern="[0-9]*" />
+                <span>개</span>
+                <button id="multi-region-count-increase-button" type="button" aria-label="다중영역 개수 증가">+</button>
+              </span>
+            </div>
+
+            <label class="setting-row">
+              <span class="setting-copy">
                 <span class="setting-title">전체 녹화 버튼</span>
                 <span class="setting-desc">플레이어 녹화 버튼 표시</span>
               </span>

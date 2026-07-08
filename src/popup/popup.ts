@@ -1,5 +1,5 @@
-import { DEFAULT_SEEK_SECONDS, DEFAULT_SETTINGS, DEFAULT_SHORTCUT_KEYS, FPS_WARNING_VIDEO_BITS_PER_SECOND, MAX_SEEK_SECONDS, MAX_VIDEO_BITS_PER_SECOND, MIN_SEEK_SECONDS, MIN_VIDEO_BITS_PER_SECOND, type AppState, type RecordingFormat, type Settings, type ShortcutAction } from "../shared/types.js";
-import { loadAppState, normalizeRecordingState, normalizeRegion, normalizeSettings, saveSettings } from "../shared/storage.js";
+import { DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, DEFAULT_SETTINGS, DEFAULT_SHORTCUT_KEYS, FPS_WARNING_VIDEO_BITS_PER_SECOND, MAX_MULTI_REGION_COUNT, MAX_SEEK_SECONDS, MAX_VIDEO_BITS_PER_SECOND, MIN_MULTI_REGION_COUNT, MIN_SEEK_SECONDS, MIN_VIDEO_BITS_PER_SECOND, type AppState, type RecordingFormat, type Settings, type ShortcutAction } from "../shared/types.js";
+import { loadAppState, normalizeRecordingState, normalizeRegion, normalizeRegions, normalizeSettings, saveSettings } from "../shared/storage.js";
 import type { MessageResponse } from "../shared/messages.js";
 
 const elements = {
@@ -13,6 +13,11 @@ const elements = {
   fullScreenshotButton: document.getElementById("full-screenshot-button") as HTMLButtonElement,
   outputFormatInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='output-format']")),
   fpsModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='fps-mode']")),
+  multiRegionModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='multi-region-mode']")),
+  multiRegionCountRow: document.getElementById("multi-region-count-row") as HTMLDivElement,
+  multiRegionCountDecreaseButton: document.getElementById("multi-region-count-decrease-button") as HTMLButtonElement,
+  multiRegionCountIncreaseButton: document.getElementById("multi-region-count-increase-button") as HTMLButtonElement,
+  multiRegionCountInput: document.getElementById("multi-region-count-input") as HTMLInputElement,
   fullRecordModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='full-record-mode']")),
   fullScreenshotModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='full-screenshot-mode']")),
   seekButtonModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='seek-button-mode']")),
@@ -52,6 +57,7 @@ elements.versionBadge.textContent = `v${chrome.runtime.getManifest().version}`;
 let appState: AppState = {
   settings: DEFAULT_SETTINGS,
   region: null,
+  regions: [],
   recordingState: { status: "idle" },
 };
 
@@ -127,6 +133,11 @@ function syncPresetUi(settings: Settings): void {
   for (const input of elements.fpsModeInputs) {
     input.checked = input.value === (settings.enable60fps ? "on" : "off");
   }
+  for (const input of elements.multiRegionModeInputs) {
+    input.checked = input.value === (settings.enableMultiRegion ? "on" : "off");
+  }
+  elements.multiRegionCountRow.hidden = !settings.enableMultiRegion;
+  elements.multiRegionCountInput.value = String(settings.multiRegionMaxCount);
   for (const input of elements.fullRecordModeInputs) {
     input.checked = input.value === (settings.enableFullRecordButton ? "on" : "off");
   }
@@ -173,6 +184,10 @@ function renderState(): void {
   const controls = [
     ...elements.outputFormatInputs,
     ...elements.fpsModeInputs,
+    ...elements.multiRegionModeInputs,
+    elements.multiRegionCountDecreaseButton,
+    elements.multiRegionCountIncreaseButton,
+    elements.multiRegionCountInput,
     ...elements.fullRecordModeInputs,
     ...elements.fullScreenshotModeInputs,
     ...elements.seekButtonModeInputs,
@@ -213,6 +228,13 @@ async function stepSeekSeconds(direction: -1 | 1): Promise<void> {
   await persistUiSettings();
 }
 
+async function stepMultiRegionCount(direction: -1 | 1): Promise<void> {
+  const current = Number(elements.multiRegionCountInput.value || DEFAULT_MULTI_REGION_COUNT);
+  const next = Math.min(MAX_MULTI_REGION_COUNT, Math.max(MIN_MULTI_REGION_COUNT, (Number.isFinite(current) ? current : DEFAULT_MULTI_REGION_COUNT) + direction));
+  elements.multiRegionCountInput.value = String(next);
+  await persistUiSettings();
+}
+
 async function sendCommand<T = undefined>(message: { type: string }): Promise<MessageResponse<T>> {
   return (await chrome.runtime.sendMessage(message)) as MessageResponse<T>;
 }
@@ -227,6 +249,8 @@ async function refreshAppState(): Promise<void> {
 function readSettingsFromUi(): Settings {
   const outputFormat = (elements.outputFormatInputs.find((input) => input.checked)?.value ?? DEFAULT_SETTINGS.outputFormat) as RecordingFormat;
   const enable60fps = elements.fpsModeInputs.find((input) => input.checked)?.value === "on";
+  const enableMultiRegion = elements.multiRegionModeInputs.find((input) => input.checked)?.value === "on";
+  const multiRegionMaxCount = Number(elements.multiRegionCountInput.value || DEFAULT_MULTI_REGION_COUNT);
   const enableFullRecordButton = elements.fullRecordModeInputs.find((input) => input.checked)?.value !== "off";
   const enableFullScreenshotButton = elements.fullScreenshotModeInputs.find((input) => input.checked)?.value !== "off";
   const enableSeek = elements.seekButtonModeInputs.find((input) => input.checked)?.value !== "off";
@@ -240,6 +264,8 @@ function readSettingsFromUi(): Settings {
     outputFormat,
     videoBitsPerSecond,
     enable60fps,
+    enableMultiRegion,
+    multiRegionMaxCount,
     enableFullRecordButton,
     enableFullScreenshotButton,
     enableSeek,
@@ -307,6 +333,7 @@ function sanitizeBitrateInput(): void {
 
 async function persistUiSettings(): Promise<void> {
   sanitizeBitrateInput();
+  elements.multiRegionCountInput.value = String(Math.min(MAX_MULTI_REGION_COUNT, Math.max(MIN_MULTI_REGION_COUNT, Math.round(Number(elements.multiRegionCountInput.value || DEFAULT_MULTI_REGION_COUNT)))));
   const rawSeekSeconds = Number(elements.seekSecondsInput.value || DEFAULT_SEEK_SECONDS);
   elements.seekSecondsInput.value = String(Math.min(MAX_SEEK_SECONDS, Math.max(MIN_SEEK_SECONDS, Math.round(Number.isFinite(rawSeekSeconds) ? rawSeekSeconds : DEFAULT_SEEK_SECONDS))));
   if (!elements.customVideoBitrateInput.value) {
@@ -414,7 +441,7 @@ elements.fullScreenshotButton.addEventListener("click", () => {
   });
 });
 
-for (const element of [...elements.outputFormatInputs, ...elements.fpsModeInputs, ...elements.fullRecordModeInputs, ...elements.fullScreenshotModeInputs, ...elements.seekButtonModeInputs, ...elements.streamerFilenameModeInputs, ...elements.shortcutModeInputs]) {
+for (const element of [...elements.outputFormatInputs, ...elements.fpsModeInputs, ...elements.multiRegionModeInputs, ...elements.fullRecordModeInputs, ...elements.fullScreenshotModeInputs, ...elements.seekButtonModeInputs, ...elements.streamerFilenameModeInputs, ...elements.shortcutModeInputs]) {
   element.addEventListener("change", () => {
     void persistUiSettings();
   });
@@ -432,6 +459,10 @@ elements.seekSecondsInput.addEventListener("change", () => {
   void persistUiSettings();
 });
 
+elements.multiRegionCountInput.addEventListener("change", () => {
+  void persistUiSettings();
+});
+
 elements.bitrateDecreaseButton.addEventListener("click", () => {
   void stepBitrate(-1);
 });
@@ -446,6 +477,14 @@ elements.seekDecreaseButton.addEventListener("click", () => {
 
 elements.seekIncreaseButton.addEventListener("click", () => {
   void stepSeekSeconds(1);
+});
+
+elements.multiRegionCountDecreaseButton.addEventListener("click", () => {
+  void stepMultiRegionCount(-1);
+});
+
+elements.multiRegionCountIncreaseButton.addEventListener("click", () => {
+  void stepMultiRegionCount(1);
 });
 
 elements.shortcutSettingsButton.addEventListener("click", () => {
@@ -536,6 +575,10 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 
   if (changes.region) {
     appState.region = normalizeRegion(changes.region.newValue ?? null);
+  }
+
+  if (changes.regions) {
+    appState.regions = normalizeRegions(changes.regions.newValue, appState.region);
   }
 
   if (changes.recordingState) {

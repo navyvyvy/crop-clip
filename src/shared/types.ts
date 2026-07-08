@@ -9,6 +9,8 @@ export interface Settings {
   outputFormat: RecordingFormat;
   videoBitsPerSecond: number;
   enable60fps: boolean;
+  enableMultiRegion: boolean;
+  multiRegionMaxCount: number;
   enableFullRecordButton: boolean;
   enableFullScreenshotButton: boolean;
   enableSeek: boolean;
@@ -81,6 +83,7 @@ export interface RecordingPartRecord {
 export interface AppState {
   settings: Settings;
   region: RegionSelection | null;
+  regions: RegionSelection[];
   recordingState: RecordingState;
 }
 
@@ -88,6 +91,9 @@ export const MIN_VIDEO_BITS_PER_SECOND = 100_000;
 export const MAX_VIDEO_BITS_PER_SECOND = 12_000_000;
 export const DEFAULT_VIDEO_BITS_PER_SECOND = 4_000_000;
 export const FPS_WARNING_VIDEO_BITS_PER_SECOND = DEFAULT_VIDEO_BITS_PER_SECOND;
+export const MIN_MULTI_REGION_COUNT = 2;
+export const MAX_MULTI_REGION_COUNT = 4;
+export const DEFAULT_MULTI_REGION_COUNT = 2;
 export const MIN_SEEK_SECONDS = 1;
 export const MAX_SEEK_SECONDS = 60;
 export const DEFAULT_SEEK_SECONDS = 5;
@@ -104,6 +110,8 @@ export const DEFAULT_SETTINGS: Settings = {
   outputFormat: "webm",
   videoBitsPerSecond: DEFAULT_VIDEO_BITS_PER_SECOND,
   enable60fps: false,
+  enableMultiRegion: false,
+  multiRegionMaxCount: DEFAULT_MULTI_REGION_COUNT,
   enableFullRecordButton: false,
   enableFullScreenshotButton: false,
   enableSeek: false,

@@ -145,7 +145,7 @@ async function clearRegion(): Promise<MessageResponse> {
     // Storage is the source of truth, so clearing the page border is best-effort.
   }
 
-  await chrome.storage.local.set({ region: null });
+  await chrome.storage.local.set({ region: null, regions: [] });
   return ok();
 }
 
@@ -163,15 +163,20 @@ async function getCurrentRegionGeometry(tabId: number): Promise<MessageResponse<
   return await sendCommandToContentScript<RegionSelection>(tabId, { type: "GET_REGION_GEOMETRY" });
 }
 
+async function getCurrentRegionGeometries(tabId: number): Promise<MessageResponse<RegionSelection[]>> {
+  return await sendCommandToContentScript<RegionSelection[]>(tabId, { type: "GET_REGION_GEOMETRIES" });
+}
+
 async function getPlayerRegionGeometry(tabId: number): Promise<MessageResponse<RegionSelection>> {
   return await sendCommandToContentScript<RegionSelection>(tabId, { type: "GET_PLAYER_REGION_GEOMETRY" });
 }
 
-async function startDirectRecording(tabId: number, recordingId: string, region: RegionSelection, settings: Settings): Promise<MessageResponse> {
+async function startDirectRecording(tabId: number, recordingId: string, region: RegionSelection, settings: Settings, regions?: RegionSelection[]): Promise<MessageResponse> {
   return await sendCommandToContentScript(tabId, {
     type: "START_DIRECT_RECORDING",
     recordingId,
     region,
+    regions,
     settings,
   });
 }
@@ -232,7 +237,11 @@ async function startRecording(fullPlayer = false): Promise<MessageResponse<{ rec
       return fail(error);
     }
 
-    const regionResponse = fullPlayer ? await getPlayerRegionGeometry(tabId) : await getCurrentRegionGeometry(tabId);
+    const regionResponse = fullPlayer
+      ? await getPlayerRegionGeometry(tabId)
+      : settings.enableMultiRegion
+        ? await getCurrentRegionGeometries(tabId)
+        : await getCurrentRegionGeometry(tabId);
     if (!regionResponse.ok || !regionResponse.data) {
       const error = regionResponse.ok ? "녹화할 비디오 영역을 찾지 못했습니다." : regionResponse.error;
       await patchRecordingState({
@@ -244,7 +253,18 @@ async function startRecording(fullPlayer = false): Promise<MessageResponse<{ rec
       return fail(error);
     }
 
-    const response = await startDirectRecording(tabId, recordingId, regionResponse.data, settings);
+    const regions = Array.isArray(regionResponse.data) ? regionResponse.data : [regionResponse.data];
+    if (!regions[0]) {
+      const error = "녹화할 비디오 영역을 찾지 못했습니다.";
+      await patchRecordingState({
+        status: "error",
+        recordingId,
+        tabId,
+        lastError: error,
+      });
+      return fail(error);
+    }
+    const response = await startDirectRecording(tabId, recordingId, regions[0], settings, settings.enableMultiRegion ? regions : undefined);
     if (!response.ok) {
       await patchRecordingState({
         status: "error",

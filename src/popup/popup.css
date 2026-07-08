@@ -32,6 +32,7 @@ body {
 
 body {
   height: auto;
+  max-height: 600px;
 }
 
 button,
@@ -40,7 +41,7 @@ input {
 }
 
 .app {
-  padding: 8px;
+  padding: 6px;
 }
 
 .hero {
@@ -48,7 +49,7 @@ input {
   display: flex;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 
 .hero-copy {
@@ -66,7 +67,7 @@ input {
 }
 
 .eyebrow {
-  margin: 0 0 3px;
+  margin: 0 0 2px;
   letter-spacing: 0.12em;
   color: var(--muted);
   font-size: 11px;
@@ -90,7 +91,7 @@ p {
 }
 
 h1 {
-  font-size: 16px;
+  font-size: 15px;
   line-height: 1.1;
   text-wrap: balance;
 }
@@ -103,7 +104,7 @@ h1 {
 
 .stack {
   display: grid;
-  gap: 5px;
+  gap: 4px;
 }
 
 .action-row {
@@ -119,7 +120,7 @@ h1 {
 .button {
   border: 1px solid transparent;
   border-radius: 9px;
-  padding: 7px 6px;
+  padding: 6px 5px;
   cursor: pointer;
   font-size: 11px;
   font-weight: 700;
@@ -156,7 +157,7 @@ h1 {
 }
 
 .panel {
-  padding: 7px;
+  padding: 6px;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: linear-gradient(180deg, rgba(21, 27, 34, 0.95), rgba(16, 22, 29, 0.95));
@@ -164,7 +165,7 @@ h1 {
 
 .settings-list {
   display: grid;
-  gap: 5px;
+  gap: 3px;
 }
 
 .setting-row {
@@ -191,13 +192,13 @@ h1 {
 
 .setting-title {
   color: var(--text);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
 }
 
 .setting-desc {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 10px;
   line-height: 1.15;
   white-space: nowrap;
 }
@@ -257,7 +258,8 @@ h1 {
   font-weight: 800;
 }
 
-.seek-field {
+.seek-field,
+.count-field {
   display: grid;
   grid-template-columns: 20px minmax(34px, 1fr) 38px 20px;
   gap: 2px;
@@ -267,7 +269,8 @@ h1 {
   background: var(--panel-2);
 }
 
-.seek-field input {
+.seek-field input,
+.count-field input {
   width: 100%;
   border: 0;
   border-radius: 7px;
@@ -279,16 +282,20 @@ h1 {
 }
 
 .seek-field input::-webkit-outer-spin-button,
-.seek-field input::-webkit-inner-spin-button {
+.seek-field input::-webkit-inner-spin-button,
+.count-field input::-webkit-outer-spin-button,
+.count-field input::-webkit-inner-spin-button {
   margin: 0;
   appearance: none;
 }
 
-.seek-field input[type="number"] {
+.seek-field input[type="number"],
+.count-field input[type="number"] {
   appearance: textfield;
 }
 
-.seek-field button {
+.seek-field button,
+.count-field button {
   display: grid;
   place-items: center;
   width: 20px;
@@ -303,17 +310,20 @@ h1 {
   line-height: 1;
 }
 
-.seek-field button:hover:not(:disabled) {
+.seek-field button:hover:not(:disabled),
+.count-field button:hover:not(:disabled) {
   background: var(--accent);
   color: #06221d;
 }
 
-.seek-field button:disabled {
+.seek-field button:disabled,
+.count-field button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
 }
 
-.seek-field span {
+.seek-field span,
+.count-field span {
   display: grid;
   place-items: center;
   border-radius: 7px;
@@ -344,10 +354,10 @@ h1 {
 
 .segmented span {
   display: block;
-  padding: 6px 8px;
+  padding: 4px 7px;
   border-radius: 7px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 800;
   text-align: center;
   cursor: pointer;
@@ -374,8 +384,8 @@ h1 {
   display: flex;
   justify-content: center;
   gap: 10px;
-  margin-top: 6px;
-  padding-top: 6px;
+  margin-top: 4px;
+  padding-top: 4px;
   border-top: 1px solid var(--line);
 }
 

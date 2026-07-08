@@ -9,6 +9,7 @@
 
 const OVERLAY_ID = "crop-clip-overlay";
 const BORDER_ID = "crop-clip-border";
+const BORDER_CLASS = "crop-clip-border";
 const SEEK_FEEDBACK_ID = "crop-clip-seek-feedback";
 const SCREENSHOT_STACK_ID = "crop-clip-screenshot-stack";
 const STYLE_ID = "crop-clip-style";
@@ -16,7 +17,13 @@ const MIN_WIDTH = 50;
 const MIN_HEIGHT = 50;
 const BORDER_WIDTH = 2;
 const RESIZE_HIT_SIZE = 22;
+const SNAP_DISTANCE = 10;
+const MAX_ACTIVE_REGIONS = 4;
+const DEFAULT_MULTI_REGION_COUNT = 2;
 const CROP_ACCENT = "#5bd6bf";
+const CROP_SECONDARY = "#5bb0d6";
+const CROP_REGION_COLORS = [CROP_ACCENT, CROP_SECONDARY, "#49c7e6", "#7be0b2"];
+const CROP_GUIDE = "#ffd166";
 const MAX_SCREENSHOT_PREVIEWS = 8;
 const AUDIO_BITS_PER_SECOND = 128_000;
 const CHZZK_RECORD_BUTTON_ID = "crop-clip-chzzk-record-button";
@@ -54,7 +61,22 @@ type PlayerStatusResponse =
     }
   | { ok: false; error: string };
 
+type GuideSide = "n" | "s" | "w" | "e";
 type RegionGeometryResponse = MessageResponse<RegionSelection>;
+type RegionGeometriesResponse = MessageResponse<RegionSelection[]>;
+
+interface DirectCropPlacement {
+  crop: { x: number; y: number; width: number; height: number };
+  dx: number;
+  dy: number;
+  dw: number;
+  dh: number;
+}
+
+interface DirectLayout {
+  output: { width: number; height: number };
+  placements: DirectCropPlacement[];
+}
 
 interface DirectRecordingSession {
   recordingId: string;
@@ -80,7 +102,7 @@ interface DirectRecordingSession {
   finishPromise: Promise<void>;
   resolveFinish: () => void;
   rejectFinish: (error: Error) => void;
-  crop: { x: number; y: number; width: number; height: number };
+  placements: DirectCropPlacement[];
   output: { width: number; height: number };
   sourceChangeCleanup?: () => void;
 }
@@ -88,7 +110,12 @@ interface DirectRecordingSession {
 let currentOverlay: HTMLDivElement | null = null;
 let currentBorder: HTMLDivElement | null = null;
 let currentRegion: RegionSelection | null = null;
+let currentRegions: RegionSelection[] = [];
+let currentBorders = new Map<number, HTMLDivElement>();
+let activeRegionIndex = 0;
 let selectionActive = false;
+let multiRegionEnabled = false;
+let multiRegionMaxCount = DEFAULT_MULTI_REGION_COUNT;
 let fullRecordButtonEnabled = false;
 let fullScreenshotButtonEnabled = false;
 let seekEnabled = false;
@@ -156,17 +183,65 @@ function ensureStyle(): void {
       display: none;
     }
 
-    #${BORDER_ID} {
+    .${BORDER_CLASS} {
       position: fixed;
       z-index: 2147483646;
-      outline: ${BORDER_WIDTH}px solid rgba(91, 214, 191, 0.9);
+      outline: ${BORDER_WIDTH}px solid var(--crop-clip-region-outline, rgba(91, 214, 191, 0.9));
       box-shadow: 0 0 0 1px rgba(8, 16, 24, 0.42);
       pointer-events: none;
       border-radius: 2px;
       box-sizing: border-box;
     }
 
-    #${BORDER_ID} .resize-zone {
+    .${BORDER_CLASS}[data-active="true"] {
+      box-shadow: 0 0 0 1px var(--crop-clip-region-shadow, rgba(91, 214, 191, 0.62)), 0 0 14px rgba(91, 214, 191, 0.16);
+    }
+
+    .${BORDER_CLASS}[data-active="false"] {
+      box-shadow: 0 0 0 1px rgba(8, 16, 24, 0.34);
+    }
+
+    .${BORDER_CLASS} .guide-edge {
+      position: absolute;
+      z-index: 4;
+      pointer-events: none;
+      background: ${CROP_GUIDE};
+      box-shadow: 0 0 8px rgba(255, 209, 102, 0.6);
+    }
+
+    .${BORDER_CLASS} .guide-edge[hidden] {
+      display: none;
+    }
+
+    .${BORDER_CLASS} .guide-edge[data-side="n"] {
+      left: 0;
+      right: 0;
+      top: -${BORDER_WIDTH}px;
+      height: ${BORDER_WIDTH}px;
+    }
+
+    .${BORDER_CLASS} .guide-edge[data-side="s"] {
+      left: 0;
+      right: 0;
+      bottom: -${BORDER_WIDTH}px;
+      height: ${BORDER_WIDTH}px;
+    }
+
+    .${BORDER_CLASS} .guide-edge[data-side="w"] {
+      left: -${BORDER_WIDTH}px;
+      top: 0;
+      bottom: 0;
+      width: ${BORDER_WIDTH}px;
+    }
+
+    .${BORDER_CLASS} .guide-edge[data-side="e"] {
+      right: -${BORDER_WIDTH}px;
+      top: 0;
+      bottom: 0;
+      width: ${BORDER_WIDTH}px;
+    }
+
+    .${BORDER_CLASS} .resize-zone {
       position: absolute;
       z-index: 2;
       background: transparent;
@@ -174,7 +249,7 @@ function ensureStyle(): void {
       box-sizing: border-box;
     }
 
-    #${BORDER_ID} .resize-zone[data-edge="n"] {
+    .${BORDER_CLASS} .resize-zone[data-edge="n"] {
       top: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
       left: 0;
       right: 0;
@@ -182,7 +257,7 @@ function ensureStyle(): void {
       cursor: ns-resize;
     }
 
-    #${BORDER_ID} .resize-zone[data-edge="s"] {
+    .${BORDER_CLASS} .resize-zone[data-edge="s"] {
       bottom: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
       left: 0;
       right: 0;
@@ -190,7 +265,7 @@ function ensureStyle(): void {
       cursor: ns-resize;
     }
 
-    #${BORDER_ID} .resize-zone[data-edge="w"] {
+    .${BORDER_CLASS} .resize-zone[data-edge="w"] {
       left: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
       top: 0;
       bottom: 0;
@@ -198,7 +273,7 @@ function ensureStyle(): void {
       cursor: ew-resize;
     }
 
-    #${BORDER_ID} .resize-zone[data-edge="e"] {
+    .${BORDER_CLASS} .resize-zone[data-edge="e"] {
       right: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
       top: 0;
       bottom: 0;
@@ -206,7 +281,7 @@ function ensureStyle(): void {
       cursor: ew-resize;
     }
 
-    #${BORDER_ID} .resize-zone[data-edge="nw"] {
+    .${BORDER_CLASS} .resize-zone[data-edge="nw"] {
       left: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
       top: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
       width: ${RESIZE_HIT_SIZE}px;
@@ -214,7 +289,7 @@ function ensureStyle(): void {
       cursor: nwse-resize;
     }
 
-    #${BORDER_ID} .resize-zone[data-edge="ne"] {
+    .${BORDER_CLASS} .resize-zone[data-edge="ne"] {
       right: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
       top: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
       width: ${RESIZE_HIT_SIZE}px;
@@ -222,7 +297,7 @@ function ensureStyle(): void {
       cursor: nesw-resize;
     }
 
-    #${BORDER_ID} .resize-zone[data-edge="sw"] {
+    .${BORDER_CLASS} .resize-zone[data-edge="sw"] {
       left: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
       bottom: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
       width: ${RESIZE_HIT_SIZE}px;
@@ -230,7 +305,7 @@ function ensureStyle(): void {
       cursor: nesw-resize;
     }
 
-    #${BORDER_ID} .resize-zone[data-edge="se"] {
+    .${BORDER_CLASS} .resize-zone[data-edge="se"] {
       right: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
       bottom: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
       width: ${RESIZE_HIT_SIZE}px;
@@ -238,7 +313,7 @@ function ensureStyle(): void {
       cursor: nwse-resize;
     }
 
-    #${BORDER_ID} .region-toolbar {
+    .${BORDER_CLASS} .region-toolbar {
       position: absolute;
       right: -2px;
       top: -30px;
@@ -248,7 +323,7 @@ function ensureStyle(): void {
       pointer-events: auto;
     }
 
-    #${BORDER_ID} .region-tool {
+    .${BORDER_CLASS} .region-tool {
       min-width: 24px;
       height: 22px;
       border: 1px solid rgba(238, 244, 251, 0.5);
@@ -262,28 +337,28 @@ function ensureStyle(): void {
       box-shadow: 0 4px 14px rgba(0, 0, 0, 0.36);
     }
 
-    #${BORDER_ID} .region-tool:hover {
+    .${BORDER_CLASS} .region-tool:hover {
       background: rgba(14, 24, 34, 0.9);
       border-color: rgba(238, 244, 251, 0.54);
     }
 
-    #${BORDER_ID} .region-tool svg {
+    .${BORDER_CLASS} .region-tool svg {
       display: block;
       width: 14px;
       height: 14px;
       pointer-events: none;
     }
 
-    #${BORDER_ID} .region-tool:disabled {
+    .${BORDER_CLASS} .region-tool:disabled {
       opacity: 0.42;
       cursor: not-allowed;
     }
 
-    #${BORDER_ID}[data-recording="true"] .resize-zone {
+    .${BORDER_CLASS}[data-recording="true"] .resize-zone {
       pointer-events: none;
     }
 
-    #${BORDER_ID} .record-time {
+    .${BORDER_CLASS} .record-time {
       min-width: 42px;
       height: 22px;
       padding: 0 7px;
@@ -296,36 +371,36 @@ function ensureStyle(): void {
       box-shadow: 0 4px 14px rgba(0, 0, 0, 0.36);
     }
 
-    #${BORDER_ID} .record-time[hidden] {
+    .${BORDER_CLASS} .record-time[hidden] {
       display: none;
     }
 
-    #${BORDER_ID} .record-region {
+    .${BORDER_CLASS} .record-region {
       min-width: 26px;
       color: #f4fbff;
     }
 
-    #${BORDER_ID} .record-region:hover {
+    .${BORDER_CLASS} .record-region:hover {
       color: #ffffff;
     }
 
-    #${BORDER_ID} .record-region[data-recording="true"] {
+    .${BORDER_CLASS} .record-region[data-recording="true"] {
       color: #ff7474;
       border-color: rgba(255, 116, 116, 0.55);
       box-shadow: 0 0 0 1px rgba(255, 116, 116, 0.28);
     }
 
-    #${BORDER_ID} .record-region[data-recording="true"]:hover {
+    .${BORDER_CLASS} .record-region[data-recording="true"]:hover {
       color: #ff8a8a;
       border-color: rgba(255, 138, 138, 0.7);
       box-shadow: 0 0 0 1px rgba(255, 138, 138, 0.36);
     }
 
-    #${BORDER_ID} .move-region {
+    .${BORDER_CLASS} .move-region {
       cursor: move;
     }
 
-    #${BORDER_ID} .clear-region {
+    .${BORDER_CLASS} .clear-region {
       color: rgba(255, 215, 215, 0.96);
     }
 
@@ -567,6 +642,43 @@ function clampRegionToRect(region: RegionSelection, rect: DOMRect): RegionSelect
   return buildRegionSelection(clamp(region.x, rect.left, rect.right - width), clamp(region.y, rect.top, rect.bottom - height), width, height);
 }
 
+function regionEdges(region: RegionSelection): { left: number; top: number; right: number; bottom: number } {
+  return {
+    left: region.x,
+    top: region.y,
+    right: region.x + region.width,
+    bottom: region.y + region.height,
+  };
+}
+
+function regionsOverlap(a: RegionSelection, b: RegionSelection): boolean {
+  const ae = regionEdges(a);
+  const be = regionEdges(b);
+  return ae.left < be.right && ae.right > be.left && ae.top < be.bottom && ae.bottom > be.top;
+}
+
+function collidesWithOtherRegion(region: RegionSelection, index: number): boolean {
+  return currentRegions.some((item, itemIndex) => itemIndex !== index && regionsOverlap(resolveRegionToViewport(item), region));
+}
+
+function normalizeRegions(raw: unknown, fallback?: RegionSelection | null): RegionSelection[] {
+  const source = Array.isArray(raw) ? raw : fallback ? [fallback] : [];
+  return source
+    .map((item) => normalizeRegion(item))
+    .filter((item): item is RegionSelection => item !== null)
+    .slice(0, 4);
+}
+
+function getActiveRegion(): RegionSelection | null {
+  return currentRegions[activeRegionIndex] ?? currentRegions[0] ?? null;
+}
+
+function setActiveRegion(index: number): void {
+  activeRegionIndex = clamp(index, 0, Math.max(0, currentRegions.length - 1));
+  currentRegion = getActiveRegion();
+  syncBorderState();
+}
+
 function computeDirectCrop(region: RegionSelection, video: HTMLVideoElement): { x: number; y: number; width: number; height: number } | null {
   const rendered = getRenderedVideoRect(video);
   const regionLeft = region.x;
@@ -605,6 +717,113 @@ function computeDirectOutput(crop: { width: number; height: number }): { width: 
   return {
     width: Math.max(1, Math.round(crop.width)),
     height: Math.max(1, Math.round(crop.height)),
+  };
+}
+
+function getMultiRegionLimit(settings?: Partial<Settings>): number {
+  const value = settings?.multiRegionMaxCount ?? multiRegionMaxCount;
+  return clamp(Math.round(Number(value) || DEFAULT_MULTI_REGION_COUNT), 2, MAX_ACTIVE_REGIONS);
+}
+
+function getActiveRegionLimit(): number {
+  return multiRegionEnabled ? getMultiRegionLimit() : 1;
+}
+
+function scaleLayout(layout: DirectLayout, scale: number, dx: number, dy: number): DirectCropPlacement[] {
+  return layout.placements.map((placement) => ({
+    crop: placement.crop,
+    dx: dx + Math.round(placement.dx * scale),
+    dy: dy + Math.round(placement.dy * scale),
+    dw: Math.max(1, Math.round(placement.dw * scale)),
+    dh: Math.max(1, Math.round(placement.dh * scale)),
+  }));
+}
+
+function composeHorizontal(layouts: DirectLayout[]): DirectLayout {
+  const height = Math.max(1, Math.round(Math.max(...layouts.map((layout) => layout.output.height))));
+  let x = 0;
+  const placements: DirectCropPlacement[] = [];
+  for (const layout of layouts) {
+    const scale = height / layout.output.height;
+    placements.push(...scaleLayout(layout, scale, x, 0));
+    x += Math.max(1, Math.round(layout.output.width * scale));
+  }
+  return { output: { width: Math.max(1, x), height }, placements };
+}
+
+function composeVertical(layouts: DirectLayout[]): DirectLayout {
+  const width = Math.max(1, Math.round(Math.max(...layouts.map((layout) => layout.output.width))));
+  let y = 0;
+  const placements: DirectCropPlacement[] = [];
+  for (const layout of layouts) {
+    const scale = width / layout.output.width;
+    placements.push(...scaleLayout(layout, scale, 0, y));
+    y += Math.max(1, Math.round(layout.output.height * scale));
+  }
+  return { output: { width, height: Math.max(1, y) }, placements };
+}
+
+function computeDirectLayout(crops: Array<{ x: number; y: number; width: number; height: number }>): DirectLayout {
+  if (crops.length <= 1) {
+    const crop = crops[0];
+    return {
+      output: computeDirectOutput(crop),
+      placements: [{ crop, dx: 0, dy: 0, dw: crop.width, dh: crop.height }],
+    };
+  }
+
+  const left = Math.min(...crops.map((crop) => crop.x));
+  const top = Math.min(...crops.map((crop) => crop.y));
+  const right = Math.max(...crops.map((crop) => crop.x + crop.width));
+  const bottom = Math.max(...crops.map((crop) => crop.y + crop.height));
+  const horizontal = right - left >= bottom - top;
+
+  if (crops.length > 2) {
+    if (horizontal) {
+      const ordered = [...crops].sort((a, b) => (a.x + a.width / 2) - (b.x + b.width / 2));
+      const split = Math.ceil(ordered.length / 2);
+      return composeHorizontal([
+        composeVertical(ordered.slice(0, split).sort((a, b) => a.y - b.y).map((crop) => computeDirectLayout([crop]))),
+        composeVertical(ordered.slice(split).sort((a, b) => a.y - b.y).map((crop) => computeDirectLayout([crop]))),
+      ]);
+    }
+
+    const ordered = [...crops].sort((a, b) => (a.y + a.height / 2) - (b.y + b.height / 2));
+    const split = Math.ceil(ordered.length / 2);
+    return composeVertical([
+      composeHorizontal(ordered.slice(0, split).sort((a, b) => a.x - b.x).map((crop) => computeDirectLayout([crop]))),
+      composeHorizontal(ordered.slice(split).sort((a, b) => a.x - b.x).map((crop) => computeDirectLayout([crop]))),
+    ]);
+  }
+
+  const ordered = [...crops].sort((a, b) => horizontal ? a.x - b.x : a.y - b.y);
+
+  if (horizontal) {
+    const height = Math.max(1, Math.round(Math.max(...ordered.map((crop) => crop.height))));
+    let x = 0;
+    const placements = ordered.map((crop) => {
+      const width = Math.max(1, Math.round(crop.width * (height / crop.height)));
+      const placement = { crop, dx: x, dy: 0, dw: width, dh: height };
+      x += width;
+      return placement;
+    });
+    return {
+      output: { width: Math.max(1, x), height },
+      placements,
+    };
+  }
+
+  const width = Math.max(1, Math.round(Math.max(...ordered.map((crop) => crop.width))));
+  let y = 0;
+  const placements = ordered.map((crop) => {
+    const height = Math.max(1, Math.round(crop.height * (width / crop.width)));
+    const placement = { crop, dx: 0, dy: y, dw: width, dh: height };
+    y += height;
+    return placement;
+  });
+  return {
+    output: { width, height: Math.max(1, y) },
+    placements,
   };
 }
 
@@ -688,6 +907,44 @@ function getDownloadIconSvg(): string {
       <path d="M12 4V15M12 15L7.5 10.5M12 15L16.5 10.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
       <path d="M5 19H19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
     </svg>
+  `;
+}
+
+function getMoveIconSvg(): string {
+  return `
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+      <path d="M12 3V21M12 3L8.5 6.5M12 3L15.5 6.5M12 21L8.5 17.5M12 21L15.5 17.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M3 12H21M3 12L6.5 8.5M3 12L6.5 15.5M21 12L17.5 8.5M21 12L17.5 15.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  `;
+}
+
+function getPlusIconSvg(): string {
+  return `
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+      <path d="M12 5V19M5 12H19" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+    </svg>
+  `;
+}
+
+function getCloseIconSvg(): string {
+  return `
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+      <path d="M7 7L17 17M17 7L7 17" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+    </svg>
+  `;
+}
+
+function getRegionToolbarHtml(): string {
+  return `
+    <div class="region-toolbar">
+      <span class="record-time" hidden>00:00</span>
+      <button class="region-tool record-region" type="button" aria-label="녹화 시작" title="녹화 시작">${getRecordIconSvg(false)}</button>
+      <button class="region-tool add-region" type="button" aria-label="영역 추가" title="영역 추가">${getPlusIconSvg()}</button>
+      <button class="region-tool screenshot-region" type="button" aria-label="스크린샷" title="스크린샷">${getCameraIconSvg()}</button>
+      <button class="region-tool move-region" type="button" aria-label="영역 이동" title="영역 이동">${getMoveIconSvg()}</button>
+      <button class="region-tool clear-region" type="button" aria-label="영역 해제" title="영역 해제">${getCloseIconSvg()}</button>
+    </div>
   `;
 }
 
@@ -1043,12 +1300,16 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
     return { ok: false, error: "비디오 크기를 확인할 수 없습니다." };
   }
 
-  const crop = computeDirectCrop(command.region, video);
-  if (!crop) {
+  const sourceRegions = (command.regions?.length ? command.regions : [command.region]).slice(0, command.settings.enableMultiRegion ? getMultiRegionLimit(command.settings) : 1);
+  const crops = sourceRegions
+    .map((region) => computeDirectCrop(region, video))
+    .filter((crop): crop is { x: number; y: number; width: number; height: number } => crop !== null);
+  if (crops.length === 0) {
     return { ok: false, error: "선택 영역이 비디오 화면과 겹치지 않습니다." };
   }
 
-  const output = computeDirectOutput(crop);
+  const layout = computeDirectLayout(crops);
+  const output = layout.output;
   const sourceStream = getVideoStream(video);
   if (!sourceStream) {
     return { ok: false, error: "이 브라우저에서는 비디오 스트림 직접 녹화를 지원하지 않습니다." };
@@ -1079,11 +1340,17 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
   const mime = selectDirectMimeType(command.settings);
 
   const drawFrame = () => {
-    const nextCrop = computeDirectCrop(resolveRegionToViewport(command.region), video);
-    if (nextCrop) {
-      session.crop = nextCrop;
+    const nextCrops = sourceRegions
+      .map((region) => computeDirectCrop(resolveRegionToViewport(region), video))
+      .filter((crop): crop is { x: number; y: number; width: number; height: number } => crop !== null);
+    if (nextCrops.length > 0) {
+      session.placements = computeDirectLayout(nextCrops).placements;
     }
-    context.drawImage(video, session.crop.x, session.crop.y, session.crop.width, session.crop.height, 0, 0, output.width, output.height);
+    context.fillStyle = "#000";
+    context.fillRect(0, 0, output.width, output.height);
+    for (const placement of session.placements) {
+      context.drawImage(video, placement.crop.x, placement.crop.y, placement.crop.width, placement.crop.height, placement.dx, placement.dy, placement.dw, placement.dh);
+    }
   };
 
   let resolveFinish: () => void = () => {};
@@ -1116,7 +1383,7 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
     finishPromise,
     resolveFinish,
     rejectFinish,
-    crop,
+    placements: layout.placements,
     output,
   };
 
@@ -1148,42 +1415,59 @@ function stopDirectRecordingForUnload(): void {
   requestDirectPartStop(directSession);
 }
 
-function showSelectionBorder(region: RegionSelection | null): void {
+function showSelectionBorders(regions: RegionSelection[]): void {
   ensureStyle();
   stopRegionLayoutWatch();
   removeBorderHandlers?.();
   removeBorderHandlers = null;
   currentBorder?.remove();
   currentBorder = null;
+  for (const border of currentBorders.values()) {
+    border.remove();
+  }
+  currentBorders = new Map();
 
-  if (!region) {
+  if (regions.length === 0) {
     return;
   }
 
-  const border = document.createElement("div");
-  border.id = BORDER_ID;
-  border.innerHTML = `
-    <div class="region-toolbar">
-      <span class="record-time" hidden>00:00</span>
-      <button class="region-tool record-region" type="button" aria-label="녹화 시작" title="녹화 시작">${getRecordIconSvg(false)}</button>
-      <button class="region-tool screenshot-region" type="button" aria-label="스크린샷" title="스크린샷">${getCameraIconSvg()}</button>
-      <button class="region-tool move-region" type="button" aria-label="영역 이동" title="영역 이동">✥</button>
-      <button class="region-tool clear-region" type="button" aria-label="영역 해제" title="영역 해제">×</button>
-    </div>
-    <span class="resize-zone" data-edge="n" aria-hidden="true"></span>
-    <span class="resize-zone" data-edge="s" aria-hidden="true"></span>
-    <span class="resize-zone" data-edge="w" aria-hidden="true"></span>
-    <span class="resize-zone" data-edge="e" aria-hidden="true"></span>
-    <span class="resize-zone" data-edge="nw" aria-hidden="true"></span>
-    <span class="resize-zone" data-edge="ne" aria-hidden="true"></span>
-    <span class="resize-zone" data-edge="sw" aria-hidden="true"></span>
-    <span class="resize-zone" data-edge="se" aria-hidden="true"></span>
-  `;
-  applyBorderGeometry(border, region);
-  attachBorderControls(border);
-  document.body.appendChild(border);
-  currentBorder = border;
-  startRegionLayoutWatch(border);
+  const cleanupCallbacks: Array<() => void> = [];
+  regions.forEach((region, index) => {
+    const border = document.createElement("div");
+    border.id = index === 0 ? BORDER_ID : `${BORDER_ID}-${index}`;
+    border.className = BORDER_CLASS;
+    border.dataset.regionIndex = String(index);
+    border.innerHTML = `
+      ${getRegionToolbarHtml()}
+      <span class="resize-zone" data-edge="n" aria-hidden="true"></span>
+      <span class="resize-zone" data-edge="s" aria-hidden="true"></span>
+      <span class="resize-zone" data-edge="w" aria-hidden="true"></span>
+      <span class="resize-zone" data-edge="e" aria-hidden="true"></span>
+      <span class="resize-zone" data-edge="nw" aria-hidden="true"></span>
+      <span class="resize-zone" data-edge="ne" aria-hidden="true"></span>
+      <span class="resize-zone" data-edge="sw" aria-hidden="true"></span>
+      <span class="resize-zone" data-edge="se" aria-hidden="true"></span>
+      <span class="guide-edge" data-side="n" hidden></span>
+      <span class="guide-edge" data-side="s" hidden></span>
+      <span class="guide-edge" data-side="w" hidden></span>
+      <span class="guide-edge" data-side="e" hidden></span>
+    `;
+    applyBorderGeometry(border, region);
+    const cleanup = attachBorderControls(border, index);
+    cleanupCallbacks.push(cleanup);
+    document.body.appendChild(border);
+    currentBorders.set(index, border);
+    if (index === activeRegionIndex) {
+      currentBorder = border;
+    }
+  });
+  removeBorderHandlers = () => {
+    for (const cleanup of cleanupCallbacks) {
+      cleanup();
+    }
+  };
+  syncBorderState();
+  startRegionLayoutWatch();
 }
 
 function getVideoLayoutKey(): string {
@@ -1199,10 +1483,10 @@ function stopRegionLayoutWatch(): void {
   lastVideoLayoutKey = "";
 }
 
-function startRegionLayoutWatch(border: HTMLDivElement): void {
+function startRegionLayoutWatch(): void {
   lastVideoLayoutKey = getVideoLayoutKey();
   regionLayoutTimerId = window.setInterval(() => {
-    if (!currentRegion || !document.body.contains(border)) {
+    if (currentRegions.length === 0) {
       stopRegionLayoutWatch();
       return;
     }
@@ -1213,7 +1497,12 @@ function startRegionLayoutWatch(border: HTMLDivElement): void {
     }
 
     lastVideoLayoutKey = nextKey;
-    applyBorderGeometry(border, currentRegion);
+    currentRegions.forEach((region, index) => {
+      const border = currentBorders.get(index);
+      if (border && document.body.contains(border)) {
+        applyBorderGeometry(border, region);
+      }
+    });
     const stack = document.getElementById(SCREENSHOT_STACK_ID);
     if (stack) {
       positionScreenshotStack(stack);
@@ -1243,13 +1532,172 @@ function applyBorderGeometry(border: HTMLDivElement, region: RegionSelection): v
   border.style.height = `${height}px`;
 }
 
-function attachBorderControls(border: HTMLDivElement): void {
+function getRegionAccent(index: number): string {
+  return CROP_REGION_COLORS[index] ?? CROP_SECONDARY;
+}
+
+function hexToRgb(value: string): { r: number; g: number; b: number } {
+  const hex = value.replace("#", "");
+  return {
+    r: Number.parseInt(hex.slice(0, 2), 16),
+    g: Number.parseInt(hex.slice(2, 4), 16),
+    b: Number.parseInt(hex.slice(4, 6), 16),
+  };
+}
+
+function rgba(value: string, alpha: number): string {
+  const { r, g, b } = hexToRgb(value);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function syncBorderState(guides = new Map<number, Set<GuideSide>>()): void {
+  for (const [index, border] of currentBorders) {
+    const active = index === activeRegionIndex;
+    const accent = getRegionAccent(index);
+    border.dataset.active = active ? "true" : "false";
+    border.style.setProperty("--crop-clip-region-outline", rgba(accent, active ? 0.96 : 0.5));
+    border.style.setProperty("--crop-clip-region-shadow", rgba(accent, active ? 0.62 : 0.28));
+    border.querySelector<HTMLButtonElement>(".add-region")?.toggleAttribute("hidden", !active || !multiRegionEnabled || currentRegions.length >= getActiveRegionLimit() || isAnyRecording());
+    const guideSides = guides.get(index) ?? new Set<GuideSide>();
+    for (const side of ["n", "s", "w", "e"] as GuideSide[]) {
+      border.querySelector<HTMLElement>(`.guide-edge[data-side="${side}"]`)?.toggleAttribute("hidden", !guideSides.has(side));
+    }
+    border.querySelector<HTMLButtonElement>(".record-region")?.toggleAttribute("hidden", !active);
+  }
+  currentBorder = currentBorders.get(activeRegionIndex) ?? currentBorders.get(0) ?? null;
+}
+
+function removeRegionAtIndex(index: number): void {
+  if (currentRegions.length === 0) {
+    return;
+  }
+
+  if (currentRegions.length === 1) {
+    currentRegion = null;
+    currentRegions = [];
+    void clearRegion();
+    showSelectionBorders([]);
+    return;
+  }
+
+  currentRegions.splice(index, 1);
+  activeRegionIndex = Math.min(index, currentRegions.length - 1);
+  currentRegion = getActiveRegion();
+  void saveRegions(currentRegions);
+  showSelectionBorders(currentRegions);
+}
+
+function addGuide(guides: Map<number, Set<GuideSide>>, index: number, side: GuideSide): void {
+  const set = guides.get(index) ?? new Set<GuideSide>();
+  set.add(side);
+  guides.set(index, set);
+}
+
+function snapRegionEdges(region: RegionSelection, index: number, edge = "nsew"): { region: RegionSelection; guides: Map<number, Set<GuideSide>> } {
+  let { left, top, right, bottom } = regionEdges(region);
+  const guides = new Map<number, Set<GuideSide>>();
+
+  currentRegions.forEach((item, itemIndex) => {
+    if (itemIndex === index) {
+      return;
+    }
+    const other = regionEdges(resolveRegionToViewport(item));
+    const checks: Array<{ enabled: boolean; side: "left" | "right" | "top" | "bottom"; guideSide: GuideSide; otherSide: GuideSide; value: number; target: number }> = [
+      { enabled: edge.includes("w"), side: "left", guideSide: "w", otherSide: "w", value: left, target: other.left },
+      { enabled: edge.includes("w"), side: "left", guideSide: "w", otherSide: "e", value: left, target: other.right },
+      { enabled: edge.includes("e"), side: "right", guideSide: "e", otherSide: "w", value: right, target: other.left },
+      { enabled: edge.includes("e"), side: "right", guideSide: "e", otherSide: "e", value: right, target: other.right },
+      { enabled: edge.includes("n"), side: "top", guideSide: "n", otherSide: "n", value: top, target: other.top },
+      { enabled: edge.includes("n"), side: "top", guideSide: "n", otherSide: "s", value: top, target: other.bottom },
+      { enabled: edge.includes("s"), side: "bottom", guideSide: "s", otherSide: "n", value: bottom, target: other.top },
+      { enabled: edge.includes("s"), side: "bottom", guideSide: "s", otherSide: "s", value: bottom, target: other.bottom },
+    ];
+
+    for (const check of checks) {
+      if (!check.enabled || Math.abs(check.value - check.target) > SNAP_DISTANCE) {
+        continue;
+      }
+      if (check.side === "left") {
+        left = check.target;
+      } else if (check.side === "right") {
+        right = check.target;
+      } else if (check.side === "top") {
+        top = check.target;
+      } else {
+        bottom = check.target;
+      }
+      addGuide(guides, index, check.guideSide);
+      addGuide(guides, itemIndex, check.otherSide);
+    }
+  });
+
+  return {
+    region: buildRegionSelection(left, top, Math.max(MIN_WIDTH, right - left), Math.max(MIN_HEIGHT, bottom - top)),
+    guides,
+  };
+}
+
+function snapRegionMove(region: RegionSelection, index: number): { region: RegionSelection; guides: Map<number, Set<GuideSide>> } {
+  let { left, top, right, bottom } = regionEdges(region);
+  const width = right - left;
+  const height = bottom - top;
+  const guides = new Map<number, Set<GuideSide>>();
+
+  currentRegions.forEach((item, itemIndex) => {
+    if (itemIndex === index) {
+      return;
+    }
+    const other = regionEdges(resolveRegionToViewport(item));
+    const xChecks: Array<{ value: number; target: number; side: GuideSide; otherSide: GuideSide }> = [
+      { value: left, target: other.left, side: "w", otherSide: "w" },
+      { value: left, target: other.right, side: "w", otherSide: "e" },
+      { value: right, target: other.left, side: "e", otherSide: "w" },
+      { value: right, target: other.right, side: "e", otherSide: "e" },
+    ];
+    const yChecks: Array<{ value: number; target: number; side: GuideSide; otherSide: GuideSide }> = [
+      { value: top, target: other.top, side: "n", otherSide: "n" },
+      { value: top, target: other.bottom, side: "n", otherSide: "s" },
+      { value: bottom, target: other.top, side: "s", otherSide: "n" },
+      { value: bottom, target: other.bottom, side: "s", otherSide: "s" },
+    ];
+
+    for (const check of xChecks) {
+      if (Math.abs(check.value - check.target) <= SNAP_DISTANCE) {
+        const dx = check.target - check.value;
+        left += dx;
+        right += dx;
+        addGuide(guides, index, check.side);
+        addGuide(guides, itemIndex, check.otherSide);
+        break;
+      }
+    }
+    for (const check of yChecks) {
+      if (Math.abs(check.value - check.target) <= SNAP_DISTANCE) {
+        const dy = check.target - check.value;
+        top += dy;
+        bottom += dy;
+        addGuide(guides, index, check.side);
+        addGuide(guides, itemIndex, check.otherSide);
+        break;
+      }
+    }
+  });
+
+  return { region: buildRegionSelection(left, top, width, height), guides };
+}
+
+function attachBorderControls(border: HTMLDivElement, index: number): () => void {
   const cleanupCallbacks: Array<() => void> = [];
   const recordTime = border.querySelector<HTMLElement>(".record-time");
   const recordButton = border.querySelector<HTMLButtonElement>(".record-region");
   const screenshotButton = border.querySelector<HTMLButtonElement>(".screenshot-region");
   const clearButton = border.querySelector<HTMLButtonElement>(".clear-region");
   const moveButton = border.querySelector<HTMLButtonElement>(".move-region");
+  const addButton = border.querySelector<HTMLButtonElement>(".add-region");
+
+  const activate = () => setActiveRegion(index);
+  border.addEventListener("pointerdown", activate);
+  cleanupCallbacks.push(() => border.removeEventListener("pointerdown", activate));
 
   const updateRecordButton = () => {
     if (!recordButton) {
@@ -1260,6 +1708,7 @@ function attachBorderControls(border: HTMLDivElement): void {
     const isRecording = isAnyRecording();
     const isFullRecording = currentRecordingState.status === "recording" && currentRecordingState.mode === "full";
     const label = withShortcut(isRegionRecording ? "녹화 중지" : "녹화 시작", "regionRecord");
+    recordButton.hidden = index !== activeRegionIndex;
     recordButton.innerHTML = getRecordIconSvg(isRegionRecording);
     recordButton.setAttribute("aria-label", label);
     recordButton.title = label;
@@ -1287,8 +1736,12 @@ function attachBorderControls(border: HTMLDivElement): void {
     if (moveButton) {
       moveButton.disabled = isRegionRecording;
     }
+    if (addButton) {
+      addButton.hidden = index !== activeRegionIndex || !multiRegionEnabled || currentRegions.length >= getActiveRegionLimit() || isRecording;
+      addButton.disabled = isRecording;
+    }
     if (recordTime) {
-      recordTime.hidden = !isRegionRecording;
+      recordTime.hidden = !isRegionRecording || index !== activeRegionIndex;
       recordTime.textContent = isRegionRecording && currentRecordingState.startedAt ? formatElapsed(Date.now() - currentRecordingState.startedAt) : "00:00";
     }
   };
@@ -1364,9 +1817,7 @@ function attachBorderControls(border: HTMLDivElement): void {
       return;
     }
 
-    void clearRegion();
-    currentRegion = null;
-    showSelectionBorder(null);
+    removeRegionAtIndex(index);
   };
 
   clearButton?.addEventListener("click", onClear);
@@ -1374,18 +1825,34 @@ function attachBorderControls(border: HTMLDivElement): void {
     cleanupCallbacks.push(() => clearButton.removeEventListener("click", onClear));
   }
 
+  const onAdd = (event: MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (isAnyRecording() || !multiRegionEnabled || currentRegions.length >= getActiveRegionLimit()) {
+      return;
+    }
+    startSelection();
+  };
+
+  addButton?.addEventListener("click", onAdd);
+  if (addButton) {
+    cleanupCallbacks.push(() => addButton.removeEventListener("click", onAdd));
+  }
+
   const startMove = (event: PointerEvent) => {
-    if (!currentRegion || (currentRecordingState.status === "recording" && currentRecordingState.mode !== "full")) {
+    const region = currentRegions[index];
+    if (!region || (currentRecordingState.status === "recording" && currentRecordingState.mode !== "full")) {
       return;
     }
 
+    setActiveRegion(index);
     event.preventDefault();
     event.stopPropagation();
     moveButton?.setPointerCapture(event.pointerId);
 
     const startX = event.clientX;
     const startY = event.clientY;
-    const startRegion = resolveRegionToViewport(currentRegion);
+    const startRegion = resolveRegionToViewport(region);
     const startLeft = startRegion.x;
     const startTop = startRegion.y;
     const bounds = getVideoSelectionRect();
@@ -1399,16 +1866,24 @@ function attachBorderControls(border: HTMLDivElement): void {
       const left = clamp(startLeft + moveEvent.clientX - startX, bounds.left, bounds.right - width);
       const top = clamp(startTop + moveEvent.clientY - startY, bounds.top, bounds.bottom - height);
 
-      currentRegion = buildRegionSelection(left, top, width, height);
-      applyBorderGeometry(border, currentRegion);
+      const snapped = snapRegionMove(buildRegionSelection(left, top, width, height), index);
+      const nextLeft = clamp(snapped.region.x, bounds.left, bounds.right - width);
+      const nextTop = clamp(snapped.region.y, bounds.top, bounds.bottom - height);
+      const nextRegion = buildRegionSelection(nextLeft, nextTop, width, height);
+      if (collidesWithOtherRegion(nextRegion, index)) {
+        return;
+      }
+      currentRegions[index] = nextRegion;
+      currentRegion = getActiveRegion();
+      applyBorderGeometry(border, nextRegion);
+      syncBorderState(snapped.guides);
     };
 
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
-      if (currentRegion) {
-        void saveRegion(currentRegion);
-      }
+      syncBorderState();
+      void saveRegions(currentRegions);
     };
 
     window.addEventListener("pointermove", onMove);
@@ -1423,17 +1898,19 @@ function attachBorderControls(border: HTMLDivElement): void {
   const startResize = (event: PointerEvent) => {
     const target = event.currentTarget as HTMLElement;
     const edge = target.dataset.edge;
-    if (!edge || !currentRegion || (currentRecordingState.status === "recording" && currentRecordingState.mode !== "full")) {
+    const region = currentRegions[index];
+    if (!edge || !region || (currentRecordingState.status === "recording" && currentRecordingState.mode !== "full")) {
       return;
     }
 
+    setActiveRegion(index);
     event.preventDefault();
     event.stopPropagation();
     target.setPointerCapture(event.pointerId);
 
     const startX = event.clientX;
     const startY = event.clientY;
-    const startRegion = resolveRegionToViewport(currentRegion);
+    const startRegion = resolveRegionToViewport(region);
     const startLeft = startRegion.x;
     const startTop = startRegion.y;
     const startRight = startRegion.x + startRegion.width;
@@ -1466,16 +1943,23 @@ function attachBorderControls(border: HTMLDivElement): void {
         bottom = clamp(startBottom + dy, top + minHeight, bounds.bottom);
       }
 
-      currentRegion = buildRegionSelection(left, top, right - left, bottom - top);
-      applyBorderGeometry(border, currentRegion);
+      let nextRegion = buildRegionSelection(left, top, right - left, bottom - top);
+      const snap = snapRegionEdges(nextRegion, index, edge);
+      nextRegion = snap.region;
+      if (collidesWithOtherRegion(nextRegion, index)) {
+        return;
+      }
+      currentRegions[index] = nextRegion;
+      currentRegion = getActiveRegion();
+      applyBorderGeometry(border, nextRegion);
+      syncBorderState(snap.guides);
     };
 
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
-      if (currentRegion) {
-        void saveRegion(currentRegion);
-      }
+      syncBorderState();
+      void saveRegions(currentRegions);
     };
 
     window.addEventListener("pointermove", onMove);
@@ -1488,18 +1972,21 @@ function attachBorderControls(border: HTMLDivElement): void {
     cleanupCallbacks.push(() => zone.removeEventListener("pointerdown", startResize));
   }
 
-  removeBorderHandlers = () => {
+  return () => {
     for (const cleanup of cleanupCallbacks) {
       cleanup();
     }
   };
 }
 
-async function loadState(): Promise<{ region: RegionSelection | null; recordingState: LocalRecordingState; fullRecordButtonEnabled: boolean; fullScreenshotButtonEnabled: boolean; seekEnabled: boolean; seekSeconds: number; streamerFilenameEnabled: boolean; shortcutsEnabled: boolean; shortcutKeys: ShortcutKeys }> {
+async function loadState(): Promise<{ region: RegionSelection | null; regions: RegionSelection[]; recordingState: LocalRecordingState; multiRegionEnabled: boolean; multiRegionMaxCount: number; fullRecordButtonEnabled: boolean; fullScreenshotButtonEnabled: boolean; seekEnabled: boolean; seekSeconds: number; streamerFilenameEnabled: boolean; shortcutsEnabled: boolean; shortcutKeys: ShortcutKeys }> {
   if (!isExtensionContextAvailable()) {
     return {
       region: null,
+      regions: [],
       recordingState: { status: "idle" },
+      multiRegionEnabled: false,
+      multiRegionMaxCount: DEFAULT_MULTI_REGION_COUNT,
       fullRecordButtonEnabled: false,
       fullScreenshotButtonEnabled: false,
       seekEnabled: false,
@@ -1510,17 +1997,21 @@ async function loadState(): Promise<{ region: RegionSelection | null; recordingS
     };
   }
 
-  let result: { region?: unknown; recordingState?: unknown; settings?: Partial<Settings> };
+  let result: { region?: unknown; regions?: unknown; recordingState?: unknown; settings?: Partial<Settings> };
   try {
     result = await chrome.storage.local.get({
       region: null,
+      regions: [],
       recordingState: { status: "idle" as const },
       settings: {},
     });
   } catch {
     return {
       region: null,
+      regions: [],
       recordingState: { status: "idle" },
+      multiRegionEnabled: false,
+      multiRegionMaxCount: DEFAULT_MULTI_REGION_COUNT,
       fullRecordButtonEnabled: false,
       fullScreenshotButtonEnabled: false,
       seekEnabled: false,
@@ -1531,9 +2022,13 @@ async function loadState(): Promise<{ region: RegionSelection | null; recordingS
     };
   }
 
+  const region = normalizeRegion(result.region);
   return {
-    region: normalizeRegion(result.region),
+    region,
+    regions: normalizeRegions(result.regions, region),
     recordingState: normalizeRecordingState(result.recordingState),
+    multiRegionEnabled: Boolean(result.settings?.enableMultiRegion),
+    multiRegionMaxCount: getMultiRegionLimit(result.settings),
     fullRecordButtonEnabled: Boolean(result.settings?.enableFullRecordButton),
     fullScreenshotButtonEnabled: Boolean(result.settings?.enableFullScreenshotButton),
     seekEnabled: Boolean(result.settings?.enableSeek ?? (result.settings as Partial<Settings> & { enableSeekButtons?: boolean } | undefined)?.enableSeekButtons),
@@ -1598,13 +2093,26 @@ function normalizeShortcutKeys(raw: Partial<ShortcutKeys> | undefined): Shortcut
   return { ...DEFAULT_CONTENT_SHORTCUT_KEYS, ...raw };
 }
 
-async function saveRegion(region: RegionSelection): Promise<boolean> {
+function trimRegionsToLimit(): void {
+  const limit = getActiveRegionLimit();
+  if (currentRegions.length <= limit) {
+    return;
+  }
+  currentRegions = currentRegions.slice(0, limit);
+  activeRegionIndex = Math.min(activeRegionIndex, currentRegions.length - 1);
+  currentRegion = getActiveRegion();
+  void saveRegions(currentRegions);
+  showSelectionBorders(currentRegions);
+}
+
+async function saveRegions(regions: RegionSelection[]): Promise<boolean> {
   if (!isExtensionContextAvailable()) {
     return false;
   }
 
+  const nextRegions = regions.slice(0, getActiveRegionLimit());
   try {
-    await chrome.storage.local.set({ region });
+    await chrome.storage.local.set({ region: nextRegions[0] ?? null, regions: nextRegions });
     return true;
   } catch {
     return false;
@@ -1617,7 +2125,7 @@ async function clearRegion(): Promise<boolean> {
   }
 
   try {
-    await chrome.storage.local.set({ region: null });
+    await chrome.storage.local.set({ region: null, regions: [] });
     return true;
   } catch {
     return false;
@@ -1627,7 +2135,12 @@ async function clearRegion(): Promise<boolean> {
 async function refreshBorder(): Promise<void> {
   const state = await loadState();
   currentRegion = state.region;
+  currentRegions = state.regions;
+  activeRegionIndex = Math.min(activeRegionIndex, Math.max(0, currentRegions.length - 1));
   currentRecordingState = state.recordingState;
+  multiRegionEnabled = state.multiRegionEnabled;
+  multiRegionMaxCount = state.multiRegionMaxCount;
+  trimRegionsToLimit();
   fullRecordButtonEnabled = state.fullRecordButtonEnabled;
   fullScreenshotButtonEnabled = state.fullScreenshotButtonEnabled;
   seekEnabled = state.seekEnabled;
@@ -1635,7 +2148,7 @@ async function refreshBorder(): Promise<void> {
   streamerFilenameEnabled = state.streamerFilenameEnabled;
   shortcutsEnabled = state.shortcutsEnabled;
   shortcutKeys = state.shortcutKeys;
-  showSelectionBorder(currentRegion);
+  showSelectionBorders(currentRegions);
 
   if (state.recordingState.status === "recording" && selectionActive) {
     cancelSelection("녹화 중에는 영역을 다시 선택할 수 없습니다.");
@@ -1645,6 +2158,9 @@ async function refreshBorder(): Promise<void> {
 async function initializePageState(): Promise<void> {
   const state = await loadState();
   currentRecordingState = state.recordingState;
+  multiRegionEnabled = state.multiRegionEnabled;
+  multiRegionMaxCount = state.multiRegionMaxCount;
+  trimRegionsToLimit();
   fullRecordButtonEnabled = state.fullRecordButtonEnabled;
   fullScreenshotButtonEnabled = state.fullScreenshotButtonEnabled;
   seekEnabled = state.seekEnabled;
@@ -1653,15 +2169,18 @@ async function initializePageState(): Promise<void> {
   shortcutsEnabled = state.shortcutsEnabled;
   shortcutKeys = state.shortcutKeys;
 
-  if (state.recordingState.status !== "recording" && state.region) {
+  if (state.recordingState.status !== "recording" && state.regions.length > 0) {
     await clearRegion();
     currentRegion = null;
-    showSelectionBorder(null);
+    currentRegions = [];
+    showSelectionBorders([]);
     return;
   }
 
   currentRegion = state.region;
-  showSelectionBorder(currentRegion);
+  currentRegions = state.regions;
+  trimRegionsToLimit();
+  showSelectionBorders(currentRegions);
 }
 
 function teardownOverlay(): void {
@@ -1707,32 +2226,39 @@ function cancelSelection(message?: string): void {
 async function commitSelection(region: RegionSelection): Promise<void> {
   const bounds = getVideoSelectionRect();
   const nextRegion = bounds ? clampRegionToRect(region, bounds) : buildRegionSelection(region.x, region.y, region.width, region.height);
-  const saved = await saveRegion(nextRegion);
+  if (multiRegionEnabled && currentRegions.some((item) => regionsOverlap(resolveRegionToViewport(item), nextRegion))) {
+    setOverlayError("영역끼리는 겹칠 수 없습니다.");
+    return;
+  }
+  const nextRegions = multiRegionEnabled ? [...currentRegions, nextRegion].slice(0, getActiveRegionLimit()) : [nextRegion];
+  const saved = await saveRegions(nextRegions);
   if (!saved) {
     setOverlayError("확장 프로그램이 새로고침되었습니다. 페이지를 새로고침한 뒤 다시 시도하세요.");
     return;
   }
 
-  currentRegion = nextRegion;
-  showSelectionBorder(nextRegion);
+  currentRegions = nextRegions;
+  setActiveRegion(nextRegions.length - 1);
+  showSelectionBorders(nextRegions);
   teardownOverlay();
 }
 
 function getCurrentRegionGeometry(): RegionSelection | null {
-  if (currentRegion?.videoRelative) {
-    return resolveRegionToViewport(currentRegion);
+  const activeRegion = getActiveRegion();
+  if (activeRegion?.videoRelative) {
+    return resolveRegionToViewport(activeRegion);
   }
 
   const sourceRect = currentBorder?.getBoundingClientRect();
-  if (!sourceRect && !currentRegion) {
+  if (!sourceRect && !activeRegion) {
     return null;
   }
 
   const inset = BORDER_WIDTH;
-  const left = (sourceRect ? sourceRect.left : currentRegion?.x ?? 0) + inset;
-  const top = (sourceRect ? sourceRect.top : currentRegion?.y ?? 0) + inset;
-  const right = (sourceRect ? sourceRect.right : (currentRegion?.x ?? 0) + (currentRegion?.width ?? 0)) - inset;
-  const bottom = (sourceRect ? sourceRect.bottom : (currentRegion?.y ?? 0) + (currentRegion?.height ?? 0)) - inset;
+  const left = (sourceRect ? sourceRect.left : activeRegion?.x ?? 0) + inset;
+  const top = (sourceRect ? sourceRect.top : activeRegion?.y ?? 0) + inset;
+  const right = (sourceRect ? sourceRect.right : (activeRegion?.x ?? 0) + (activeRegion?.width ?? 0)) - inset;
+  const bottom = (sourceRect ? sourceRect.bottom : (activeRegion?.y ?? 0) + (activeRegion?.height ?? 0)) - inset;
   const bounds = getVideoSelectionRect();
   const limitLeft = bounds?.left ?? 0;
   const limitTop = bounds?.top ?? 0;
@@ -1746,6 +2272,13 @@ function getCurrentRegionGeometry(): RegionSelection | null {
   return buildRegionSelection(x, y, width, height);
 }
 
+function getCurrentRegionGeometries(): RegionSelection[] {
+  return currentRegions
+    .map((region) => resolveRegionToViewport(region))
+    .filter((region) => region.width > 0 && region.height > 0)
+    .slice(0, getActiveRegionLimit());
+}
+
 function getPlayerRegionGeometry(): RegionSelection | null {
   const rect = getVideoRenderedViewportRect();
   if (!rect || rect.width <= 0 || rect.height <= 0) {
@@ -1757,6 +2290,10 @@ function getPlayerRegionGeometry(): RegionSelection | null {
 
 function startSelection(): void {
   if (selectionActive || isAnyRecording()) {
+    return;
+  }
+  if (multiRegionEnabled && currentRegions.length >= getActiveRegionLimit()) {
+    window.alert(`다중영역은 최대 ${getActiveRegionLimit()}개까지 사용할 수 있습니다.`);
     return;
   }
 
@@ -2347,6 +2884,15 @@ function handleShortcut(event: KeyboardEvent): void {
   }
 
   const key = event.key.toLowerCase();
+  if (multiRegionEnabled && /^[1-4]$/.test(key)) {
+    const nextIndex = Number(key) - 1;
+    if (nextIndex < getActiveRegionLimit() && currentRegions[nextIndex]) {
+      event.preventDefault();
+      setActiveRegion(nextIndex);
+    }
+    return;
+  }
+
   if (key === shortcutKeys.selectRegion) {
     event.preventDefault();
     if (isAnyRecording()) {
@@ -2364,12 +2910,10 @@ function handleShortcut(event: KeyboardEvent): void {
     }
 
     void (async () => {
-      if (!(await clearRegion())) {
-        window.alert("영역을 해제하지 못했습니다.");
+      if (currentRegions.length === 0) {
         return;
       }
-      currentRegion = null;
-      showSelectionBorder(null);
+      removeRegionAtIndex(activeRegionIndex);
     })();
   } else if (key === shortcutKeys.regionRecord) {
     event.preventDefault();
@@ -2419,7 +2963,7 @@ function getPlayerStatus(): PlayerStatusResponse {
 }
 
 if (isExtensionContextAvailable()) {
-  chrome.runtime.onMessage.addListener((message: ContentCommand | PlayerStatusRequest, _sender, sendResponse: (response: MessageResponse | PlayerStatusResponse | RegionGeometryResponse) => void) => {
+  chrome.runtime.onMessage.addListener((message: ContentCommand | PlayerStatusRequest, _sender, sendResponse: (response: MessageResponse | PlayerStatusResponse | RegionGeometryResponse | RegionGeometriesResponse) => void) => {
     if (message.type === "GET_PLAYER_STATUS") {
       const status = getPlayerStatus();
       sendResponse(status.ok && status.data.muted ? { ok: false, error: "현재 탭의 영상이 음소거되어 있습니다." } : status);
@@ -2435,7 +2979,9 @@ if (isExtensionContextAvailable()) {
         }
 
         await clearRegion();
-        showSelectionBorder(null);
+        currentRegion = null;
+        currentRegions = [];
+        showSelectionBorders([]);
         sendResponse({ ok: true });
       })();
       return true;
@@ -2444,6 +2990,12 @@ if (isExtensionContextAvailable()) {
     if (message.type === "GET_REGION_GEOMETRY") {
       const region = getCurrentRegionGeometry();
       sendResponse(region ? { ok: true, data: region } : { ok: false, error: "현재 선택된 녹화 영역을 찾지 못했습니다." });
+      return false;
+    }
+
+    if (message.type === "GET_REGION_GEOMETRIES") {
+      const regions = getCurrentRegionGeometries();
+      sendResponse(regions.length > 0 ? { ok: true, data: regions } : { ok: false, error: "현재 선택된 녹화 영역을 찾지 못했습니다." });
       return false;
     }
 
@@ -2486,6 +3038,11 @@ if (isExtensionContextAvailable()) {
         return;
       }
 
+      currentRegion = state.region;
+      currentRegions = state.regions;
+      multiRegionEnabled = state.multiRegionEnabled;
+      multiRegionMaxCount = state.multiRegionMaxCount;
+      trimRegionsToLimit();
       startSelection();
       sendResponse({ ok: true });
     })();
@@ -2503,19 +3060,32 @@ if (isExtensionContextAvailable()) {
       void refreshBorder();
     }
 
+    if (changes.regions) {
+      currentRegions = normalizeRegions(changes.regions.newValue, currentRegion);
+      void refreshBorder();
+    }
+
     if (changes.recordingState) {
       const nextState = normalizeRecordingState(changes.recordingState.newValue);
       currentRecordingState = nextState;
       if (nextState.status === "recording" && selectionActive) {
         cancelSelection("녹화 중에는 영역을 다시 선택할 수 없습니다.");
       }
-      showSelectionBorder(currentRegion);
+      showSelectionBorders(currentRegions);
       requestChzzkToolSync();
       syncChzzkRecordTimer();
     }
 
     if (changes.settings) {
       const settings = changes.settings.newValue as Partial<Settings> | undefined;
+      multiRegionEnabled = Boolean(settings?.enableMultiRegion);
+      multiRegionMaxCount = getMultiRegionLimit(settings);
+      if (!multiRegionEnabled && currentRegions.length > 1) {
+        currentRegions = currentRegions.slice(0, 1);
+        void saveRegions(currentRegions);
+        showSelectionBorders(currentRegions);
+      }
+      trimRegionsToLimit();
       fullRecordButtonEnabled = Boolean(settings?.enableFullRecordButton);
       fullScreenshotButtonEnabled = Boolean(settings?.enableFullScreenshotButton);
       seekEnabled = Boolean(settings?.enableSeek ?? (settings as Partial<Settings> & { enableSeekButtons?: boolean } | undefined)?.enableSeekButtons);
@@ -2534,8 +3104,13 @@ window.addEventListener("resize", () => {
 });
 
 window.addEventListener("scroll", () => {
-  if (currentBorder && currentRegion) {
-    applyBorderGeometry(currentBorder, currentRegion);
+  if (currentRegions.length > 0) {
+    currentRegions.forEach((region, index) => {
+      const border = currentBorders.get(index);
+      if (border) {
+        applyBorderGeometry(border, region);
+      }
+    });
   }
 }, true);
 

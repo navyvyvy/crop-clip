@@ -1,10 +1,13 @@
 import {
   DEFAULT_RECORDING_STATE,
+  DEFAULT_MULTI_REGION_COUNT,
   DEFAULT_SEEK_SECONDS,
   DEFAULT_SETTINGS,
   DEFAULT_SHORTCUT_KEYS,
+  MAX_MULTI_REGION_COUNT,
   MAX_SEEK_SECONDS,
   MAX_VIDEO_BITS_PER_SECOND,
+  MIN_MULTI_REGION_COUNT,
   MIN_SEEK_SECONDS,
   MIN_VIDEO_BITS_PER_SECOND,
   type AppState,
@@ -17,6 +20,7 @@ import {
 const STORAGE_KEYS = {
   settings: "settings",
   region: "region",
+  regions: "regions",
   recordingState: "recordingState",
 } as const;
 
@@ -48,6 +52,8 @@ export function normalizeSettings(raw: Partial<Settings> | undefined): Settings 
     outputFormat,
     videoBitsPerSecond: clamp(Math.round(videoBitsPerSecond), MIN_VIDEO_BITS_PER_SECOND, MAX_VIDEO_BITS_PER_SECOND),
     enable60fps: Boolean(raw?.enable60fps),
+    enableMultiRegion: Boolean(raw?.enableMultiRegion),
+    multiRegionMaxCount: clamp(Math.round(coerceNumber(raw?.multiRegionMaxCount, DEFAULT_MULTI_REGION_COUNT)), MIN_MULTI_REGION_COUNT, MAX_MULTI_REGION_COUNT),
     enableFullRecordButton: Boolean(raw?.enableFullRecordButton),
     enableFullScreenshotButton: Boolean(raw?.enableFullScreenshotButton),
     enableSeek: Boolean(raw?.enableSeek ?? (raw as Partial<Settings> & { enableSeekButtons?: boolean } | undefined)?.enableSeekButtons),
@@ -56,6 +62,14 @@ export function normalizeSettings(raw: Partial<Settings> | undefined): Settings 
     enableShortcuts: Boolean(raw?.enableShortcuts),
     shortcutKeys: normalizeShortcutKeys(raw?.shortcutKeys),
   };
+}
+
+export function normalizeRegions(raw: unknown, fallback?: RegionSelection | null): RegionSelection[] {
+  const source = Array.isArray(raw) ? raw : fallback ? [fallback] : [];
+  return source
+    .map((item) => normalizeRegion(item as Partial<RegionSelection> | null | undefined))
+    .filter((item): item is RegionSelection => item !== null)
+    .slice(0, 4);
 }
 
 export function normalizeRegion(raw: Partial<RegionSelection> | null | undefined): RegionSelection | null {
@@ -117,12 +131,15 @@ export async function loadAppState(): Promise<AppState> {
   const stored = await chrome.storage.local.get({
     [STORAGE_KEYS.settings]: DEFAULT_SETTINGS,
     [STORAGE_KEYS.region]: null,
+    [STORAGE_KEYS.regions]: [],
     [STORAGE_KEYS.recordingState]: DEFAULT_RECORDING_STATE,
   });
+  const region = normalizeRegion(stored[STORAGE_KEYS.region] as Partial<RegionSelection> | null | undefined);
 
   return {
     settings: normalizeSettings(stored[STORAGE_KEYS.settings] as Partial<Settings> | undefined),
-    region: normalizeRegion(stored[STORAGE_KEYS.region] as Partial<RegionSelection> | null | undefined),
+    region,
+    regions: normalizeRegions(stored[STORAGE_KEYS.regions], region),
     recordingState: normalizeRecordingState(stored[STORAGE_KEYS.recordingState] as Partial<RecordingState> | undefined),
   };
 }
