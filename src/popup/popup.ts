@@ -47,6 +47,7 @@ const SHORTCUT_LABELS: Record<ShortcutAction, string> = {
   selectRegion: "영역 선택",
   clearRegion: "영역 해제",
   regionRecord: "영역 녹화",
+  cancelRecording: "녹화 취소",
   regionScreenshot: "영역 스크린샷",
   fullRecord: "전체 녹화",
   fullScreenshot: "전체 스크린샷",

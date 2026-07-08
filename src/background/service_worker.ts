@@ -185,6 +185,10 @@ async function stopDirectRecording(tabId: number): Promise<MessageResponse> {
   return await sendCommandToContentScript(tabId, { type: "STOP_DIRECT_RECORDING" });
 }
 
+async function cancelDirectRecording(tabId: number): Promise<MessageResponse> {
+  return await sendCommandToContentScript(tabId, { type: "CANCEL_DIRECT_RECORDING" });
+}
+
 async function startRecording(fullPlayer = false): Promise<MessageResponse<{ recordingId: string }>> {
   const tab = await getActiveRecordableTab();
   const tabId = tab.id;
@@ -294,17 +298,32 @@ async function stopRecording(): Promise<MessageResponse> {
     return fail("진행 중인 녹화가 없습니다.");
   }
 
-  try {
-    if (typeof state.tabId !== "number") {
-      return fail("녹화 중인 탭을 찾지 못했습니다.");
-    }
-
-    return await stopDirectRecording(state.tabId);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "녹화를 정지할 수 없습니다.";
-    return fail(message);
+  if (typeof state.tabId !== "number") {
+    return fail("녹화 중인 탭을 찾지 못했습니다.");
   }
+
+  return await stopDirectRecording(state.tabId);
 }
+
+async function cancelRecording(): Promise<MessageResponse> {
+  const state = await loadRecordingState();
+  if (state.status !== "recording") {
+    return fail("진행 중인 녹화가 없습니다.");
+  }
+
+  if (typeof state.tabId !== "number") {
+    return fail("녹화 중인 탭을 찾지 못했습니다.");
+  }
+
+  const response = await cancelDirectRecording(state.tabId);
+  if (!response.ok) {
+    return response;
+  }
+
+  await saveRecordingState({ status: "idle" });
+  return ok();
+}
+
 
 async function handleRecordingFinished(message: RecordingFinishedMessage): Promise<MessageResponse> {
   const previousState = await loadRecordingState();
@@ -403,6 +422,11 @@ chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingFinishedM
 
     if (message.type === "STOP_RECORDING") {
       sendResponse(await stopRecording());
+      return;
+    }
+
+    if (message.type === "CANCEL_RECORDING") {
+      sendResponse(await cancelRecording());
       return;
     }
 

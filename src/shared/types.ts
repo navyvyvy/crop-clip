@@ -2,7 +2,7 @@ export type RecordingFormat = "webm" | "mp4";
 export type DownloadFormat = RecordingFormat | "auto";
 export type RecordingStatus = "idle" | "recording" | "completed" | "error";
 export type RecordingMode = "region" | "full";
-export type ShortcutAction = "selectRegion" | "clearRegion" | "regionRecord" | "regionScreenshot" | "fullRecord" | "fullScreenshot";
+export type ShortcutAction = "selectRegion" | "clearRegion" | "regionRecord" | "cancelRecording" | "regionScreenshot" | "fullRecord" | "fullScreenshot";
 export type ShortcutKeys = Record<ShortcutAction, string>;
 
 export interface Settings {
@@ -101,6 +101,7 @@ export const DEFAULT_SHORTCUT_KEYS: ShortcutKeys = {
   selectRegion: "a",
   clearRegion: "x",
   regionRecord: "r",
+  cancelRecording: "c",
   regionScreenshot: "s",
   fullRecord: "e",
   fullScreenshot: "d",

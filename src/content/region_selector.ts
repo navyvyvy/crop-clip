@@ -28,6 +28,7 @@ const MAX_SCREENSHOT_PREVIEWS = 8;
 const AUDIO_BITS_PER_SECOND = 128_000;
 const CHZZK_RECORD_BUTTON_ID = "crop-clip-chzzk-record-button";
 const CHZZK_RECORD_TIME_ID = "crop-clip-chzzk-record-time";
+const CHZZK_CANCEL_BUTTON_ID = "crop-clip-chzzk-cancel-button";
 const CHZZK_SCREENSHOT_BUTTON_ID = "crop-clip-chzzk-screenshot-button";
 const CHZZK_TOOL_BUTTON_ID = "crop-clip-chzzk-tool-button";
 const CHZZK_TOOL_BUTTON_CLASS = "pzp-button pzp-pc-setting-button pzp-pc__setting-button pzp-pc-ui-button crop-clip-pzp-button";
@@ -36,6 +37,7 @@ const DEFAULT_CONTENT_SHORTCUT_KEYS: ShortcutKeys = {
   selectRegion: "a",
   clearRegion: "x",
   regionRecord: "r",
+  cancelRecording: "c",
   regionScreenshot: "s",
   fullRecord: "e",
   fullScreenshot: "d",
@@ -98,6 +100,7 @@ interface DirectRecordingSession {
   createdAt: number;
   drawTimerId: number;
   stopRequested: boolean;
+  cancelRequested: boolean;
   closingPart: boolean;
   finishPromise: Promise<void>;
   resolveFinish: () => void;
@@ -133,6 +136,7 @@ let chzzkRecordTimerId: number | null = null;
 let seekFeedbackTimerId: number | null = null;
 let lastRecordPointerActivationAt = 0;
 let lastScreenshotPointerActivationAt = 0;
+let lastCancelPointerActivationAt = 0;
 let regionLayoutTimerId: number | null = null;
 let lastVideoLayoutKey = "";
 
@@ -400,6 +404,10 @@ function ensureStyle(): void {
       cursor: move;
     }
 
+    .${BORDER_CLASS} .cancel-recording {
+      color: #ff9a9a;
+    }
+
     .${BORDER_CLASS} .clear-region {
       color: rgba(255, 215, 215, 0.96);
     }
@@ -477,6 +485,10 @@ function ensureStyle(): void {
       width: 22px;
       height: 22px;
       pointer-events: none;
+    }
+
+    #${CHZZK_CANCEL_BUTTON_ID} {
+      color: #ff9a9a;
     }
 
     #${CHZZK_RECORD_TIME_ID} {
@@ -910,6 +922,17 @@ function getDownloadIconSvg(): string {
   `;
 }
 
+function getTrashIconSvg(): string {
+  return `
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+      <path d="M5 7H19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      <path d="M10 11V17M14 11V17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      <path d="M8 7L9 4H15L16 7" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+      <path d="M7 7L8 20H16L17 7" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+    </svg>
+  `;
+}
+
 function getMoveIconSvg(): string {
   return `
     <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
@@ -940,6 +963,7 @@ function getRegionToolbarHtml(): string {
     <div class="region-toolbar">
       <span class="record-time" hidden>00:00</span>
       <button class="region-tool record-region" type="button" aria-label="녹화 시작" title="녹화 시작">${getRecordIconSvg(false)}</button>
+      <button class="region-tool cancel-recording" type="button" aria-label="녹화 취소" title="녹화 취소" hidden>${getTrashIconSvg()}</button>
       <button class="region-tool add-region" type="button" aria-label="영역 추가" title="영역 추가">${getPlusIconSvg()}</button>
       <button class="region-tool screenshot-region" type="button" aria-label="스크린샷" title="스크린샷">${getCameraIconSvg()}</button>
       <button class="region-tool move-region" type="button" aria-label="영역 이동" title="영역 이동">${getMoveIconSvg()}</button>
@@ -1101,6 +1125,17 @@ async function toggleFullRecording(): Promise<void> {
   }
 }
 
+async function cancelRecording(): Promise<void> {
+  if (currentRecordingState.status !== "recording") {
+    return;
+  }
+
+  const response = await sendRuntimeMessage({ type: "CANCEL_RECORDING" });
+  if (!response.ok) {
+    throw new Error(response.error);
+  }
+}
+
 function buildDirectFilename(session: DirectRecordingSession): string {
   return `${session.baseName}.${session.extension}`;
 }
@@ -1163,7 +1198,7 @@ function clearDirectTimers(session: DirectRecordingSession): void {
   window.clearInterval(session.drawTimerId);
 }
 
-async function finalizeDirectRecording(session: DirectRecordingSession): Promise<void> {
+function cleanupDirectRecordingSession(session: DirectRecordingSession): void {
   clearDirectTimers(session);
   session.sourceChangeCleanup?.();
   session.sourceChangeCleanup = undefined;
@@ -1171,6 +1206,10 @@ async function finalizeDirectRecording(session: DirectRecordingSession): Promise
   session.outputStream.getTracks().forEach((track) => track.stop());
   session.canvas.remove();
   directSession = null;
+}
+
+async function finalizeDirectRecording(session: DirectRecordingSession): Promise<void> {
+  cleanupDirectRecordingSession(session);
 
   try {
     await sendRuntimeMessage({
@@ -1193,6 +1232,11 @@ async function finalizeDirectRecording(session: DirectRecordingSession): Promise
   } catch (error) {
     session.rejectFinish(error instanceof Error ? error : new Error("녹화 결과를 저장하지 못했습니다."));
   }
+}
+
+function cancelDirectRecordingSession(session: DirectRecordingSession): void {
+  cleanupDirectRecordingSession(session);
+  session.resolveFinish();
 }
 
 function stopDirectRecordingAfterSourceChange(session: DirectRecordingSession): void {
@@ -1264,6 +1308,11 @@ async function startDirectPart(session: DirectRecordingSession): Promise<void> {
 
   recorder.onstop = () => {
     void (async () => {
+      if (session.cancelRequested) {
+        cancelDirectRecordingSession(session);
+        return;
+      }
+
       const blob = new Blob(session.currentChunks, { type: session.mimeType });
       await saveDirectPart(session, blob);
       await finalizeDirectRecording(session);
@@ -1379,6 +1428,7 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
     createdAt: Date.now(),
     drawTimerId: window.setInterval(drawFrame, Math.max(16, Math.round(1000 / frameRate))),
     stopRequested: false,
+    cancelRequested: false,
     closingPart: false,
     finishPromise,
     resolveFinish,
@@ -1400,6 +1450,19 @@ async function stopDirectRecording(): Promise<MessageResponse> {
     return { ok: false, error: "진행 중인 녹화가 없습니다." };
   }
 
+  session.stopRequested = true;
+  requestDirectPartStop(session);
+  await session.finishPromise;
+  return { ok: true };
+}
+
+async function cancelDirectRecording(): Promise<MessageResponse> {
+  const session = directSession;
+  if (!session) {
+    return { ok: false, error: "진행 중인 녹화가 없습니다." };
+  }
+
+  session.cancelRequested = true;
   session.stopRequested = true;
   requestDirectPartStop(session);
   await session.finishPromise;
@@ -1690,6 +1753,7 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
   const cleanupCallbacks: Array<() => void> = [];
   const recordTime = border.querySelector<HTMLElement>(".record-time");
   const recordButton = border.querySelector<HTMLButtonElement>(".record-region");
+  const cancelButton = border.querySelector<HTMLButtonElement>(".cancel-recording");
   const screenshotButton = border.querySelector<HTMLButtonElement>(".screenshot-region");
   const clearButton = border.querySelector<HTMLButtonElement>(".clear-region");
   const moveButton = border.querySelector<HTMLButtonElement>(".move-region");
@@ -1713,6 +1777,13 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
     recordButton.setAttribute("aria-label", label);
     recordButton.title = label;
     recordButton.disabled = isFullRecording;
+    if (cancelButton) {
+      const cancelLabel = withShortcut("녹화 취소", "cancelRecording");
+      cancelButton.hidden = index !== activeRegionIndex || !isRegionRecording;
+      cancelButton.disabled = !isRegionRecording;
+      cancelButton.setAttribute("aria-label", cancelLabel);
+      cancelButton.title = cancelLabel;
+    }
     if (screenshotButton) {
       const screenshotLabel = withShortcut("스크린샷", "regionScreenshot");
       screenshotButton.setAttribute("aria-label", screenshotLabel);
@@ -1793,6 +1864,24 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
   recordButton?.addEventListener("click", onRecord);
   if (recordButton) {
     cleanupCallbacks.push(() => recordButton.removeEventListener("click", onRecord));
+  }
+
+  const onCancelRecording = (event: MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const previousRecordingState = currentRecordingState;
+    currentRecordingState = { status: "idle" };
+    updateRecordButton();
+    void cancelRecording().catch((error: Error) => {
+      currentRecordingState = previousRecordingState;
+      updateRecordButton();
+      window.alert(error.message);
+    });
+  };
+
+  cancelButton?.addEventListener("click", onCancelRecording);
+  if (cancelButton) {
+    cleanupCallbacks.push(() => cancelButton.removeEventListener("click", onCancelRecording));
   }
 
   const onScreenshot = (event: MouseEvent) => {
@@ -2462,6 +2551,17 @@ function setChzzkRecordButtonContent(button: HTMLElement): void {
   `;
 }
 
+function setChzzkCancelButtonContent(button: HTMLElement): void {
+  const label = withShortcut("녹화 취소", "cancelRecording");
+  button.setAttribute("aria-label", label);
+  button.setAttribute("type", "button");
+  button.removeAttribute("title");
+  button.innerHTML = `
+    <span class="pzp-button__tooltip pzp-button__tooltip--top">${label}</span>
+    <span class="pzp-ui-icon pzp-pc-setting-button__icon">${getTrashIconSvg()}</span>
+  `;
+}
+
 function setChzzkScreenshotButtonContent(button: HTMLElement): void {
   const label = withShortcut("전체 스크린샷", "fullScreenshot");
   button.setAttribute("aria-label", label);
@@ -2601,6 +2701,41 @@ function handlePlayerRecordActivation(event: MouseEvent): void {
     });
 }
 
+function handlePlayerCancelActivation(event: MouseEvent): void {
+  if (event.button !== 0) {
+    return;
+  }
+
+  const now = Date.now();
+  if (event.type === "click" && now - lastCancelPointerActivationAt < 500) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
+  if (event.type === "pointerdown") {
+    lastCancelPointerActivationAt = now;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  if (currentRecordingState.status !== "recording" || currentRecordingState.mode !== "full") {
+    return;
+  }
+
+  const previousRecordingState = currentRecordingState;
+  currentRecordingState = { status: "idle" };
+  requestChzzkToolSync();
+  syncChzzkRecordTimer();
+
+  void cancelRecording()
+    .catch((error: Error) => {
+      currentRecordingState = previousRecordingState;
+      requestChzzkToolSync();
+      syncChzzkRecordTimer();
+      window.alert(error.message);
+    });
+}
+
 function bindDirectPlayerScreenshotActivation(button: HTMLElement): void {
   if (button.dataset.cropClipBound === "true") {
     return;
@@ -2631,6 +2766,16 @@ function bindDirectPlayerRecordActivation(button: HTMLElement): void {
   button.addEventListener("click", handlePlayerRecordActivation);
 }
 
+function bindDirectPlayerCancelActivation(button: HTMLElement): void {
+  if (button.dataset.cropClipBound === "true") {
+    return;
+  }
+
+  button.dataset.cropClipBound = "true";
+  button.addEventListener("pointerdown", handlePlayerCancelActivation);
+  button.addEventListener("click", handlePlayerCancelActivation);
+}
+
 function isVisibleElement(element: HTMLElement): boolean {
   const rect = element.getBoundingClientRect();
   return rect.width > 0 && rect.height > 0;
@@ -2644,6 +2789,7 @@ function getVisiblePzpButtons(root: ParentNode = document): HTMLElement[] {
   ).filter((button) =>
     button.id !== CHZZK_TOOL_BUTTON_ID &&
     button.id !== CHZZK_RECORD_BUTTON_ID &&
+    button.id !== CHZZK_CANCEL_BUTTON_ID &&
     button.id !== CHZZK_SCREENSHOT_BUTTON_ID &&
     isVisibleElement(button)
   );
@@ -2721,12 +2867,14 @@ function syncChzzkToolButton(): void {
   const existing = document.getElementById(CHZZK_TOOL_BUTTON_ID) as HTMLButtonElement | null;
   const existingRecord = document.getElementById(CHZZK_RECORD_BUTTON_ID) as HTMLButtonElement | null;
   const existingTime = document.getElementById(CHZZK_RECORD_TIME_ID) as HTMLSpanElement | null;
+  const existingCancel = document.getElementById(CHZZK_CANCEL_BUTTON_ID) as HTMLButtonElement | null;
   const existingScreenshot = document.getElementById(CHZZK_SCREENSHOT_BUTTON_ID) as HTMLButtonElement | null;
   const target = findChzzkButtonHost();
   if (!target) {
     existing?.remove();
     existingRecord?.remove();
     existingTime?.remove();
+    existingCancel?.remove();
     existingScreenshot?.remove();
     return;
   }
@@ -2735,6 +2883,7 @@ function syncChzzkToolButton(): void {
   if (!fullRecordButtonEnabled) {
     existingRecord?.remove();
     existingTime?.remove();
+    existingCancel?.remove();
   }
   if (!fullScreenshotButtonEnabled) {
     existingScreenshot?.remove();
@@ -2760,6 +2909,17 @@ function syncChzzkToolButton(): void {
     bindDirectPlayerRecordActivation(recordButton);
   }
 
+  const cancelButton = fullRecordButtonEnabled && isFullRecording ? existingCancel ?? document.createElement("button") : null;
+  if (cancelButton) {
+    cancelButton.id = CHZZK_CANCEL_BUTTON_ID;
+    cancelButton.className = CHZZK_TOOL_BUTTON_CLASS;
+    cancelButton.type = "button";
+    setChzzkCancelButtonContent(cancelButton);
+    bindDirectPlayerCancelActivation(cancelButton);
+  } else {
+    existingCancel?.remove();
+  }
+
   const screenshotButton = fullScreenshotButtonEnabled ? existingScreenshot ?? document.createElement("button") : null;
   if (screenshotButton) {
     screenshotButton.id = CHZZK_SCREENSHOT_BUTTON_ID;
@@ -2778,16 +2938,21 @@ function syncChzzkToolButton(): void {
   bindDirectPlayerToolActivation(selectButton);
 
   const needsReinsert = (recordButton ? recordButton.parentElement !== host : false)
+    || (cancelButton ? cancelButton.parentElement !== host : false)
     || (screenshotButton ? screenshotButton.parentElement !== host : false)
     || selectButton.parentElement !== host
     || (timeBadge && recordButton ? timeBadge.parentElement !== host || timeBadge.nextElementSibling !== recordButton : false)
-    || (recordButton && screenshotButton ? recordButton.nextElementSibling !== screenshotButton : false)
-    || (recordButton && !screenshotButton ? recordButton.nextElementSibling !== selectButton : false)
+    || (recordButton && cancelButton ? recordButton.nextElementSibling !== cancelButton : false)
+    || (cancelButton && screenshotButton ? cancelButton.nextElementSibling !== screenshotButton : false)
+    || (recordButton && !cancelButton && screenshotButton ? recordButton.nextElementSibling !== screenshotButton : false)
+    || (recordButton && !cancelButton && !screenshotButton ? recordButton.nextElementSibling !== selectButton : false)
+    || (cancelButton && !screenshotButton ? cancelButton.nextElementSibling !== selectButton : false)
     || (screenshotButton ? screenshotButton.nextElementSibling !== selectButton : false);
 
   if (needsReinsert) {
     timeBadge?.remove();
     recordButton?.remove();
+    cancelButton?.remove();
     screenshotButton?.remove();
     selectButton.remove();
     const firstControl = Array.from(host.children).find(
@@ -2795,6 +2960,7 @@ function syncChzzkToolButton(): void {
         child instanceof HTMLElement &&
         child.id !== CHZZK_TOOL_BUTTON_ID &&
         child.id !== CHZZK_RECORD_BUTTON_ID &&
+        child.id !== CHZZK_CANCEL_BUTTON_ID &&
         child.id !== CHZZK_SCREENSHOT_BUTTON_ID &&
         child.id !== CHZZK_RECORD_TIME_ID,
     );
@@ -2803,6 +2969,9 @@ function syncChzzkToolButton(): void {
     }
     if (recordButton) {
       host.insertBefore(recordButton, firstControl ?? null);
+    }
+    if (cancelButton) {
+      host.insertBefore(cancelButton, firstControl ?? null);
     }
     if (screenshotButton) {
       host.insertBefore(screenshotButton, firstControl ?? null);
@@ -2918,6 +3087,9 @@ function handleShortcut(event: KeyboardEvent): void {
   } else if (key === shortcutKeys.regionRecord) {
     event.preventDefault();
     void toggleRegionRecording().catch((error: Error) => window.alert(error.message));
+  } else if (key === shortcutKeys.cancelRecording) {
+    event.preventDefault();
+    void cancelRecording().catch((error: Error) => window.alert(error.message));
   } else if (key === shortcutKeys.regionScreenshot) {
     event.preventDefault();
     void captureRegionScreenshot();
@@ -3021,6 +3193,13 @@ if (isExtensionContextAvailable()) {
 
     if (message.type === "STOP_DIRECT_RECORDING") {
       void stopDirectRecording()
+        .then((response) => sendResponse(response))
+        .catch((error: Error) => sendResponse({ ok: false, error: error.message }));
+      return true;
+    }
+
+    if (message.type === "CANCEL_DIRECT_RECORDING") {
+      void cancelDirectRecording()
         .then((response) => sendResponse(response))
         .catch((error: Error) => sendResponse({ ok: false, error: error.message }));
       return true;
