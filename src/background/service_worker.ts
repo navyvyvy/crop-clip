@@ -320,6 +320,9 @@ async function cancelRecording(): Promise<MessageResponse> {
     return response;
   }
 
+  if (state.recordingId) {
+    await deleteRecordingNow(state.recordingId);
+  }
   await saveRecordingState({ status: "idle" });
   return ok();
 }
