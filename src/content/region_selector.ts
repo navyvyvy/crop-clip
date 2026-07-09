@@ -870,6 +870,43 @@ function hasTwoColumnLayout(crops: Array<{ x: number; y: number; width: number; 
   });
 }
 
+function getThreeRegionGroupedLayout(crops: Array<{ x: number; y: number; width: number; height: number }>): DirectLayout | null {
+  if (crops.length !== 3) {
+    return null;
+  }
+
+  for (let first = 0; first < crops.length; first += 1) {
+    for (let second = first + 1; second < crops.length; second += 1) {
+      const pair = [crops[first], crops[second]];
+      const rest = crops.find((_, index) => index !== first && index !== second);
+      if (!rest || !pair[0] || !pair[1]) {
+        continue;
+      }
+
+      const pairLeft = Math.min(...pair.map((crop) => crop.x));
+      const pairRight = Math.max(...pair.map((crop) => crop.x + crop.width));
+      const pairTop = Math.min(...pair.map((crop) => crop.y));
+      const pairBottom = Math.max(...pair.map((crop) => crop.y + crop.height));
+      const xOverlap = getOverlapRatio(pair[0].x, pair[0].x + pair[0].width, pair[1].x, pair[1].x + pair[1].width);
+      const yOverlap = getOverlapRatio(pair[0].y, pair[0].y + pair[0].height, pair[1].y, pair[1].y + pair[1].height);
+
+      if (xOverlap > LINE_GROUP_OVERLAP_THRESHOLD && (rest.x + rest.width <= pairLeft || rest.x >= pairRight)) {
+        const pairLayout = composeVertical(pair.sort((a, b) => a.y - b.y).map((crop) => computeDirectLayout([crop])));
+        const restLayout = computeDirectLayout([rest]);
+        return rest.x < pairLeft ? composeHorizontal([restLayout, pairLayout]) : composeHorizontal([pairLayout, restLayout]);
+      }
+
+      if (yOverlap > LINE_GROUP_OVERLAP_THRESHOLD && (rest.y + rest.height <= pairTop || rest.y >= pairBottom)) {
+        const pairLayout = composeHorizontal(pair.sort((a, b) => a.x - b.x).map((crop) => computeDirectLayout([crop])));
+        const restLayout = computeDirectLayout([rest]);
+        return rest.y < pairTop ? composeVertical([restLayout, pairLayout]) : composeVertical([pairLayout, restLayout]);
+      }
+    }
+  }
+
+  return null;
+}
+
 function computeDirectLayout(crops: Array<{ x: number; y: number; width: number; height: number }>): DirectLayout {
   if (crops.length <= 1) {
     const crop = crops[0];
@@ -886,6 +923,11 @@ function computeDirectLayout(crops: Array<{ x: number; y: number; width: number;
   const horizontal = right - left >= bottom - top;
 
   if (crops.length > 2) {
+    const groupedLayout = getThreeRegionGroupedLayout(crops);
+    if (groupedLayout) {
+      return groupedLayout;
+    }
+
     const lineLayout = hasTwoColumnLayout(crops) ? null : getLineLayout(crops);
     if (lineLayout === "horizontal") {
       return composeHorizontal([...crops].sort((a, b) => a.x - b.x).map((crop) => computeDirectLayout([crop])));
