@@ -1,4 +1,4 @@
-import { DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, DEFAULT_SETTINGS, DEFAULT_SHORTCUT_KEYS, FPS_WARNING_VIDEO_BITS_PER_SECOND, MAX_MULTI_REGION_COUNT, MAX_SEEK_SECONDS, MAX_VIDEO_BITS_PER_SECOND, MIN_MULTI_REGION_COUNT, MIN_SEEK_SECONDS, MIN_VIDEO_BITS_PER_SECOND, type AppState, type RecordingFormat, type Settings, type ShortcutAction } from "../shared/types.js";
+import { DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, DEFAULT_SETTINGS, DEFAULT_SHORTCUT_KEYS, FPS_WARNING_VIDEO_BITS_PER_SECOND, MAX_MULTI_REGION_COUNT, MAX_SEEK_SECONDS, MAX_VIDEO_BITS_PER_SECOND, MIN_MULTI_REGION_COUNT, MIN_SEEK_SECONDS, MIN_VIDEO_BITS_PER_SECOND, RECORDING_FORMAT, RECORDING_MODE, RECORDING_STATUS, type AppState, type RecordingFormat, type Settings, type ShortcutAction } from "../shared/types.js";
 import { loadAppState, normalizeRecordingState, normalizeRegion, normalizeRegions, normalizeSettings, saveSettings } from "../shared/storage.js";
 import type { MessageResponse } from "../shared/messages.js";
 
@@ -60,7 +60,7 @@ let appState: AppState = {
   settings: DEFAULT_SETTINGS,
   region: null,
   regions: [],
-  recordingState: { status: "idle" },
+  recordingState: { status: RECORDING_STATUS.idle },
 };
 
 let sendingCommand = false;
@@ -81,7 +81,7 @@ function formatElapsed(ms: number): string {
 }
 
 function updateRecordingTimer(): void {
-  if (appState.recordingState.status !== "recording" || !appState.recordingState.startedAt) {
+  if (appState.recordingState.status !== RECORDING_STATUS.recording || !appState.recordingState.startedAt) {
     elements.recordingTime.textContent = "";
     return;
   }
@@ -95,7 +95,7 @@ function syncRecordingTimer(): void {
     recordingTimerId = null;
   }
 
-  if (appState.recordingState.status !== "recording" || !appState.recordingState.startedAt) {
+  if (appState.recordingState.status !== RECORDING_STATUS.recording || !appState.recordingState.startedAt) {
     elements.recordingTime.textContent = "";
     return;
   }
@@ -128,7 +128,7 @@ function formatBitrateMbps(value: number): string {
 }
 
 function syncPresetUi(settings: Settings): void {
-  const outputFormat = settings.outputFormat === "mp4" ? "mp4" : "webm";
+  const outputFormat = settings.outputFormat === RECORDING_FORMAT.mp4 ? RECORDING_FORMAT.mp4 : RECORDING_FORMAT.webm;
   for (const input of elements.outputFormatInputs) {
     input.checked = input.value === outputFormat;
   }
@@ -163,11 +163,11 @@ function syncPresetUi(settings: Settings): void {
 }
 
 function renderState(): void {
-  const isRecording = appState.recordingState.status === "recording";
-  const isFullRecording = appState.recordingState.status === "recording" && appState.recordingState.mode === "full";
+  const isRecording = appState.recordingState.status === RECORDING_STATUS.recording;
+  const isFullRecording = isRecording && appState.recordingState.mode === RECORDING_MODE.full;
   const isRegionRecording = isRecording && !isFullRecording;
-  elements.selectRegionButton.disabled = isRecording || sendingCommand;
-  elements.clearRegionButton.disabled = isRecording || sendingCommand || !appState.region;
+  elements.selectRegionButton.disabled = isRegionRecording || sendingCommand;
+  elements.clearRegionButton.disabled = isRegionRecording || sendingCommand || !appState.region;
   elements.recordToggleButton.disabled = sendingCommand || isFullRecording;
   elements.recordToggleButton.textContent = isRegionRecording ? "녹화 정지" : "영역 녹화";
   elements.recordToggleButton.classList.toggle("primary", false);
@@ -404,7 +404,7 @@ elements.clearRegionButton.addEventListener("click", () => {
 
 elements.recordToggleButton.addEventListener("click", () => {
   void withCommandInFlight(async () => {
-    if (appState.recordingState.status === "recording") {
+    if (appState.recordingState.status === RECORDING_STATUS.recording) {
       const response = await sendCommand({ type: "STOP_RECORDING" });
       if (!response.ok) {
         showError(response.error);
@@ -426,7 +426,7 @@ elements.recordToggleButton.addEventListener("click", () => {
 
 elements.fullRecordToggleButton.addEventListener("click", () => {
   void withCommandInFlight(async () => {
-    const type = appState.recordingState.status === "recording" && appState.recordingState.mode === "full" ? "STOP_RECORDING" : "START_FULL_RECORDING";
+    const type = appState.recordingState.status === RECORDING_STATUS.recording && appState.recordingState.mode === RECORDING_MODE.full ? "STOP_RECORDING" : "START_FULL_RECORDING";
     const response = await sendCommand<{ recordingId: string }>({ type });
     if (!response.ok) {
       showError(response.error);

@@ -4,12 +4,16 @@ import {
   DEFAULT_SEEK_SECONDS,
   DEFAULT_SETTINGS,
   DEFAULT_SHORTCUT_KEYS,
+  DOWNLOAD_FORMAT,
   MAX_MULTI_REGION_COUNT,
   MAX_SEEK_SECONDS,
   MAX_VIDEO_BITS_PER_SECOND,
   MIN_MULTI_REGION_COUNT,
   MIN_SEEK_SECONDS,
   MIN_VIDEO_BITS_PER_SECOND,
+  RECORDING_FORMAT,
+  RECORDING_MODE,
+  RECORDING_STATUS,
   type AppState,
   type RecordingState,
   type RegionSelection,
@@ -46,7 +50,7 @@ function normalizeShortcutKeys(raw: Partial<ShortcutKeys> | undefined): Shortcut
 }
 
 export function normalizeSettings(raw: Partial<Settings> | undefined): Settings {
-  const outputFormat = raw?.outputFormat === "webm" || raw?.outputFormat === "mp4" ? raw.outputFormat : DEFAULT_SETTINGS.outputFormat;
+  const outputFormat = raw?.outputFormat === RECORDING_FORMAT.webm || raw?.outputFormat === RECORDING_FORMAT.mp4 ? raw.outputFormat : DEFAULT_SETTINGS.outputFormat;
   const rawSettings = raw as Partial<Settings> & { customVideoBitsPerSecond?: number };
   const videoBitsPerSecond = coerceNumber(rawSettings.customVideoBitsPerSecond ?? rawSettings.videoBitsPerSecond, DEFAULT_SETTINGS.videoBitsPerSecond);
 
@@ -71,7 +75,7 @@ export function normalizeRegions(raw: unknown, fallback?: RegionSelection | null
   return source
     .map((item) => normalizeRegion(item as Partial<RegionSelection> | null | undefined))
     .filter((item): item is RegionSelection => item !== null)
-    .slice(0, 4);
+    .slice(0, MAX_MULTI_REGION_COUNT);
 }
 
 export function normalizeRegion(raw: Partial<RegionSelection> | null | undefined): RegionSelection | null {
@@ -112,7 +116,7 @@ export function normalizeRegion(raw: Partial<RegionSelection> | null | undefined
 }
 
 export function normalizeRecordingState(raw: Partial<RecordingState> | undefined): RecordingState {
-  const status = raw?.status === "recording" || raw?.status === "completed" || raw?.status === "error" ? raw.status : DEFAULT_RECORDING_STATE.status;
+  const status = raw?.status === RECORDING_STATUS.recording || raw?.status === RECORDING_STATUS.completed || raw?.status === RECORDING_STATUS.error ? raw.status : DEFAULT_RECORDING_STATE.status;
 
   return {
     status,
@@ -121,11 +125,11 @@ export function normalizeRecordingState(raw: Partial<RecordingState> | undefined
     startedAt: Number.isFinite(raw?.startedAt as number) ? Number(raw?.startedAt) : undefined,
     endedAt: Number.isFinite(raw?.endedAt as number) ? Number(raw?.endedAt) : undefined,
     lastError: typeof raw?.lastError === "string" ? raw.lastError : undefined,
-    mode: raw?.mode === "region" || raw?.mode === "full" ? raw.mode : undefined,
-    requestedOutputFormat: raw?.requestedOutputFormat === "auto" || raw?.requestedOutputFormat === "webm" || raw?.requestedOutputFormat === "mp4" ? raw.requestedOutputFormat : undefined,
-    actualOutputFormat: raw?.actualOutputFormat === "webm" || raw?.actualOutputFormat === "mp4" ? raw.actualOutputFormat : undefined,
+    mode: raw?.mode === RECORDING_MODE.region || raw?.mode === RECORDING_MODE.full ? raw.mode : undefined,
+    requestedOutputFormat: raw?.requestedOutputFormat === DOWNLOAD_FORMAT.auto || raw?.requestedOutputFormat === RECORDING_FORMAT.webm || raw?.requestedOutputFormat === RECORDING_FORMAT.mp4 ? raw.requestedOutputFormat : undefined,
+    actualOutputFormat: raw?.actualOutputFormat === RECORDING_FORMAT.webm || raw?.actualOutputFormat === RECORDING_FORMAT.mp4 ? raw.actualOutputFormat : undefined,
     actualMimeType: typeof raw?.actualMimeType === "string" ? raw.actualMimeType : undefined,
-    actualExtension: raw?.actualExtension === "webm" || raw?.actualExtension === "mp4" ? raw.actualExtension : undefined,
+    actualExtension: raw?.actualExtension === RECORDING_FORMAT.webm || raw?.actualExtension === RECORDING_FORMAT.mp4 ? raw.actualExtension : undefined,
   };
 }
 

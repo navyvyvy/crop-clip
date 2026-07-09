@@ -5,6 +5,28 @@ export type RecordingMode = "region" | "full";
 export type ShortcutAction = "selectRegion" | "clearRegion" | "clearAllRegions" | "regionRecord" | "cancelRecording" | "regionScreenshot" | "fullRecord" | "fullScreenshot";
 export type ShortcutKeys = Record<ShortcutAction, string>;
 
+export const RECORDING_FORMAT = {
+  webm: "webm",
+  mp4: "mp4",
+} as const satisfies Record<RecordingFormat, RecordingFormat>;
+
+export const DOWNLOAD_FORMAT = {
+  ...RECORDING_FORMAT,
+  auto: "auto",
+} as const satisfies Record<DownloadFormat, DownloadFormat>;
+
+export const RECORDING_STATUS = {
+  idle: "idle",
+  recording: "recording",
+  completed: "completed",
+  error: "error",
+} as const satisfies Record<RecordingStatus, RecordingStatus>;
+
+export const RECORDING_MODE = {
+  region: "region",
+  full: "full",
+} as const satisfies Record<RecordingMode, RecordingMode>;
+
 export interface Settings {
   outputFormat: RecordingFormat;
   videoBitsPerSecond: number;
@@ -109,7 +131,7 @@ export const DEFAULT_SHORTCUT_KEYS: ShortcutKeys = {
 };
 
 export const DEFAULT_SETTINGS: Settings = {
-  outputFormat: "webm",
+  outputFormat: RECORDING_FORMAT.webm,
   videoBitsPerSecond: DEFAULT_VIDEO_BITS_PER_SECOND,
   enable60fps: false,
   enableMultiRegion: false,
@@ -124,5 +146,5 @@ export const DEFAULT_SETTINGS: Settings = {
 };
 
 export const DEFAULT_RECORDING_STATE: RecordingState = {
-  status: "idle",
+  status: RECORDING_STATUS.idle,
 };

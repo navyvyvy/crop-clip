@@ -24,7 +24,7 @@ export type ContentCommand =
       settings: Settings;
     }
   | { type: "STOP_DIRECT_RECORDING" }
-  | { type: "CANCEL_DIRECT_RECORDING" };
+  | { type: "CANCEL_DIRECT_RECORDING"; recordingId?: string };
 export type PlayerStatusRequest = { type: "GET_PLAYER_STATUS" };
 export type DeletionScheduleRequest = { type: "SCHEDULE_RECORDING_DELETION"; recordingId: string };
 export type DeletionCancelRequest = { type: "CANCEL_RECORDING_DELETION"; recordingId: string };
