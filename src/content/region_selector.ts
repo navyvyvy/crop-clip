@@ -783,13 +783,19 @@ function getActiveRegionLimit(): number {
 }
 
 function scaleLayout(layout: DirectLayout, scale: number, dx: number, dy: number): DirectCropPlacement[] {
-  return layout.placements.map((placement) => ({
-    crop: placement.crop,
-    dx: dx + Math.round(placement.dx * scale),
-    dy: dy + Math.round(placement.dy * scale),
-    dw: Math.max(1, Math.round(placement.dw * scale)),
-    dh: Math.max(1, Math.round(placement.dh * scale)),
-  }));
+  return layout.placements.map((placement) => {
+    const left = Math.round(placement.dx * scale);
+    const top = Math.round(placement.dy * scale);
+    const right = Math.round((placement.dx + placement.dw) * scale);
+    const bottom = Math.round((placement.dy + placement.dh) * scale);
+    return {
+      crop: placement.crop,
+      dx: dx + left,
+      dy: dy + top,
+      dw: Math.max(1, right - left),
+      dh: Math.max(1, bottom - top),
+    };
+  });
 }
 
 function composeHorizontal(layouts: DirectLayout[]): DirectLayout {
@@ -819,6 +825,25 @@ function composeVertical(layouts: DirectLayout[]): DirectLayout {
 function getOverlapRatio(startA: number, endA: number, startB: number, endB: number): number {
   const overlap = Math.max(0, Math.min(endA, endB) - Math.max(startA, startB));
   return overlap / Math.max(1, Math.min(endA - startA, endB - startB));
+}
+
+function getPairLayoutDirection(crops: Array<{ x: number; y: number; width: number; height: number }>): "horizontal" | "vertical" | null {
+  if (crops.length !== 2) {
+    return null;
+  }
+
+  const [first, second] = crops;
+  const separatedX = first.x + first.width <= second.x || second.x + second.width <= first.x;
+  const separatedY = first.y + first.height <= second.y || second.y + second.height <= first.y;
+  if (separatedX !== separatedY) {
+    return separatedX ? "horizontal" : "vertical";
+  }
+
+  const centerDistanceX = Math.abs((first.x + first.width / 2) - (second.x + second.width / 2));
+  const centerDistanceY = Math.abs((first.y + first.height / 2) - (second.y + second.height / 2));
+  const normalizedX = centerDistanceX / Math.max(1, (first.width + second.width) / 2);
+  const normalizedY = centerDistanceY / Math.max(1, (first.height + second.height) / 2);
+  return normalizedX >= normalizedY ? "horizontal" : "vertical";
 }
 
 function getLineLayout(crops: Array<{ x: number; y: number; width: number; height: number }>): "horizontal" | "vertical" | null {
@@ -897,41 +922,56 @@ function hasTwoColumnLayout(crops: Array<{ x: number; y: number; width: number; 
   });
 }
 
-function getThreeRegionGroupedLayout(crops: Array<{ x: number; y: number; width: number; height: number }>): DirectLayout | null {
-  if (crops.length !== 3) {
+function getGroupedLayout(crops: Array<{ x: number; y: number; width: number; height: number }>): DirectLayout | null {
+  if (crops.length < 3 || crops.length > 4) {
     return null;
   }
 
-  for (let first = 0; first < crops.length; first += 1) {
-    for (let second = first + 1; second < crops.length; second += 1) {
-      const pair = [crops[first], crops[second]];
-      const rest = crops.find((_, index) => index !== first && index !== second);
-      if (!rest || !pair[0] || !pair[1]) {
-        continue;
+  const partitions: number[][][] = [];
+  const fullMask = (1 << crops.length) - 1;
+  for (let mask = 1; mask < fullMask; mask += 1) {
+    if ((mask & 1) === 0) {
+      continue;
+    }
+    const first: number[] = [];
+    const second: number[] = [];
+    for (let index = 0; index < crops.length; index += 1) {
+      ((mask & (1 << index)) === 0 ? second : first).push(index);
+    }
+    partitions.push([first, second]);
+  }
+  let best: { score: number; horizontal: boolean; layout: DirectLayout } | null = null;
+
+  for (const partition of partitions) {
+    const groups = partition.map((indices) => indices.map((index) => crops[index]));
+    const bounds = groups.map((group) => ({
+      left: Math.min(...group.map((crop) => crop.x)),
+      top: Math.min(...group.map((crop) => crop.y)),
+      right: Math.max(...group.map((crop) => crop.x + crop.width)),
+      bottom: Math.max(...group.map((crop) => crop.y + crop.height)),
+    }));
+    const layouts = groups.map((group) => computeDirectLayout(group));
+    const horizontalOrder = bounds[0].right <= bounds[1].left ? [0, 1] : bounds[1].right <= bounds[0].left ? [1, 0] : null;
+    const verticalOrder = bounds[0].bottom <= bounds[1].top ? [0, 1] : bounds[1].bottom <= bounds[0].top ? [1, 0] : null;
+
+    if (horizontalOrder) {
+      const gap = bounds[horizontalOrder[1]].left - bounds[horizontalOrder[0]].right;
+      const score = gap / Math.max(1, Math.max(bounds[0].right, bounds[1].right) - Math.min(bounds[0].left, bounds[1].left));
+      if (!best || score > best.score || (score === best.score && !best.horizontal)) {
+        best = { score, horizontal: true, layout: composeHorizontal(horizontalOrder.map((index) => layouts[index])) };
       }
+    }
 
-      const pairLeft = Math.min(...pair.map((crop) => crop.x));
-      const pairRight = Math.max(...pair.map((crop) => crop.x + crop.width));
-      const pairTop = Math.min(...pair.map((crop) => crop.y));
-      const pairBottom = Math.max(...pair.map((crop) => crop.y + crop.height));
-      const xOverlap = getOverlapRatio(pair[0].x, pair[0].x + pair[0].width, pair[1].x, pair[1].x + pair[1].width);
-      const yOverlap = getOverlapRatio(pair[0].y, pair[0].y + pair[0].height, pair[1].y, pair[1].y + pair[1].height);
-
-      if (xOverlap > LINE_GROUP_OVERLAP_THRESHOLD && (rest.x + rest.width <= pairLeft || rest.x >= pairRight)) {
-        const pairLayout = composeVertical(pair.sort((a, b) => a.y - b.y).map((crop) => computeDirectLayout([crop])));
-        const restLayout = computeDirectLayout([rest]);
-        return rest.x < pairLeft ? composeHorizontal([restLayout, pairLayout]) : composeHorizontal([pairLayout, restLayout]);
-      }
-
-      if (yOverlap > LINE_GROUP_OVERLAP_THRESHOLD && (rest.y + rest.height <= pairTop || rest.y >= pairBottom)) {
-        const pairLayout = composeHorizontal(pair.sort((a, b) => a.x - b.x).map((crop) => computeDirectLayout([crop])));
-        const restLayout = computeDirectLayout([rest]);
-        return rest.y < pairTop ? composeVertical([restLayout, pairLayout]) : composeVertical([pairLayout, restLayout]);
+    if (verticalOrder) {
+      const gap = bounds[verticalOrder[1]].top - bounds[verticalOrder[0]].bottom;
+      const score = gap / Math.max(1, Math.max(bounds[0].bottom, bounds[1].bottom) - Math.min(bounds[0].top, bounds[1].top));
+      if (!best || score > best.score) {
+        best = { score, horizontal: false, layout: composeVertical(verticalOrder.map((index) => layouts[index])) };
       }
     }
   }
 
-  return null;
+  return best?.layout ?? null;
 }
 
 function computeDirectLayout(crops: Array<{ x: number; y: number; width: number; height: number }>): DirectLayout {
@@ -947,10 +987,11 @@ function computeDirectLayout(crops: Array<{ x: number; y: number; width: number;
   const top = Math.min(...crops.map((crop) => crop.y));
   const right = Math.max(...crops.map((crop) => crop.x + crop.width));
   const bottom = Math.max(...crops.map((crop) => crop.y + crop.height));
-  const horizontal = right - left >= bottom - top;
+  const pairDirection = getPairLayoutDirection(crops);
+  const horizontal = pairDirection ? pairDirection === "horizontal" : right - left >= bottom - top;
 
   if (crops.length > 2) {
-    const groupedLayout = getThreeRegionGroupedLayout(crops);
+    const groupedLayout = getGroupedLayout(crops);
     if (groupedLayout) {
       return groupedLayout;
     }
