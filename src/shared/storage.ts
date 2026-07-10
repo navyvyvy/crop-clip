@@ -4,7 +4,6 @@ import {
   DEFAULT_SEEK_SECONDS,
   DEFAULT_SETTINGS,
   DEFAULT_SHORTCUT_KEYS,
-  DOWNLOAD_FORMAT,
   MAX_MULTI_REGION_COUNT,
   MAX_SEEK_SECONDS,
   MAX_VIDEO_BITS_PER_SECOND,
@@ -37,16 +36,14 @@ function coerceNumber(value: unknown, fallback: number): number {
 }
 
 function normalizeShortcutKeys(raw: Partial<ShortcutKeys> | undefined): ShortcutKeys {
-  return {
-    selectRegion: typeof raw?.selectRegion === "string" && raw.selectRegion ? raw.selectRegion : DEFAULT_SHORTCUT_KEYS.selectRegion,
-    clearRegion: typeof raw?.clearRegion === "string" && raw.clearRegion ? raw.clearRegion : DEFAULT_SHORTCUT_KEYS.clearRegion,
-    clearAllRegions: typeof raw?.clearAllRegions === "string" && raw.clearAllRegions ? raw.clearAllRegions : DEFAULT_SHORTCUT_KEYS.clearAllRegions,
-    regionRecord: typeof raw?.regionRecord === "string" && raw.regionRecord ? raw.regionRecord : DEFAULT_SHORTCUT_KEYS.regionRecord,
-    cancelRecording: typeof raw?.cancelRecording === "string" && raw.cancelRecording ? raw.cancelRecording : DEFAULT_SHORTCUT_KEYS.cancelRecording,
-    regionScreenshot: typeof raw?.regionScreenshot === "string" && raw.regionScreenshot ? raw.regionScreenshot : DEFAULT_SHORTCUT_KEYS.regionScreenshot,
-    fullRecord: typeof raw?.fullRecord === "string" && raw.fullRecord ? raw.fullRecord : DEFAULT_SHORTCUT_KEYS.fullRecord,
-    fullScreenshot: typeof raw?.fullScreenshot === "string" && raw.fullScreenshot ? raw.fullScreenshot : DEFAULT_SHORTCUT_KEYS.fullScreenshot,
-  };
+  const normalized = { ...DEFAULT_SHORTCUT_KEYS };
+  for (const action of Object.keys(normalized) as Array<keyof ShortcutKeys>) {
+    const key = raw?.[action]?.toLowerCase();
+    if (key && /^[a-z0-9]$/.test(key)) {
+      normalized[action] = key;
+    }
+  }
+  return normalized;
 }
 
 export function normalizeSettings(raw: Partial<Settings> | undefined): Settings {
@@ -84,7 +81,7 @@ export function normalizeRegion(raw: Partial<RegionSelection> | null | undefined
   }
 
   const values = [raw.x, raw.y, raw.width, raw.height, raw.viewportWidth, raw.viewportHeight, raw.devicePixelRatio, raw.selectedAt];
-  if (values.some((value) => !Number.isFinite(Number(value)))) {
+  if (values.some((value) => !Number.isFinite(Number(value))) || Number(raw.width) <= 0 || Number(raw.height) <= 0) {
     return null;
   }
 
@@ -123,13 +120,7 @@ export function normalizeRecordingState(raw: Partial<RecordingState> | undefined
     recordingId: typeof raw?.recordingId === "string" ? raw.recordingId : undefined,
     tabId: Number.isFinite(raw?.tabId as number) ? Number(raw?.tabId) : undefined,
     startedAt: Number.isFinite(raw?.startedAt as number) ? Number(raw?.startedAt) : undefined,
-    endedAt: Number.isFinite(raw?.endedAt as number) ? Number(raw?.endedAt) : undefined,
-    lastError: typeof raw?.lastError === "string" ? raw.lastError : undefined,
     mode: raw?.mode === RECORDING_MODE.region || raw?.mode === RECORDING_MODE.full ? raw.mode : undefined,
-    requestedOutputFormat: raw?.requestedOutputFormat === DOWNLOAD_FORMAT.auto || raw?.requestedOutputFormat === RECORDING_FORMAT.webm || raw?.requestedOutputFormat === RECORDING_FORMAT.mp4 ? raw.requestedOutputFormat : undefined,
-    actualOutputFormat: raw?.actualOutputFormat === RECORDING_FORMAT.webm || raw?.actualOutputFormat === RECORDING_FORMAT.mp4 ? raw.actualOutputFormat : undefined,
-    actualMimeType: typeof raw?.actualMimeType === "string" ? raw.actualMimeType : undefined,
-    actualExtension: raw?.actualExtension === RECORDING_FORMAT.webm || raw?.actualExtension === RECORDING_FORMAT.mp4 ? raw.actualExtension : undefined,
   };
 }
 
@@ -161,11 +152,4 @@ export async function saveSettings(settings: Settings): Promise<void> {
 
 export async function saveRecordingState(recordingState: RecordingState): Promise<void> {
   await chrome.storage.local.set({ [STORAGE_KEYS.recordingState]: normalizeRecordingState(recordingState) });
-}
-
-export async function patchRecordingState(partial: Partial<RecordingState>): Promise<RecordingState> {
-  const current = await loadRecordingState();
-  const next = normalizeRecordingState({ ...current, ...partial });
-  await saveRecordingState(next);
-  return next;
 }

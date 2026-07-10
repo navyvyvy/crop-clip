@@ -112,7 +112,7 @@ function showError(message = ""): void {
 
 function showFpsWarning(settings: Settings): void {
   if (settings.enable60fps && settings.videoBitsPerSecond < FPS_WARNING_VIDEO_BITS_PER_SECOND) {
-    elements.fpsWarning.textContent = "60fps는 높음 / 4 Mbps 이상을 권장합니다.";
+    elements.fpsWarning.textContent = `60fps는 높음 / ${formatBitrateMbps(FPS_WARNING_VIDEO_BITS_PER_SECOND / BITS_PER_MEGABIT)} Mbps 이상을 권장합니다.`;
     return;
   }
 
@@ -371,11 +371,14 @@ async function persistBitrateInput(): Promise<void> {
   renderState();
 }
 
-async function withCommandInFlight<T>(command: () => Promise<T>): Promise<T> {
+async function withCommandInFlight<T>(command: () => Promise<T>): Promise<T | undefined> {
   sendingCommand = true;
   renderState();
   try {
     return await command();
+  } catch (error) {
+    showError(error instanceof Error ? error.message : "요청을 처리하지 못했습니다.");
+    return undefined;
   } finally {
     sendingCommand = false;
     renderState();

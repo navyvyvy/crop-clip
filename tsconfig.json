@@ -5,6 +5,10 @@
     "moduleResolution": "Bundler",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
     "noEmit": false,
     "outDir": "dist",
     "rootDir": "src",
@@ -17,4 +21,3 @@
   },
   "include": ["src/**/*.ts"]
 }
-

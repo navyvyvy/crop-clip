@@ -9,6 +9,11 @@ const srcDir = path.join(root, "src");
 const distDir = path.join(root, "dist");
 const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
 const buildVersion = process.env.BUILD_VERSION?.trim() || packageJson.version;
+const sourceManifest = JSON.parse(await readFile(path.join(root, "manifest.json"), "utf8"));
+
+if (!process.env.BUILD_VERSION && sourceManifest.version !== packageJson.version) {
+  throw new Error(`Version mismatch: package.json=${packageJson.version}, manifest.json=${sourceManifest.version}`);
+}
 
 await rm(distDir, { recursive: true, force: true });
 await mkdir(distDir, { recursive: true });
@@ -30,7 +35,7 @@ async function copyStaticFiles(fromDir, toDir) {
       continue;
     }
 
-    if (entry.name.endsWith(".ts")) {
+    if (/\.[cm]?ts$/.test(entry.name)) {
       continue;
     }
 
@@ -42,16 +47,11 @@ async function copyStaticFiles(fromDir, toDir) {
 }
 
 await copyStaticFiles(srcDir, distDir);
-await copyFile(path.join(root, "manifest.json"), path.join(distDir, "manifest.json"));
-
-if (buildVersion && buildVersion !== packageJson.version) {
-  const manifestPath = path.join(distDir, "manifest.json");
-  const manifestJson = JSON.parse(await readFile(manifestPath, "utf8"));
-  manifestJson.version = buildVersion;
-  await writeFile(manifestPath, `${JSON.stringify(manifestJson, null, 2)}\n`);
-}
+const manifestPath = path.join(distDir, "manifest.json");
+await writeFile(manifestPath, `${JSON.stringify({ ...sourceManifest, version: buildVersion }, null, 2)}\n`);
 
 await copyStaticFiles(path.join(root, "node_modules", "@ffmpeg", "ffmpeg", "dist", "esm"), path.join(distDir, "vendor", "ffmpeg", "ffmpeg"));
+await rm(path.join(distDir, "vendor", "ffmpeg", "ffmpeg", "empty.mjs"), { force: true });
 await mkdir(path.join(distDir, "vendor", "ffmpeg", "core"), { recursive: true });
 await copyFile(path.join(root, "node_modules", "@ffmpeg", "core", "dist", "esm", "ffmpeg-core.js"), path.join(distDir, "vendor", "ffmpeg", "core", "ffmpeg-core.js"));
 await copyFile(path.join(root, "node_modules", "@ffmpeg", "core", "dist", "esm", "ffmpeg-core.wasm"), path.join(distDir, "vendor", "ffmpeg", "core", "ffmpeg-core.wasm"));

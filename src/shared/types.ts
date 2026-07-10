@@ -1,5 +1,4 @@
 export type RecordingFormat = "webm" | "mp4";
-export type DownloadFormat = RecordingFormat | "auto";
 export type RecordingStatus = "idle" | "recording" | "completed" | "error";
 export type RecordingMode = "region" | "full";
 export type ShortcutAction = "selectRegion" | "clearRegion" | "clearAllRegions" | "regionRecord" | "cancelRecording" | "regionScreenshot" | "fullRecord" | "fullScreenshot";
@@ -9,11 +8,6 @@ export const RECORDING_FORMAT = {
   webm: "webm",
   mp4: "mp4",
 } as const satisfies Record<RecordingFormat, RecordingFormat>;
-
-export const DOWNLOAD_FORMAT = {
-  ...RECORDING_FORMAT,
-  auto: "auto",
-} as const satisfies Record<DownloadFormat, DownloadFormat>;
 
 export const RECORDING_STATUS = {
   idle: "idle",
@@ -64,27 +58,15 @@ export interface RecordingState {
   recordingId?: string;
   tabId?: number;
   startedAt?: number;
-  endedAt?: number;
-  lastError?: string;
   mode?: RecordingMode;
-  requestedOutputFormat?: DownloadFormat;
-  actualOutputFormat?: RecordingFormat;
-  actualMimeType?: string;
-  actualExtension?: RecordingFormat;
 }
 
 export interface RecordingRecord {
   id: string;
   createdAt: number;
   endedAt: number;
-  settings: Settings;
-  region: RegionSelection;
-  partCount: number;
   totalSize: number;
-  actualMimeType: string;
   actualExtension: RecordingFormat;
-  requestedOutputFormat: DownloadFormat;
-  actualOutputFormat: RecordingFormat;
 }
 
 export interface RecordingPartRecord {
@@ -99,6 +81,7 @@ export interface RecordingPartRecord {
   blob?: Blob;
   dataUrl?: string;
   objectUrl?: string;
+  seekMetadataVersion?: number;
   createdAt: number;
 }
 

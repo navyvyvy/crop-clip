@@ -27,7 +27,12 @@ function openDatabase(): Promise<IDBDatabase> {
     };
 
     request.onsuccess = () => {
-      resolve(request.result);
+      const db = request.result;
+      db.onversionchange = () => {
+        db.close();
+        dbPromise = null;
+      };
+      resolve(db);
     };
 
     request.onerror = () => {
@@ -38,10 +43,21 @@ function openDatabase(): Promise<IDBDatabase> {
 
 async function getDb(): Promise<IDBDatabase> {
   if (!dbPromise) {
-    dbPromise = openDatabase();
+    dbPromise = openDatabase().catch((error) => {
+      dbPromise = null;
+      throw error;
+    });
   }
 
   return dbPromise;
+}
+
+function transactionDone(transaction: IDBTransaction, errorMessage: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error ?? new Error(errorMessage));
+    transaction.onabort = () => reject(transaction.error ?? new Error(errorMessage));
+  });
 }
 
 function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
@@ -55,35 +71,21 @@ export async function putRecording(recording: RecordingRecord): Promise<void> {
   const db = await getDb();
   const tx = db.transaction(RECORDINGS_STORE, "readwrite");
   tx.objectStore(RECORDINGS_STORE).put(recording);
-  await new Promise<void>((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error ?? new Error("Failed to store recording"));
-    tx.onabort = () => reject(tx.error ?? new Error("Failed to store recording"));
-  });
+  await transactionDone(tx, "Failed to store recording");
 }
 
 export async function putPart(part: RecordingPartRecord): Promise<void> {
   const db = await getDb();
   const tx = db.transaction(PARTS_STORE, "readwrite");
   tx.objectStore(PARTS_STORE).put(part);
-  await new Promise<void>((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error ?? new Error("Failed to store part"));
-    tx.onabort = () => reject(tx.error ?? new Error("Failed to store part"));
-  });
+  await transactionDone(tx, "Failed to store part");
 }
 
 export async function getRecording(recordingId: string): Promise<RecordingRecord | undefined> {
   const db = await getDb();
   const tx = db.transaction(RECORDINGS_STORE, "readonly");
   const request = tx.objectStore(RECORDINGS_STORE).get(recordingId);
-  const result = await requestToPromise<RecordingRecord | undefined>(request);
-  await new Promise<void>((resolve) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => resolve();
-    tx.onabort = () => resolve();
-  });
-  return result;
+  return await requestToPromise<RecordingRecord | undefined>(request);
 }
 
 export async function getPartsByRecordingId(recordingId: string): Promise<RecordingPartRecord[]> {
@@ -92,11 +94,6 @@ export async function getPartsByRecordingId(recordingId: string): Promise<Record
   const index = tx.objectStore(PARTS_STORE).index("recordingId");
   const request = index.getAll(recordingId);
   const parts = await requestToPromise<RecordingPartRecord[]>(request);
-  await new Promise<void>((resolve) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => resolve();
-    tx.onabort = () => resolve();
-  });
   return parts.sort((left, right) => left.index - right.index);
 }
 
@@ -112,9 +109,5 @@ export async function deleteRecording(recordingId: string): Promise<void> {
     partStore.delete(key);
   }
 
-  await new Promise<void>((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error ?? new Error("Failed to delete recording"));
-    tx.onabort = () => reject(tx.error ?? new Error("Failed to delete recording"));
-  });
+  await transactionDone(tx, "Failed to delete recording");
 }

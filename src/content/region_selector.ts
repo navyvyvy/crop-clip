@@ -1,4 +1,5 @@
 (() => {
+  // This file is emitted as a classic content script, so runtime imports are intentionally avoided.
   const CONTENT_SCRIPT_BOOT_KEY = "__cropClipRegionSelectorBooted";
   const contentScriptGlobal = globalThis as typeof globalThis & { [CONTENT_SCRIPT_BOOT_KEY]?: boolean };
 
@@ -37,6 +38,9 @@ const LINE_FLOW_OVERLAP_THRESHOLD = 0.35;
 const LINE_GROUP_OVERLAP_THRESHOLD = 0.25;
 const MAX_ACTIVE_REGIONS = 4;
 const DEFAULT_MULTI_REGION_COUNT = 2;
+const DEFAULT_SEEK_SECONDS = 5;
+const DIRECT_RECORDING_PART_INDEX = 1;
+const POINTER_CLICK_DEDUP_MS = 500;
 const CROP_ACCENT = "#5bd6bf";
 const CROP_SECONDARY = "#5bb0d6";
 const CROP_REGION_COLORS = [CROP_ACCENT, CROP_SECONDARY, "#49c7e6", "#7be0b2"];
@@ -100,19 +104,16 @@ interface DirectLayout {
 
 interface DirectRecordingSession {
   recordingId: string;
-  region: RegionSelection;
   settings: Settings;
   video: HTMLVideoElement;
   sourceStream: MediaStream;
   outputStream: MediaStream;
   canvas: HTMLCanvasElement;
-  context: CanvasRenderingContext2D;
   recorder?: MediaRecorder;
   mimeType: string;
   extension: "webm" | "mp4";
   outputFormat: "webm" | "mp4";
   baseName: string;
-  partNumber: number;
   totalSize: number;
   currentChunks: BlobPart[];
   createdAt: number;
@@ -125,7 +126,6 @@ interface DirectRecordingSession {
   resolveFinish: () => void;
   rejectFinish: (error: Error) => void;
   placements: DirectCropPlacement[];
-  output: { width: number; height: number };
   sourceChangeCleanup?: () => void;
 }
 
@@ -141,7 +141,7 @@ let multiRegionMaxCount = DEFAULT_MULTI_REGION_COUNT;
 let fullRecordButtonEnabled = false;
 let fullScreenshotButtonEnabled = false;
 let seekEnabled = false;
-let seekSeconds = 5;
+let seekSeconds = DEFAULT_SEEK_SECONDS;
 let streamerFilenameEnabled = false;
 let shortcutsEnabled = false;
 let shortcutKeys: ShortcutKeys = DEFAULT_CONTENT_SHORTCUT_KEYS;
@@ -562,8 +562,12 @@ function clamp(value: number, min: number, max: number): number {
 
 function formatElapsed(ms: number): string {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
@@ -745,6 +749,23 @@ function computeDirectCrop(region: RegionSelection, video: HTMLVideoElement): { 
   return { x, y, width: right - x, height: bottom - y };
 }
 
+function computeDirectCropFromSelection(region: RegionSelection, video: HTMLVideoElement): { x: number; y: number; width: number; height: number } | null {
+  const relative = region.videoRelative;
+  if (!relative) {
+    return computeDirectCrop(resolveRegionToViewport(region), video);
+  }
+
+  const x = clamp(Math.round(relative.x * video.videoWidth), 0, Math.max(0, video.videoWidth - 1));
+  const y = clamp(Math.round(relative.y * video.videoHeight), 0, Math.max(0, video.videoHeight - 1));
+  const right = clamp(Math.round((relative.x + relative.width) * video.videoWidth), x + 1, video.videoWidth);
+  const bottom = clamp(Math.round((relative.y + relative.height) * video.videoHeight), y + 1, video.videoHeight);
+  return right > x && bottom > y ? { x, y, width: right - x, height: bottom - y } : null;
+}
+
+function getCropLayoutKey(crops: Array<{ x: number; y: number; width: number; height: number }>): string {
+  return crops.map((crop) => `${crop.x}:${crop.y}:${crop.width}:${crop.height}`).join("|");
+}
+
 function computeDirectOutput(crop: { width: number; height: number }): { width: number; height: number } {
   return {
     width: Math.max(1, Math.round(crop.width)),
@@ -859,6 +880,12 @@ function hasTwoColumnLayout(crops: Array<{ x: number; y: number; width: number; 
   const ordered = [...crops].sort((a, b) => (a.x + a.width / 2) - (b.x + b.width / 2));
   const split = Math.ceil(ordered.length / 2);
   const groups = [ordered.slice(0, split), ordered.slice(split)];
+  const columnCenters = groups.map((group) => group.reduce((sum, crop) => sum + crop.x + crop.width / 2, 0) / group.length);
+  const averageWidth = crops.reduce((sum, crop) => sum + crop.width, 0) / crops.length;
+  if (columnCenters[1] - columnCenters[0] <= averageWidth * LINE_LAYOUT_THRESHOLD) {
+    return false;
+  }
+
   return groups.every((group) => {
     const centersX = group.map((crop) => crop.x + crop.width / 2);
     const centersY = group.map((crop) => crop.y + crop.height / 2);
@@ -1323,7 +1350,7 @@ function sendRuntimeMessage<T = undefined>(message: Record<string, unknown>): Pr
           return;
         }
 
-        resolve(response ?? { ok: true });
+        resolve(response ?? { ok: false, error: "확장 프로그램에서 응답하지 않았습니다." });
       });
     } catch (error) {
       if (error instanceof Error) {
@@ -1340,23 +1367,29 @@ async function saveDirectPart(session: DirectRecordingSession, blob: Blob): Prom
     throw new Error("녹화 데이터가 비어 있습니다.");
   }
 
-  const response = await sendRuntimeMessage({
-    type: "STORE_RECORDING_PART",
-    part: {
-      id: `${session.recordingId}:part:${String(session.partNumber).padStart(3, "0")}`,
-      recordingId: session.recordingId,
-      index: session.partNumber,
-      filename: buildDirectFilename(session),
-      mimeType: session.mimeType,
-      extension: session.extension,
-      outputFormat: session.outputFormat,
-      size: blob.size,
-      objectUrl: URL.createObjectURL(blob),
-      createdAt: Date.now(),
-    },
-  });
-  if (!response.ok) {
-    throw new Error(response.error);
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const response = await sendRuntimeMessage({
+      type: "STORE_RECORDING_PART",
+      part: {
+        id: `${session.recordingId}:part:${String(DIRECT_RECORDING_PART_INDEX).padStart(3, "0")}`,
+        recordingId: session.recordingId,
+        index: DIRECT_RECORDING_PART_INDEX,
+        filename: buildDirectFilename(session),
+        mimeType: session.mimeType,
+        extension: session.extension,
+        outputFormat: session.outputFormat,
+        size: blob.size,
+        objectUrl,
+        createdAt: Date.now(),
+      },
+    });
+    if (!response.ok) {
+      throw new Error(response.error);
+    }
+  } catch (error) {
+    URL.revokeObjectURL(objectUrl);
+    throw error;
   }
 
   session.totalSize += blob.size;
@@ -1387,22 +1420,19 @@ async function finalizeDirectRecording(session: DirectRecordingSession): Promise
   cleanupDirectRecordingSession(session);
 
   try {
-    await sendRuntimeMessage({
+    const response = await sendRuntimeMessage({
       type: "RECORDING_FINISHED",
       recording: {
         id: session.recordingId,
         createdAt: session.createdAt,
         endedAt: Date.now(),
-        settings: session.settings,
-        region: session.region,
-        partCount: session.partNumber,
         totalSize: session.totalSize,
-        actualMimeType: session.mimeType,
         actualExtension: session.extension,
-        requestedOutputFormat: session.settings.outputFormat,
-        actualOutputFormat: session.outputFormat,
       },
     });
+    if (!response.ok) {
+      throw new Error(response.error);
+    }
     session.resolveFinish();
   } catch (error) {
     session.rejectFinish(error instanceof Error ? error : new Error("녹화 결과를 저장하지 못했습니다."));
@@ -1473,12 +1503,15 @@ async function startDirectPart(session: DirectRecordingSession): Promise<void> {
 
   recorder.onerror = () => {
     const error = new Error("녹화 중 오류가 발생했습니다.");
+    session.cancelRequested = true;
+    session.stopRequested = true;
+    cleanupDirectRecordingSession(session);
     session.rejectFinish(error);
     void sendRuntimeMessage({
       type: "RECORDING_ERROR",
       recordingId: session.recordingId,
       error: error.message,
-    });
+    }).catch(() => {});
   };
 
   recorder.onstop = () => {
@@ -1492,16 +1525,13 @@ async function startDirectPart(session: DirectRecordingSession): Promise<void> {
       await saveDirectPart(session, blob);
       await finalizeDirectRecording(session);
     })().catch((error: Error) => {
+      cleanupDirectRecordingSession(session);
       session.rejectFinish(error);
       void sendRuntimeMessage({
         type: "RECORDING_ERROR",
         recordingId: session.recordingId,
         error: error.message,
-      });
-      clearDirectTimers(session);
-      if (directSession === session) {
-        directSession = null;
-      }
+      }).catch(() => {});
     });
   };
 
@@ -1531,7 +1561,7 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
 
   const sourceRegions = (command.regions?.length ? command.regions : [command.region]).slice(0, command.settings.enableMultiRegion ? getMultiRegionLimit(command.settings) : 1);
   const crops = sourceRegions
-    .map((region) => computeDirectCrop(region, video))
+    .map((region) => computeDirectCropFromSelection(region, video))
     .filter((crop): crop is { x: number; y: number; width: number; height: number } => crop !== null);
   if (crops.length === 0) {
     return { ok: false, error: "선택 영역이 비디오 화면과 겹치지 않습니다." };
@@ -1539,6 +1569,7 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
 
   const layout = computeDirectLayout(crops);
   const output = layout.output;
+  const mime = selectDirectMimeType(command.settings);
   const sourceStream = getVideoStream(video);
   if (!sourceStream) {
     return { ok: false, error: "이 브라우저에서는 비디오 스트림 직접 녹화를 지원하지 않습니다." };
@@ -1566,14 +1597,20 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
     ...sourceStream.getAudioTracks(),
   ];
   const outputStream = new MediaStream(tracks);
-  const mime = selectDirectMimeType(command.settings);
+  let cropLayoutKey = getCropLayoutKey(crops);
 
   const drawFrame = () => {
     const nextCrops = sourceRegions
-      .map((region) => computeDirectCrop(resolveRegionToViewport(region), video))
+      .map((region) => computeDirectCropFromSelection(region, video))
       .filter((crop): crop is { x: number; y: number; width: number; height: number } => crop !== null);
-    if (nextCrops.length > 0) {
-      session.placements = computeDirectLayout(nextCrops).placements;
+    const nextCropLayoutKey = getCropLayoutKey(nextCrops);
+    if (nextCrops.length > 0 && nextCropLayoutKey !== cropLayoutKey) {
+      cropLayoutKey = nextCropLayoutKey;
+      const nextLayout = computeDirectLayout(nextCrops);
+      const scale = Math.min(output.width / nextLayout.output.width, output.height / nextLayout.output.height);
+      const width = nextLayout.output.width * scale;
+      const height = nextLayout.output.height * scale;
+      session.placements = scaleLayout(nextLayout, scale, Math.round((output.width - width) / 2), Math.round((output.height - height) / 2));
     }
     context.fillStyle = "#000";
     context.fillRect(0, 0, output.width, output.height);
@@ -1588,21 +1625,19 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
     resolveFinish = resolve;
     rejectFinish = reject;
   });
+  void finishPromise.catch(() => {});
 
   const session: DirectRecordingSession = {
     recordingId: command.recordingId,
-    region: command.region,
     settings: command.settings,
     video,
     sourceStream,
     outputStream,
     canvas,
-    context,
     mimeType: mime.mimeType,
     extension: mime.extension,
     outputFormat: mime.outputFormat,
     baseName: buildBaseName(),
-    partNumber: 1,
     totalSize: 0,
     currentChunks: [],
     createdAt: Date.now(),
@@ -1615,14 +1650,18 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
     resolveFinish,
     rejectFinish,
     placements: layout.placements,
-    output,
   };
 
   directSession = session;
-  drawFrame();
-  await startDirectPart(session);
-  watchDirectRecordingSource(session);
-  return { ok: true };
+  try {
+    drawFrame();
+    await startDirectPart(session);
+    watchDirectRecordingSource(session);
+    return { ok: true };
+  } catch (error) {
+    cleanupDirectRecordingSession(session);
+    throw error;
+  }
 }
 
 async function stopDirectRecording(): Promise<MessageResponse> {
@@ -1935,6 +1974,7 @@ function snapRegionMove(region: RegionSelection, index: number): { region: Regio
 
 function attachBorderControls(border: HTMLDivElement, index: number): () => void {
   const cleanupCallbacks: Array<() => void> = [];
+  let stopActiveDrag: (() => void) | null = null;
   const recordTime = border.querySelector<HTMLElement>(".record-time");
   const recordButton = border.querySelector<HTMLButtonElement>(".record-region");
   const cancelButton = border.querySelector<HTMLButtonElement>(".cancel-recording");
@@ -2130,6 +2170,7 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
     if (!bounds) {
       return;
     }
+    stopActiveDrag?.();
     const width = Math.min(startRegion.width, bounds.width);
     const height = Math.min(startRegion.height, bounds.height);
 
@@ -2153,12 +2194,16 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      stopActiveDrag = null;
       syncBorderState();
       void saveRegions(currentRegions);
     };
 
+    stopActiveDrag = onUp;
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp, { once: true });
+    window.addEventListener("pointercancel", onUp, { once: true });
   };
 
   moveButton?.addEventListener("pointerdown", startMove);
@@ -2190,6 +2235,7 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
     if (!bounds) {
       return;
     }
+    stopActiveDrag?.();
     const minWidth = Math.min(MIN_WIDTH, bounds.width);
     const minHeight = Math.min(MIN_HEIGHT, bounds.height);
 
@@ -2229,12 +2275,16 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      stopActiveDrag = null;
       syncBorderState();
       void saveRegions(currentRegions);
     };
 
+    stopActiveDrag = onUp;
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp, { once: true });
+    window.addEventListener("pointercancel", onUp, { once: true });
   };
 
   const zones = Array.from(border.querySelectorAll<HTMLElement>(".resize-zone"));
@@ -2244,6 +2294,7 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
   }
 
   return () => {
+    stopActiveDrag?.();
     for (const cleanup of cleanupCallbacks) {
       cleanup();
     }
@@ -2261,7 +2312,7 @@ async function loadState(): Promise<{ region: RegionSelection | null; regions: R
       fullRecordButtonEnabled: false,
       fullScreenshotButtonEnabled: false,
       seekEnabled: false,
-      seekSeconds: 5,
+      seekSeconds: DEFAULT_SEEK_SECONDS,
       streamerFilenameEnabled: false,
       shortcutsEnabled: false,
       shortcutKeys: DEFAULT_CONTENT_SHORTCUT_KEYS,
@@ -2286,7 +2337,7 @@ async function loadState(): Promise<{ region: RegionSelection | null; regions: R
       fullRecordButtonEnabled: false,
       fullScreenshotButtonEnabled: false,
       seekEnabled: false,
-      seekSeconds: 5,
+      seekSeconds: DEFAULT_SEEK_SECONDS,
       streamerFilenameEnabled: false,
       shortcutsEnabled: false,
       shortcutKeys: DEFAULT_CONTENT_SHORTCUT_KEYS,
@@ -2303,7 +2354,7 @@ async function loadState(): Promise<{ region: RegionSelection | null; regions: R
     fullRecordButtonEnabled: Boolean(result.settings?.enableFullRecordButton),
     fullScreenshotButtonEnabled: Boolean(result.settings?.enableFullScreenshotButton),
     seekEnabled: Boolean(result.settings?.enableSeek ?? (result.settings as Partial<Settings> & { enableSeekButtons?: boolean } | undefined)?.enableSeekButtons),
-    seekSeconds: Number.isFinite(result.settings?.seekSeconds) ? Number(result.settings?.seekSeconds) : 5,
+    seekSeconds: Number.isFinite(result.settings?.seekSeconds) ? Number(result.settings?.seekSeconds) : DEFAULT_SEEK_SECONDS,
     streamerFilenameEnabled: Boolean(result.settings?.enableStreamerFilename),
     shortcutsEnabled: Boolean(result.settings?.enableShortcuts),
     shortcutKeys: normalizeShortcutKeys(result.settings?.shortcutKeys),
@@ -2317,7 +2368,7 @@ function normalizeRegion(raw: unknown): RegionSelection | null {
 
   const value = raw as Partial<RegionSelection>;
   const fields = [value.x, value.y, value.width, value.height, value.viewportWidth, value.viewportHeight, value.devicePixelRatio, value.selectedAt];
-  if (fields.some((item) => !Number.isFinite(Number(item)))) {
+  if (fields.some((item) => !Number.isFinite(Number(item))) || Number(value.width) <= 0 || Number(value.height) <= 0) {
     return null;
   }
   const relative = value.videoRelative;
@@ -2361,7 +2412,14 @@ function normalizeRecordingState(raw: unknown): LocalRecordingState {
 }
 
 function normalizeShortcutKeys(raw: Partial<ShortcutKeys> | undefined): ShortcutKeys {
-  return { ...DEFAULT_CONTENT_SHORTCUT_KEYS, ...raw };
+  const normalized = { ...DEFAULT_CONTENT_SHORTCUT_KEYS };
+  for (const action of Object.keys(normalized) as ShortcutAction[]) {
+    const key = raw?.[action]?.toLowerCase();
+    if (key && /^[a-z0-9]$/.test(key)) {
+      normalized[action] = key;
+    }
+  }
+  return normalized;
 }
 
 function trimRegionsToLimit(): void {
@@ -2666,9 +2724,15 @@ function startSelection(): void {
     cancelSelection();
   };
 
+  const onPointerCancel = () => {
+    dragging = false;
+    updateSelectionBox(selectionBox, 0, 0, 0, 0);
+  };
+
   overlay.addEventListener("pointerdown", onPointerDown);
   overlay.addEventListener("pointermove", onPointerMove);
   overlay.addEventListener("pointerup", onPointerUp);
+  overlay.addEventListener("pointercancel", onPointerCancel);
   overlay.addEventListener("contextmenu", onContextMenu);
   window.addEventListener("keydown", onKeyDown, { once: false });
 
@@ -2676,6 +2740,7 @@ function startSelection(): void {
     overlay.removeEventListener("pointerdown", onPointerDown);
     overlay.removeEventListener("pointermove", onPointerMove);
     overlay.removeEventListener("pointerup", onPointerUp);
+    overlay.removeEventListener("pointercancel", onPointerCancel);
     overlay.removeEventListener("contextmenu", onContextMenu);
     window.removeEventListener("keydown", onKeyDown);
   };
@@ -2804,7 +2869,7 @@ function handlePlayerScreenshotActivation(event: MouseEvent): void {
   }
 
   const now = Date.now();
-  if (event.type === "click" && now - lastScreenshotPointerActivationAt < 500) {
+  if (event.type === "click" && now - lastScreenshotPointerActivationAt < POINTER_CLICK_DEDUP_MS) {
     event.preventDefault();
     event.stopPropagation();
     return;
@@ -2848,7 +2913,7 @@ function handlePlayerRecordActivation(event: MouseEvent): void {
   }
 
   const now = Date.now();
-  if (event.type === "click" && now - lastRecordPointerActivationAt < 500) {
+  if (event.type === "click" && now - lastRecordPointerActivationAt < POINTER_CLICK_DEDUP_MS) {
     event.preventDefault();
     event.stopPropagation();
     return;
@@ -2911,7 +2976,7 @@ function handlePlayerCancelActivation(event: MouseEvent): void {
   }
 
   const now = Date.now();
-  if (event.type === "click" && now - lastCancelPointerActivationAt < 500) {
+  if (event.type === "click" && now - lastCancelPointerActivationAt < POINTER_CLICK_DEDUP_MS) {
     event.preventDefault();
     event.stopPropagation();
     return;
@@ -3365,8 +3430,7 @@ function getPlayerStatus(): PlayerStatusResponse {
 if (isExtensionContextAvailable()) {
   chrome.runtime.onMessage.addListener((message: ContentCommand | PlayerStatusRequest, _sender, sendResponse: (response: MessageResponse | PlayerStatusResponse | RegionGeometryResponse | RegionGeometriesResponse) => void) => {
     if (message.type === "GET_PLAYER_STATUS") {
-      const status = getPlayerStatus();
-      sendResponse(status.ok && status.data.muted ? { ok: false, error: "현재 탭의 영상이 음소거되어 있습니다." } : status);
+      sendResponse(getPlayerStatus());
       return false;
     }
 
@@ -3383,7 +3447,9 @@ if (isExtensionContextAvailable()) {
         currentRegions = [];
         showSelectionBorders([]);
         sendResponse({ ok: true });
-      })();
+      })().catch((error: unknown) => {
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : "영역을 해제하지 못했습니다." });
+      });
       return true;
     }
 
@@ -3452,7 +3518,9 @@ if (isExtensionContextAvailable()) {
       trimRegionsToLimit();
       startSelection();
       sendResponse({ ok: true });
-    })();
+    })().catch((error: unknown) => {
+      sendResponse({ ok: false, error: error instanceof Error ? error.message : "영역 선택을 시작하지 못했습니다." });
+    });
 
     return true;
   });
@@ -3464,11 +3532,13 @@ if (isExtensionContextAvailable()) {
 
     if (changes.region) {
       currentRegion = normalizeRegion(changes.region.newValue);
-      void refreshBorder();
     }
 
     if (changes.regions) {
       currentRegions = normalizeRegions(changes.regions.newValue, currentRegion);
+    }
+
+    if (changes.region || changes.regions) {
       void refreshBorder();
     }
 
@@ -3496,7 +3566,7 @@ if (isExtensionContextAvailable()) {
       fullRecordButtonEnabled = Boolean(settings?.enableFullRecordButton);
       fullScreenshotButtonEnabled = Boolean(settings?.enableFullScreenshotButton);
       seekEnabled = Boolean(settings?.enableSeek ?? (settings as Partial<Settings> & { enableSeekButtons?: boolean } | undefined)?.enableSeekButtons);
-      seekSeconds = Number.isFinite(settings?.seekSeconds) ? Number(settings?.seekSeconds) : 5;
+      seekSeconds = Number.isFinite(settings?.seekSeconds) ? Number(settings?.seekSeconds) : DEFAULT_SEEK_SECONDS;
       streamerFilenameEnabled = Boolean(settings?.enableStreamerFilename);
       shortcutsEnabled = Boolean(settings?.enableShortcuts);
       shortcutKeys = normalizeShortcutKeys(settings?.shortcutKeys);
@@ -3561,6 +3631,7 @@ window.addEventListener("keydown", (event) => {
   });
 }, true);
 
-  void initializePageState();
-  installPlayerToolButtons();
+  void initializePageState()
+    .catch(() => {})
+    .then(installPlayerToolButtons);
 })();
