@@ -9,24 +9,13 @@ const functionNames = new Set([
   "scaleLayout",
   "composeHorizontal",
   "composeVertical",
-  "getOverlapRatio",
   "getPairLayoutDirection",
-  "getLineLayout",
-  "hasTwoColumnLayout",
   "getGroupedLayout",
   "computeDirectLayout",
 ]);
-const constantNames = new Set([
-  "LINE_LAYOUT_THRESHOLD",
-  "LINE_FLOW_OVERLAP_THRESHOLD",
-  "LINE_GROUP_OVERLAP_THRESHOLD",
-]);
 const selectedStatements = [];
 function collectStatements(node) {
-  if ((ts.isFunctionDeclaration(node) && node.name && functionNames.has(node.name.text))
-    || (ts.isVariableStatement(node) && node.declarationList.declarations.some(
-      (declaration) => ts.isIdentifier(declaration.name) && constantNames.has(declaration.name.text),
-    ))) {
+  if (ts.isFunctionDeclaration(node) && node.name && functionNames.has(node.name.text)) {
     selectedStatements.push(node.getText(sourceFile));
     return;
   }
