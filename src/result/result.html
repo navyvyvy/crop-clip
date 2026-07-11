@@ -9,19 +9,31 @@
   <body>
     <main class="page">
       <section class="result-card">
-        <button id="close-button" class="button close-button" type="button" aria-label="결과 창 닫기">×</button>
+        <div id="result-loading" class="result-loading" role="status" aria-live="polite">
+          <div class="result-loading-content">
+            <strong>녹화 결과를 불러오는 중입니다.</strong>
+            <span id="result-loading-message">녹화 파일을 확인하고 있습니다.</span>
+            <div class="result-loading-track" aria-hidden="true"><span></span></div>
+          </div>
+        </div>
+        <button id="close-button" class="button close-button" type="button" aria-label="결과 창 닫기" title="닫기">
+          <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+            <path d="M5.5 5.5 14.5 14.5M14.5 5.5 5.5 14.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </button>
         <header class="result-head">
           <div class="title-row">
             <h1 id="title">녹화 결과</h1>
             <div class="meta-chip" id="format-chip">WEBM · - · -</div>
           </div>
           <div class="header-actions">
+            <button id="download-original-button" class="button tertiary" type="button" hidden>원본 다운로드</button>
             <button id="download-current-button" class="button primary" type="button">
               <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                 <path d="M12 4v10m0 0 4-4m-4 4-4-4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
                 <path d="M5 17.5v1.2c0 .7.6 1.3 1.3 1.3h11.4c.7 0 1.3-.6 1.3-1.3v-1.2" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
               </svg>
-              <span>다운로드</span>
+              <span id="download-current-label">다운로드</span>
             </button>
           </div>
         </header>
@@ -30,17 +42,77 @@
           <video id="preview-video" class="preview-video" controls playsinline muted preload="auto"></video>
         </div>
 
+        <section class="trim-editor" aria-labelledby="trim-title">
+          <header class="trim-head">
+            <div class="section-title">
+              <h2 id="trim-title">사용 구간</h2>
+              <span class="help-tooltip">
+                <button class="help-button" type="button" aria-label="사용 구간 도움말">
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5"/><path d="M8.2 7.7a2 2 0 0 1 3.9.6c0 1.6-2.1 1.7-2.1 3.1M10 14h.01"/></svg>
+                </button>
+                <span class="help-popover" role="tooltip">선택한 구간이 미리보기, 다운로드, 변환, 파일 나누기에 적용됩니다.</span>
+              </span>
+            </div>
+            <div class="trim-details">
+              <div class="trim-time-field">
+                <span>시작</span>
+                <span class="trim-stepper">
+                  <button id="trim-start-decrease-button" type="button" aria-label="시작 시간 감소">−</button>
+                  <input id="trim-start-input" type="text" inputmode="decimal" value="0:00" aria-label="사용 구간 시작 시간" />
+                  <button id="trim-start-increase-button" type="button" aria-label="시작 시간 증가">+</button>
+                </span>
+              </div>
+              <div class="trim-time-field">
+                <span>끝</span>
+                <span class="trim-stepper">
+                  <button id="trim-end-decrease-button" type="button" aria-label="끝 시간 감소">−</button>
+                  <input id="trim-end-input" type="text" inputmode="decimal" value="0:00.1" aria-label="사용 구간 끝 시간" />
+                  <button id="trim-end-increase-button" type="button" aria-label="끝 시간 증가">+</button>
+                </span>
+              </div>
+              <div class="trim-duration" aria-live="polite">
+                <span>길이</span>
+                <strong id="trim-duration-value">0.1초</strong>
+              </div>
+            </div>
+            <button id="trim-reset-button" class="button tertiary compact-button" type="button">전체 구간</button>
+          </header>
+
+          <div id="trim-timeline" class="trim-timeline" style="--trim-start: 0%; --trim-end: 100%; --trim-playhead: 0%;">
+            <output id="trim-start-bubble" class="trim-bubble trim-bubble-start" for="trim-start-range">0:00</output>
+            <output id="trim-end-bubble" class="trim-bubble trim-bubble-end" for="trim-end-range">0:00.1</output>
+            <div class="trim-rail" aria-hidden="true">
+              <span class="trim-selection"></span>
+              <span class="trim-ticks"></span>
+              <span class="trim-snap-guide"></span>
+              <span class="trim-playhead"></span>
+            </div>
+            <input id="trim-start-range" class="trim-range trim-range-start" type="range" min="0" max="1" step="any" value="0" aria-label="사용 구간 시작" />
+            <input id="trim-end-range" class="trim-range trim-range-end" type="range" min="0" max="1" step="any" value="1" aria-label="사용 구간 끝" />
+          </div>
+        </section>
+
         <section class="tool-row">
           <div class="tool-group split-group">
-            <h2>파일 나누기</h2>
+            <div class="section-title">
+              <h2>파일 나누기</h2>
+              <span class="help-tooltip">
+                <button class="help-button" type="button" aria-label="파일 나누기 도움말">
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5"/><path d="M8.2 7.7a2 2 0 0 1 3.9.6c0 1.6-2.1 1.7-2.1 3.1M10 14h.01"/></svg>
+                </button>
+                <span class="help-popover" role="tooltip">선택 구간을 시간 또는 예상 용량 기준으로 나눕니다.</span>
+              </span>
+            </div>
             <select id="split-mode-select" aria-label="나누기 기준">
               <option value="duration">시간</option>
               <option value="size">용량</option>
             </select>
-            <label class="split-value">
-              <input id="split-value-input" type="number" min="1" max="3600" step="1" value="45" aria-label="나누기 값" />
+            <div class="split-value">
+              <button id="split-value-decrease-button" type="button" aria-label="나누기 값 감소">−</button>
+              <input id="split-value-input" type="number" min="0.1" max="3600" step="0.1" value="45" aria-label="나누기 값" />
               <span id="split-unit-label">초</span>
-            </label>
+              <button id="split-value-increase-button" type="button" aria-label="나누기 값 증가">+</button>
+            </div>
             <select id="split-format-select" aria-label="나누기 파일 형식">
               <option value="mp4">MP4</option>
               <option value="webm">WebM</option>
@@ -52,6 +124,11 @@
               </svg>
               <span>나누기</span>
             </button>
+            <div class="split-presets" aria-label="나누기 빠른 선택">
+              <button type="button" data-split-mode="duration" data-split-value="30">30초</button>
+              <button type="button" data-split-mode="duration" data-split-value="45">45초</button>
+              <button type="button" data-split-mode="size" data-split-value="40">40MB</button>
+            </div>
           </div>
           <div class="tool-group convert-group" aria-label="파일 변환">
             <h2>파일 변환</h2>
@@ -59,7 +136,7 @@
             <button class="button secondary convert-button" type="button" data-convert-format="gif">GIF</button>
           </div>
         </section>
-        <p id="split-status" class="split-status">시간이나 용량 기준으로 파일을 나눌 수 있습니다.</p>
+        <p id="split-status" class="split-status" aria-live="polite"></p>
 
         <div id="split-progress" class="progress" hidden>
           <div id="split-progress-bar" class="progress-bar"></div>

@@ -1,5 +1,16 @@
 import { getPartsByRecordingId, getRecording, putPart, putRecording } from "../shared/idb.js";
 import type { DeletionCancelRequest, DeletionScheduleRequest } from "../shared/messages.js";
+import {
+  estimateRangeSize,
+  isFullTimeRange,
+  normalizeTimeRange,
+  parseTimeInput,
+  snapTimeRangeToSecond,
+  snapTimeRangeValue,
+  updateTimeRangeHandle,
+  type TimeRange,
+  type TimeRangeHandle,
+} from "../shared/time_range.js";
 import { RECORDING_FORMAT, type RecordingFormat, type RecordingPartRecord, type RecordingRecord } from "../shared/types.js";
 
 const params = new URLSearchParams(location.search);
@@ -9,13 +20,31 @@ type OutputFormat = RecordingFormat;
 type ConvertFormat = OutputFormat | "gif";
 
 const elements = {
+  resultLoading: document.getElementById("result-loading") as HTMLDivElement,
+  resultLoadingMessage: document.getElementById("result-loading-message") as HTMLSpanElement,
   title: document.getElementById("title") as HTMLHeadingElement,
   formatChip: document.getElementById("format-chip") as HTMLDivElement,
   previewVideo: document.getElementById("preview-video") as HTMLVideoElement,
+  trimTimeline: document.getElementById("trim-timeline") as HTMLDivElement,
+  trimStartRange: document.getElementById("trim-start-range") as HTMLInputElement,
+  trimEndRange: document.getElementById("trim-end-range") as HTMLInputElement,
+  trimStartInput: document.getElementById("trim-start-input") as HTMLInputElement,
+  trimEndInput: document.getElementById("trim-end-input") as HTMLInputElement,
+  trimStartDecreaseButton: document.getElementById("trim-start-decrease-button") as HTMLButtonElement,
+  trimStartIncreaseButton: document.getElementById("trim-start-increase-button") as HTMLButtonElement,
+  trimEndDecreaseButton: document.getElementById("trim-end-decrease-button") as HTMLButtonElement,
+  trimEndIncreaseButton: document.getElementById("trim-end-increase-button") as HTMLButtonElement,
+  trimStartBubble: document.getElementById("trim-start-bubble") as HTMLOutputElement,
+  trimEndBubble: document.getElementById("trim-end-bubble") as HTMLOutputElement,
+  trimDurationValue: document.getElementById("trim-duration-value") as HTMLElement,
+  trimResetButton: document.getElementById("trim-reset-button") as HTMLButtonElement,
   splitModeSelect: document.getElementById("split-mode-select") as HTMLSelectElement,
   splitFormatSelect: document.getElementById("split-format-select") as HTMLSelectElement,
   splitValueInput: document.getElementById("split-value-input") as HTMLInputElement,
+  splitValueDecreaseButton: document.getElementById("split-value-decrease-button") as HTMLButtonElement,
+  splitValueIncreaseButton: document.getElementById("split-value-increase-button") as HTMLButtonElement,
   splitUnitLabel: document.getElementById("split-unit-label") as HTMLSpanElement,
+  splitPresetButtons: Array.from(document.querySelectorAll<HTMLButtonElement>("[data-split-value]")),
   splitButton: document.getElementById("split-button") as HTMLButtonElement,
   splitStatus: document.getElementById("split-status") as HTMLParagraphElement,
   splitProgress: document.getElementById("split-progress") as HTMLDivElement,
@@ -24,7 +53,9 @@ const elements = {
   splitResultSummary: document.getElementById("split-result-summary") as HTMLElement,
   splitFilesList: document.getElementById("split-files-list") as HTMLDivElement,
   emptyMessage: document.getElementById("empty-message") as HTMLParagraphElement,
+  downloadOriginalButton: document.getElementById("download-original-button") as HTMLButtonElement,
   downloadCurrentButton: document.getElementById("download-current-button") as HTMLButtonElement,
+  downloadCurrentLabel: document.getElementById("download-current-label") as HTMLSpanElement,
   closeButton: document.getElementById("close-button") as HTMLButtonElement,
   convertButtons: Array.from(document.querySelectorAll<HTMLButtonElement>("[data-convert-format]")),
   downloadAllButton: document.getElementById("download-all-button") as HTMLButtonElement,
@@ -41,6 +72,9 @@ let splitDefaultRequestId = 0;
 let sourceDurationSeconds = 0;
 let sourceSizeMegabytes = 0;
 let ffmpegLoadPromise: Promise<FfmpegLike> | null = null;
+let trimStartSeconds = 0;
+let trimEndSeconds = 0;
+let workBusy = false;
 interface SplitSegment {
   blob: Blob;
   filename: string;
@@ -76,6 +110,8 @@ const RESULT_LOAD_RETRY_MS = 500;
 const DOWNLOAD_URL_REVOKE_DELAY_MS = 1_000;
 const SEQUENTIAL_DOWNLOAD_DELAY_MS = 350;
 const SEEK_METADATA_VERSION = 1;
+const TRIM_STEP_SECONDS = 0.1;
+const MEDIA_EVENT_TIMEOUT_MS = 15_000;
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) {
@@ -92,19 +128,59 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(value >= 10 || index === 0 ? 0 : 1)} ${units[index]}`;
 }
 
-function formatDuration(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds <= 0) {
-    return "0:00";
-  }
-
-  const totalSeconds = Math.floor(seconds);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const remainder = totalSeconds % 60;
-  const paddedSeconds = String(remainder).padStart(2, "0");
+function formatPreciseDuration(seconds: number): string {
+  const safeSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
+  const totalTenths = Math.round(safeSeconds * 10);
+  const hours = Math.floor(totalTenths / 36_000);
+  const minutes = Math.floor((totalTenths % 36_000) / 600);
+  const remainder = (totalTenths % 600) / 10;
+  const secondsText = remainder.toFixed(1).padStart(4, "0");
   return hours > 0
-    ? `${hours}:${String(minutes).padStart(2, "0")}:${paddedSeconds}`
-    : `${minutes}:${paddedSeconds}`;
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${secondsText}`
+    : `${minutes}:${secondsText}`;
+}
+
+function formatTimeInput(seconds: number): string {
+  const precise = formatPreciseDuration(seconds);
+  return precise.endsWith(".0") ? precise.slice(0, -2) : precise;
+}
+
+function formatSecondsLabel(seconds: number): string {
+  return seconds < 60 ? `${roundTrimTime(seconds).toFixed(1)}초` : formatTimeInput(seconds);
+}
+
+function roundTrimTime(seconds: number): number {
+  return Number((Math.round(seconds / TRIM_STEP_SECONDS) * TRIM_STEP_SECONDS).toFixed(1));
+}
+
+function getFullSourceDuration(): number {
+  return sourceDurationSeconds || recordingDurationSeconds || getRecordingDurationFallback();
+}
+
+function getSelectedTimeRange(duration = getFullSourceDuration()): TimeRange {
+  const end = trimEndSeconds > 0 ? trimEndSeconds : duration;
+  return normalizeTimeRange(trimStartSeconds, end, duration);
+}
+
+function getActiveTimeRange(duration = getFullSourceDuration()): TimeRange | undefined {
+  const range = getSelectedTimeRange(duration);
+  return isFullTimeRange(range, duration) ? undefined : range;
+}
+
+function getSelectedSourceSizeBytes(): number {
+  const totalBytes = parts[0]?.size ?? recording?.totalSize ?? 0;
+  const duration = getFullSourceDuration();
+  return estimateRangeSize(totalBytes, getSelectedTimeRange(duration), duration);
+}
+
+function getRangeFilename(part: LoadedPart, extension: string, range?: TimeRange): string {
+  const base = getFilenameBase(part.filename);
+  if (!range) {
+    return `${base}.${extension}`;
+  }
+  const start = String(roundTrimTime(range.start)).replace(".", "_");
+  const end = String(roundTrimTime(range.end)).replace(".", "_");
+  return `${base}_trim_${start}s-${end}s.${extension}`;
 }
 
 function getStreamerNameFromFilename(): string {
@@ -118,6 +194,25 @@ function createObjectUrlSource(source: Blob | string): { url: string; revoke: bo
   return typeof source === "string"
     ? { url: source, revoke: false }
     : { url: URL.createObjectURL(source), revoke: true };
+}
+
+function releaseVideoSource(video: HTMLVideoElement, url: string, revoke: boolean): void {
+  video.remove();
+  if (revoke) {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function downloadSource(source: Blob | string, filename: string): void {
+  const { url, revoke } = createObjectUrlSource(source);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.rel = "noopener";
+  anchor.click();
+  if (revoke) {
+    window.setTimeout(() => URL.revokeObjectURL(url), DOWNLOAD_URL_REVOKE_DELAY_MS);
+  }
 }
 
 function getPartSource(part: LoadedPart): Blob | string {
@@ -204,16 +299,21 @@ function getConvertedMimeType(format: ConvertFormat): string {
   return format === "gif" ? "image/gif" : `video/${format}`;
 }
 
-async function convertPartWithFfmpeg(part: LoadedPart, outputFormat: ConvertFormat, optimizeSeeking = false): Promise<{ source: Blob; filename: string }> {
+async function convertPartWithFfmpeg(part: LoadedPart, outputFormat: ConvertFormat, optimizeSeeking = false, range?: TimeRange): Promise<{ source: Blob; filename: string }> {
   const ffmpeg = await loadFfmpeg();
   const inputName = `input.${part.extension}`;
   const outputName = `output.${outputFormat}`;
   await clearFfmpegOutputs(ffmpeg);
   try {
     await ffmpeg.writeFile(inputName, await getSourceBytes(getPartSource(part)));
+    const rangeArgs = range
+      ? ["-ss", String(range.start), "-t", String(range.end - range.start)]
+      : [];
     const args = outputFormat === "gif"
-      ? ["-i", inputName, "-an", outputName]
-      : [
+      ? ["-i", inputName, ...rangeArgs, "-an", outputName]
+      : range
+        ? ["-i", inputName, ...rangeArgs, outputName]
+        : [
           "-i", inputName,
           "-map", "0",
           "-c", "copy",
@@ -225,7 +325,7 @@ async function convertPartWithFfmpeg(part: LoadedPart, outputFormat: ConvertForm
       throw new Error("빠른 변환에 실패했습니다.");
     }
     const blob = await readFfmpegBlob(ffmpeg, outputName, getConvertedMimeType(outputFormat));
-    return { source: blob, filename: `${getFilenameBase(part.filename)}.${outputFormat}` };
+    return { source: blob, filename: getRangeFilename(part, outputFormat, range) };
   } finally {
     await clearFfmpegOutputs(ffmpeg);
   }
@@ -254,7 +354,12 @@ function pickRecorderMimeType(format: OutputFormat, preferred = ""): string {
 
 function waitForMediaEvent(video: HTMLVideoElement, eventName: string): Promise<void> {
   return new Promise((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      cleanup();
+      reject(new Error("영상 파일 응답을 기다리는 시간이 초과되었습니다."));
+    }, MEDIA_EVENT_TIMEOUT_MS);
     const cleanup = () => {
+      window.clearTimeout(timeoutId);
       video.removeEventListener(eventName, onEvent);
       video.removeEventListener("error", onError);
     };
@@ -394,15 +499,122 @@ function getSelectedSourcePart(): LoadedPart | undefined {
   return parts[0];
 }
 
+function updateTrimPlayhead(seconds = elements.previewVideo.currentTime): void {
+  const duration = getFullSourceDuration();
+  const percent = duration > 0 ? Math.max(0, Math.min(100, seconds / duration * 100)) : 0;
+  elements.trimTimeline.style.setProperty("--trim-playhead", `${percent}%`);
+}
+
+function updateTrimControlState(): void {
+  const duration = getFullSourceDuration();
+  const range = getSelectedTimeRange(duration);
+  const disabled = workBusy || parts.length === 0 || duration <= 0;
+  elements.trimStartRange.disabled = disabled;
+  elements.trimEndRange.disabled = disabled;
+  elements.trimStartInput.disabled = disabled;
+  elements.trimEndInput.disabled = disabled;
+  elements.trimStartDecreaseButton.disabled = disabled || range.start <= 0;
+  elements.trimStartIncreaseButton.disabled = disabled || range.start >= range.end - TRIM_STEP_SECONDS;
+  elements.trimEndDecreaseButton.disabled = disabled || range.end <= range.start + TRIM_STEP_SECONDS;
+  elements.trimEndIncreaseButton.disabled = disabled || range.end >= duration;
+  elements.trimResetButton.disabled = disabled || isFullTimeRange(range, duration);
+}
+
+function renderTrimEditor(clearPreviousResults = false, seekHandle?: TimeRangeHandle): void {
+  const duration = getFullSourceDuration();
+  const range = getSelectedTimeRange(duration);
+  trimStartSeconds = range.start;
+  trimEndSeconds = range.end;
+
+  const startPercent = duration > 0 ? range.start / duration * 100 : 0;
+  const endPercent = duration > 0 ? range.end / duration * 100 : 100;
+  elements.trimTimeline.style.setProperty("--trim-start", `${startPercent}%`);
+  elements.trimTimeline.style.setProperty("--trim-end", `${endPercent}%`);
+  elements.trimStartRange.max = String(duration);
+  elements.trimEndRange.max = String(duration);
+  elements.trimStartRange.value = String(range.start);
+  elements.trimEndRange.value = String(range.end);
+  elements.trimStartRange.setAttribute("aria-valuetext", formatPreciseDuration(range.start));
+  elements.trimEndRange.setAttribute("aria-valuetext", formatPreciseDuration(range.end));
+  elements.trimStartInput.value = formatTimeInput(range.start);
+  elements.trimEndInput.value = formatTimeInput(range.end);
+  elements.trimStartBubble.value = formatTimeInput(range.start);
+  elements.trimEndBubble.value = formatTimeInput(range.end);
+  elements.trimDurationValue.textContent = formatSecondsLabel(range.end - range.start);
+  updateTrimControlState();
+
+  if (clearPreviousResults) {
+    clearSplitResults();
+  }
+  applySplitValueDefault();
+  renderHeader();
+  renderActions();
+
+  if (seekHandle && elements.previewVideo.readyState >= HTMLMediaElement.HAVE_METADATA) {
+    const target = seekHandle === "start" ? range.start : Math.max(range.start, range.end - 0.01);
+    elements.previewVideo.currentTime = target;
+    updateTrimPlayhead(target);
+  } else {
+    updateTrimPlayhead();
+  }
+}
+
+function setTrimRange(start: number, end: number, changedHandle: TimeRangeHandle, useSecondGuide = false): void {
+  const duration = getFullSourceDuration();
+  const rawValue = changedHandle === "start" ? start : end;
+  const preciseValue = snapTimeRangeValue(rawValue, duration, TRIM_STEP_SECONDS);
+  const guideThreshold = Math.min(0.45, Math.max(0.12, duration / Math.max(1, elements.trimTimeline.clientWidth) * 8));
+  const value = useSecondGuide ? snapTimeRangeToSecond(preciseValue, duration, guideThreshold) : preciseValue;
+  const guided = useSecondGuide
+    && Math.abs(value - Math.round(value)) < 0.001
+    && Math.abs(value - rawValue) <= guideThreshold;
+  elements.trimTimeline.toggleAttribute("data-snap-guide", guided);
+  if (guided) {
+    elements.trimTimeline.style.setProperty("--trim-snap", `${value / duration * 100}%`);
+  }
+  const range = updateTimeRangeHandle(getSelectedTimeRange(duration), changedHandle, value, duration);
+  trimStartSeconds = range.start;
+  trimEndSeconds = range.end;
+  renderTrimEditor(true, changedHandle);
+}
+
+function setSourceDuration(duration: number): void {
+  if (!Number.isFinite(duration) || duration <= 0) {
+    return;
+  }
+
+  const previousDuration = getFullSourceDuration();
+  const wasFullRange = trimEndSeconds <= 0
+    || previousDuration <= 0
+    || isFullTimeRange(getSelectedTimeRange(previousDuration), previousDuration);
+  sourceDurationSeconds = duration;
+  recordingDurationSeconds = duration;
+  if (wasFullRange) {
+    trimStartSeconds = 0;
+    trimEndSeconds = duration;
+  } else {
+    const range = normalizeTimeRange(trimStartSeconds, trimEndSeconds, duration);
+    trimStartSeconds = range.start;
+    trimEndSeconds = range.end;
+  }
+  renderTrimEditor();
+}
+
 function setSplitBusy(isBusy: boolean): void {
+  workBusy = isBusy;
   elements.splitButton.disabled = isBusy || parts.length === 0;
   elements.splitModeSelect.disabled = isBusy || parts.length === 0;
   elements.splitFormatSelect.disabled = isBusy || parts.length === 0;
   elements.splitValueInput.disabled = isBusy;
+  elements.splitValueDecreaseButton.disabled = isBusy || parts.length === 0;
+  elements.splitValueIncreaseButton.disabled = isBusy || parts.length === 0;
+  updateSplitPresetButtons();
+  updateTrimControlState();
   for (const button of elements.convertButtons) {
     button.disabled = isBusy || parts.length === 0;
   }
   elements.downloadAllButton.disabled = isBusy || splitSegments.length === 0;
+  renderActions();
 }
 
 function clearSplitResults(): void {
@@ -413,9 +625,9 @@ function clearSplitResults(): void {
 function renderSplitMode(): void {
   const mode = elements.splitModeSelect.value;
   elements.splitUnitLabel.textContent = mode === "duration" ? "초" : "MB";
-  elements.splitStatus.textContent = mode === "duration"
-    ? "시간 기준으로 나눕니다."
-    : "용량 기준으로 나눕니다.";
+  elements.splitValueInput.min = mode === "duration" ? String(TRIM_STEP_SECONDS) : "1";
+  elements.splitValueInput.step = mode === "duration" ? String(TRIM_STEP_SECONDS) : "1";
+  elements.splitStatus.textContent = "";
   applySplitValueDefault();
 }
 
@@ -440,11 +652,29 @@ function setWorkStatus(message: string): void {
 }
 
 function applySplitValueDefault(): void {
+  const duration = getFullSourceDuration();
+  const range = getSelectedTimeRange(duration);
+  const selectedDuration = range.end - range.start;
+  const selectedSizeMegabytes = estimateRangeSize(sourceSizeMegabytes * 1024 * 1024, range, duration) / 1024 / 1024;
   const value = elements.splitModeSelect.value === "size"
-    ? Math.max(1, Math.ceil(sourceSizeMegabytes))
-    : Math.max(1, Math.ceil(sourceDurationSeconds || recordingDurationSeconds || getRecordingDurationFallback()));
+    ? Math.max(1, Math.ceil(selectedSizeMegabytes))
+    : Math.max(TRIM_STEP_SECONDS, roundTrimTime(selectedDuration));
   elements.splitValueInput.value = String(value);
   elements.splitValueInput.max = String(value);
+  updateSplitPresetButtons();
+}
+
+function updateSplitPresetButtons(): void {
+  const mode = elements.splitModeSelect.value;
+  const maximum = Number(elements.splitValueInput.max);
+  const currentValue = Number(elements.splitValueInput.value);
+  for (const button of elements.splitPresetButtons) {
+    const matchesMode = button.dataset.splitMode === mode;
+    const value = Number(button.dataset.splitValue);
+    button.hidden = !matchesMode;
+    button.disabled = workBusy || parts.length === 0 || value >= maximum;
+    button.setAttribute("aria-pressed", String(matchesMode && value === currentValue));
+  }
 }
 
 async function updateSplitDefaultValues(part: LoadedPart | undefined = getSelectedSourcePart()): Promise<void> {
@@ -453,28 +683,23 @@ async function updateSplitDefaultValues(part: LoadedPart | undefined = getSelect
   }
 
   const requestId = ++splitDefaultRequestId;
-  sourceSizeMegabytes = Math.max(1, Math.ceil(part.size / 1024 / 1024));
+  sourceSizeMegabytes = part.size / 1024 / 1024;
   applySplitValueDefault();
 
   let loaded: Awaited<ReturnType<typeof loadVideoForPart>> | null = null;
   try {
     loaded = await loadVideoForPart(part);
     if (requestId === splitDefaultRequestId) {
-      const durationSeconds = Math.max(1, Math.ceil(loaded.duration));
-      sourceDurationSeconds = durationSeconds;
-      applySplitValueDefault();
+      setSourceDuration(loaded.duration);
     }
   } catch {
     const fallback = recordingDurationSeconds || getRecordingDurationFallback();
     if (requestId === splitDefaultRequestId && fallback > 0) {
-      const durationSeconds = Math.max(1, Math.ceil(fallback));
-      sourceDurationSeconds = durationSeconds;
-      applySplitValueDefault();
+      setSourceDuration(fallback);
     }
   } finally {
-    loaded?.video.remove();
-    if (loaded?.revoke) {
-      URL.revokeObjectURL(loaded.url);
+    if (loaded) {
+      releaseVideoSource(loaded.video, loaded.url, loaded.revoke);
     }
   }
 }
@@ -493,17 +718,18 @@ async function loadVideoForPart(part: LoadedPart): Promise<{ video: HTMLVideoEle
   video.style.height = "1px";
   document.body.appendChild(video);
 
-  await waitForVideoMetadata(video);
-  const duration = await resolveVideoDuration(video) || getRecordingDurationFallback();
-  if (!Number.isFinite(duration) || duration <= 0) {
-    video.remove();
-    if (revoke) {
-      URL.revokeObjectURL(url);
+  try {
+    await waitForVideoMetadata(video);
+    const duration = await resolveVideoDuration(video) || getRecordingDurationFallback();
+    if (!Number.isFinite(duration) || duration <= 0) {
+      throw new Error("영상 길이를 확인할 수 없습니다.");
     }
-    throw new Error("영상 길이를 확인할 수 없습니다.");
-  }
 
-  return { video, url, revoke, duration };
+    return { video, url, revoke, duration };
+  } catch (error) {
+    releaseVideoSource(video, url, revoke);
+    throw error;
+  }
 }
 
 async function seekVideo(video: HTMLVideoElement, seconds: number): Promise<void> {
@@ -527,7 +753,7 @@ async function recordVideoRange(video: HTMLVideoElement, startSeconds: number, e
   const chunks: BlobPart[] = [];
   const options = mimeType ? { mimeType } : undefined;
   const recorder = new MediaRecorder(stream, options);
-  const stopped = new Promise<Blob>((resolve) => {
+  const stopped = new Promise<Blob>((resolve, reject) => {
     recorder.ondataavailable = (event) => {
       if (event.data.size > 0) {
         chunks.push(event.data);
@@ -535,6 +761,9 @@ async function recordVideoRange(video: HTMLVideoElement, startSeconds: number, e
     };
     recorder.onstop = () => {
       resolve(new Blob(chunks, { type: mimeType || "video/webm" }));
+    };
+    recorder.onerror = () => {
+      reject(new Error("영상 파일을 만드는 중 녹화 오류가 발생했습니다."));
     };
   });
 
@@ -560,13 +789,20 @@ async function recordVideoRange(video: HTMLVideoElement, startSeconds: number, e
       };
       video.addEventListener("timeupdate", check);
       video.addEventListener("error", onError, { once: true });
-      timeoutId = window.setTimeout(check, Math.max(250, (endSeconds - startSeconds) * 1000 + 500));
+      timeoutId = window.setTimeout(() => {
+        cleanup();
+        reject(new Error("영상 구간 처리 시간이 초과되었습니다."));
+      }, Math.max(MEDIA_EVENT_TIMEOUT_MS, (endSeconds - startSeconds) * 1000 + MEDIA_EVENT_TIMEOUT_MS));
     });
     video.pause();
     if (recorder.state !== "inactive") {
       recorder.stop();
     }
-    return await stopped;
+    const blob = await stopped;
+    if (blob.size <= 0) {
+      throw new Error("변환된 영상 데이터가 비어 있습니다.");
+    }
+    return blob;
   } finally {
     video.pause();
     if (recorder.state !== "inactive") {
@@ -576,21 +812,23 @@ async function recordVideoRange(video: HTMLVideoElement, startSeconds: number, e
   }
 }
 
-async function createDurationSplitWithRecorder(part: LoadedPart, segmentSeconds: number, outputFormat: OutputFormat): Promise<SplitSegment[]> {
+async function createDurationSplitWithRecorder(part: LoadedPart, segmentSeconds: number, outputFormat: OutputFormat, range?: TimeRange): Promise<SplitSegment[]> {
   const { video, url, revoke, duration } = await loadVideoForPart(part);
   const mimeType = pickRecorderMimeType(outputFormat, part.mimeType);
   const segments: SplitSegment[] = [];
+  const selectedRange = range ? normalizeTimeRange(range.start, range.end, duration) : { start: 0, end: duration };
+  const selectedDuration = selectedRange.end - selectedRange.start;
 
   try {
-    if (segmentSeconds >= duration) {
-      throw new Error("나누기 시간은 원본 영상 시간보다 짧아야 합니다.");
+    if (segmentSeconds >= selectedDuration) {
+      throw new Error("나누기 시간은 선택 구간보다 짧아야 합니다.");
     }
 
-    const total = Math.ceil(duration / segmentSeconds);
+    const total = Math.ceil(selectedDuration / segmentSeconds);
     setSplitProgress(0, total);
     for (let index = 0; index < total; index += 1) {
-      const start = index * segmentSeconds;
-      const end = Math.min(duration, start + segmentSeconds);
+      const start = selectedRange.start + index * segmentSeconds;
+      const end = Math.min(selectedRange.end, start + segmentSeconds);
       elements.splitStatus.textContent = `${index + 1}/${total}번째 파일을 만드는 중입니다.`;
       const blob = await recordVideoRange(video, start, end, mimeType);
       segments.push({
@@ -603,23 +841,19 @@ async function createDurationSplitWithRecorder(part: LoadedPart, segmentSeconds:
       setSplitProgress(index + 1, total);
     }
   } finally {
-    video.remove();
-    if (revoke) {
-      URL.revokeObjectURL(url);
-    }
+    releaseVideoSource(video, url, revoke);
   }
 
   return segments;
 }
 
-async function createDurationSplitWithFfmpeg(part: LoadedPart, segmentSeconds: number, outputFormat: OutputFormat): Promise<SplitSegment[]> {
+async function createDurationSplitWithFfmpeg(part: LoadedPart, segmentSeconds: number, outputFormat: OutputFormat, range?: TimeRange): Promise<SplitSegment[]> {
   const { video, url, revoke, duration } = await loadVideoForPart(part);
-  video.remove();
-  if (revoke) {
-    URL.revokeObjectURL(url);
-  }
-  if (segmentSeconds >= duration) {
-    throw new Error("나누기 시간은 원본 영상 시간보다 짧아야 합니다.");
+  releaseVideoSource(video, url, revoke);
+  const selectedRange = range ? normalizeTimeRange(range.start, range.end, duration) : { start: 0, end: duration };
+  const selectedDuration = selectedRange.end - selectedRange.start;
+  if (segmentSeconds >= selectedDuration) {
+    throw new Error("나누기 시간은 선택 구간보다 짧아야 합니다.");
   }
 
   const ffmpeg = await loadFfmpeg();
@@ -630,6 +864,7 @@ async function createDurationSplitWithFfmpeg(part: LoadedPart, segmentSeconds: n
     const pattern = `output%03d.${outputFormat}`;
     const code = await ffmpeg.exec([
       "-i", inputName,
+      ...(range ? ["-ss", String(selectedRange.start), "-t", String(selectedDuration)] : []),
       "-map", "0",
       "-f", "segment",
       "-segment_time", String(segmentSeconds),
@@ -646,8 +881,8 @@ async function createDurationSplitWithFfmpeg(part: LoadedPart, segmentSeconds: n
       .sort((a, b) => a.name.localeCompare(b.name));
     const segments: SplitSegment[] = [];
     for (let index = 0; index < files.length; index += 1) {
-      const start = index * segmentSeconds;
-      const end = Math.min(duration, start + segmentSeconds);
+      const start = selectedRange.start + index * segmentSeconds;
+      const end = Math.min(selectedRange.end, start + segmentSeconds);
       segments.push({
         blob: await readFfmpegBlob(ffmpeg, files[index].name, `video/${outputFormat}`),
         filename: `${getFilenameBase(part.filename)}_split_${String(index + 1).padStart(3, "0")}.${outputFormat}`,
@@ -663,61 +898,58 @@ async function createDurationSplitWithFfmpeg(part: LoadedPart, segmentSeconds: n
   }
 }
 
-async function createDurationSplit(part: LoadedPart, segmentSeconds: number, outputFormat: OutputFormat): Promise<SplitSegment[]> {
+async function createDurationSplit(part: LoadedPart, segmentSeconds: number, outputFormat: OutputFormat, range?: TimeRange): Promise<SplitSegment[]> {
   try {
-    return await createDurationSplitWithFfmpeg(part, segmentSeconds, outputFormat);
+    return await createDurationSplitWithFfmpeg(part, segmentSeconds, outputFormat, range);
   } catch {
-    return await createDurationSplitWithRecorder(part, segmentSeconds, outputFormat);
+    return await createDurationSplitWithRecorder(part, segmentSeconds, outputFormat, range);
   }
 }
 
-async function createSizeSplit(part: LoadedPart, maxMegabytes: number, outputFormat: OutputFormat): Promise<SplitSegment[]> {
+async function createSizeSplit(part: LoadedPart, maxMegabytes: number, outputFormat: OutputFormat, range?: TimeRange): Promise<SplitSegment[]> {
   const { video, url, revoke, duration } = await loadVideoForPart(part);
-  video.remove();
-  if (revoke) {
-    URL.revokeObjectURL(url);
-  }
+  releaseVideoSource(video, url, revoke);
 
   const maxBytes = maxMegabytes * 1024 * 1024;
-  if (maxBytes >= part.size) {
-    throw new Error("나누기 용량은 원본 파일 용량보다 작아야 합니다.");
+  const selectedRange = range ? normalizeTimeRange(range.start, range.end, duration) : { start: 0, end: duration };
+  const selectedSize = estimateRangeSize(part.size, selectedRange, duration);
+  if (maxBytes >= selectedSize) {
+    throw new Error("나누기 용량은 선택 구간의 예상 용량보다 작아야 합니다.");
   }
 
   const averageBytesPerSecond = Math.max(1, part.size / duration);
   const segmentSeconds = Math.max(1, Math.floor(maxBytes / averageBytesPerSecond));
-  return await createDurationSplit(part, segmentSeconds, outputFormat);
+  return await createDurationSplit(part, segmentSeconds, outputFormat, selectedRange);
 }
 
-async function convertPartWithRecorder(part: LoadedPart, outputFormat: OutputFormat): Promise<{ source: Blob | string; filename: string }> {
-  if (part.extension === outputFormat) {
+async function convertPartWithRecorder(part: LoadedPart, outputFormat: OutputFormat, range?: TimeRange): Promise<{ source: Blob | string; filename: string }> {
+  if (part.extension === outputFormat && !range) {
     return { source: getPartSource(part), filename: part.filename };
   }
 
   const { video, url, revoke, duration } = await loadVideoForPart(part);
   try {
     const mimeType = pickRecorderMimeType(outputFormat, part.mimeType);
-    const blob = await recordVideoRange(video, 0, duration, mimeType);
-    return { source: blob, filename: `${getFilenameBase(part.filename)}.${outputFormat}` };
+    const selectedRange = range ? normalizeTimeRange(range.start, range.end, duration) : { start: 0, end: duration };
+    const blob = await recordVideoRange(video, selectedRange.start, selectedRange.end, mimeType);
+    return { source: blob, filename: getRangeFilename(part, outputFormat, range) };
   } finally {
-    video.remove();
-    if (revoke) {
-      URL.revokeObjectURL(url);
-    }
+    releaseVideoSource(video, url, revoke);
   }
 }
 
-async function convertPart(part: LoadedPart, outputFormat: ConvertFormat): Promise<{ source: Blob | string; filename: string }> {
-  if (part.extension === outputFormat) {
+async function convertPart(part: LoadedPart, outputFormat: ConvertFormat, range?: TimeRange): Promise<{ source: Blob | string; filename: string }> {
+  if (part.extension === outputFormat && !range) {
     return { source: getPartSource(part), filename: part.filename };
   }
 
   try {
-    return await convertPartWithFfmpeg(part, outputFormat);
+    return await convertPartWithFfmpeg(part, outputFormat, false, range);
   } catch {
     if (outputFormat === "gif") {
       throw new Error(`${outputFormat.toUpperCase()} 변환에 실패했습니다.`);
     }
-    return await convertPartWithRecorder(part, outputFormat);
+    return await convertPartWithRecorder(part, outputFormat, range);
   }
 }
 
@@ -764,14 +996,20 @@ function renderHeader(): void {
   }
 
   elements.title.textContent = "녹화 결과";
-  const duration = recordingDurationSeconds || getRecordingDurationFallback();
+  const range = getSelectedTimeRange();
+  const duration = range.end - range.start;
   const streamer = getStreamerNameFromFilename();
-  const summary = [streamer, recording.actualExtension.toUpperCase(), formatBytes(recording.totalSize), formatDuration(duration)].filter(Boolean).join(" · ");
+  const size = `${getActiveTimeRange() ? "예상 " : ""}${formatBytes(getSelectedSourceSizeBytes())}`;
+  const summary = [streamer, recording.actualExtension.toUpperCase(), size, formatTimeInput(duration)].filter(Boolean).join(" · ");
   elements.formatChip.textContent = summary;
 }
 
 function renderActions(): void {
-  if (!recording || parts.length === 0) {
+  const hasSelectedRange = Boolean(getActiveTimeRange());
+  elements.downloadOriginalButton.hidden = !hasSelectedRange;
+  elements.downloadCurrentLabel.textContent = hasSelectedRange ? "구간 다운로드" : "다운로드";
+  if (!recording || parts.length === 0 || workBusy) {
+    elements.downloadOriginalButton.disabled = true;
     elements.downloadCurrentButton.disabled = true;
     for (const button of elements.convertButtons) {
       button.disabled = true;
@@ -780,6 +1018,7 @@ function renderActions(): void {
     return;
   }
 
+  elements.downloadOriginalButton.disabled = false;
   elements.downloadCurrentButton.disabled = false;
   elements.downloadAllButton.disabled = splitSegments.length === 0;
 }
@@ -799,7 +1038,7 @@ function renderSplitDownloads(): void {
 
     const meta = document.createElement("span");
     meta.className = "split-chip-meta";
-    meta.textContent = `${formatDuration(segment.startSeconds)} - ${formatDuration(segment.endSeconds)} · ${formatBytes(segment.blob.size)}`;
+    meta.textContent = `${formatTimeInput(segment.startSeconds)} - ${formatTimeInput(segment.endSeconds)} · ${formatBytes(segment.blob.size)}`;
 
     const button = document.createElement("button");
     button.className = "button primary icon-button";
@@ -808,15 +1047,7 @@ function renderSplitDownloads(): void {
     button.title = "다운로드";
     button.setAttribute("aria-label", `${segment.index}번 파일 다운로드`);
     button.addEventListener("click", () => {
-      const { url, revoke } = createObjectUrlSource(segment.blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = segment.filename;
-      anchor.rel = "noopener";
-      anchor.click();
-      if (revoke) {
-        window.setTimeout(() => URL.revokeObjectURL(url), DOWNLOAD_URL_REVOKE_DELAY_MS);
-      }
+      downloadSource(segment.blob, segment.filename);
     });
 
     chip.append(index, meta, button);
@@ -839,27 +1070,21 @@ function renderParts(): void {
 
   elements.emptyMessage.textContent = "";
   elements.splitFormatSelect.value = RECORDING_FORMAT.mp4;
+  const fallbackDuration = recordingDurationSeconds || getRecordingDurationFallback();
+  if (fallbackDuration > 0) {
+    setSourceDuration(fallbackDuration);
+  }
   renderSplitMode();
   setPreviewFromPart(parts[0]);
   void updateSplitDefaultValues(parts[0]);
   renderSplitDownloads();
-
-  renderActions();
   setSplitBusy(false);
 }
 
 async function downloadSourcesSequentially(items: Array<{ source: Blob | string; filename: string }>): Promise<void> {
   for (const item of [...items].sort((a, b) => a.filename.localeCompare(b.filename, undefined, { numeric: true }))) {
-    const { url, revoke } = createObjectUrlSource(item.source);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = item.filename;
-    anchor.rel = "noopener";
-    anchor.click();
-    if (revoke) {
-      window.setTimeout(() => URL.revokeObjectURL(url), DOWNLOAD_URL_REVOKE_DELAY_MS);
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, SEQUENTIAL_DOWNLOAD_DELAY_MS));
+    downloadSource(item.source, item.filename);
+    await delay(SEQUENTIAL_DOWNLOAD_DELAY_MS);
   }
 }
 
@@ -904,8 +1129,8 @@ async function boot(): Promise<void> {
     if (recording || parts.length > 0) {
       break;
     }
-    elements.emptyMessage.textContent = "녹화 파일을 저장 중입니다.";
-    await new Promise((resolve) => window.setTimeout(resolve, RESULT_LOAD_RETRY_MS));
+    elements.resultLoadingMessage.textContent = "녹화 파일을 저장하는 중입니다.";
+    await delay(RESULT_LOAD_RETRY_MS);
   }
 
   recording = recording ?? buildRecordingFromParts(recordingId, parts);
@@ -923,6 +1148,7 @@ async function boot(): Promise<void> {
   }
 
   renderHeader();
+  elements.resultLoadingMessage.textContent = "미리보기를 준비하는 중입니다.";
   try {
     await prepareSeekablePreview();
   } catch {
@@ -936,6 +1162,36 @@ async function boot(): Promise<void> {
 }
 
 elements.downloadCurrentButton.addEventListener("click", () => {
+  void (async () => {
+    const range = getActiveTimeRange();
+    if (!range) {
+      await downloadSourcesSequentially(parts.map((part) => ({ source: getPartSource(part), filename: part.filename })));
+      return;
+    }
+
+    const part = getSelectedSourcePart();
+    if (!part) {
+      return;
+    }
+
+    setSplitBusy(true);
+    setSplitProgress(0, 1);
+    try {
+      setWorkStatus("선택 구간을 준비하는 중입니다.");
+      const item = await convertPart(part, part.extension, range);
+      setSplitProgress(1, 1);
+      await downloadSourcesSequentially([item]);
+      setWorkStatus("선택 구간 다운로드가 준비되었습니다.");
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "선택 구간을 만들지 못했습니다.");
+    } finally {
+      hideSplitProgress();
+      setSplitBusy(false);
+    }
+  })();
+});
+
+elements.downloadOriginalButton.addEventListener("click", () => {
   void downloadSourcesSequentially(parts.map((part) => ({ source: getPartSource(part), filename: part.filename })));
 });
 
@@ -948,14 +1204,16 @@ for (const button of elements.convertButtons) {
   button.addEventListener("click", () => {
     void (async () => {
       setSplitBusy(true);
-      setSplitProgress(0, Math.max(1, parts.length));
       try {
         const outputFormat = (button.dataset.convertFormat ?? RECORDING_FORMAT.mp4) as ConvertFormat;
+        const range = getActiveTimeRange();
+        const sourceParts = range ? [getSelectedSourcePart()].filter((part): part is LoadedPart => Boolean(part)) : parts;
+        setSplitProgress(0, Math.max(1, sourceParts.length));
         setWorkStatus(`${outputFormat.toUpperCase()} 변환 중입니다.`);
         const items: Array<{ source: Blob | string; filename: string }> = [];
-        for (const [index, part] of parts.entries()) {
-          items.push(await convertPart(part, outputFormat));
-          setSplitProgress(index + 1, parts.length);
+        for (const [index, part] of sourceParts.entries()) {
+          items.push(await convertPart(part, outputFormat, range));
+          setSplitProgress(index + 1, sourceParts.length);
         }
         await downloadSourcesSequentially(items);
         setWorkStatus(`${outputFormat.toUpperCase()} 변환이 완료되었습니다.`);
@@ -976,14 +1234,111 @@ elements.downloadAllButton.addEventListener("click", () => {
 
 elements.previewVideo.addEventListener("loadedmetadata", () => {
   if (Number.isFinite(elements.previewVideo.duration) && elements.previewVideo.duration > 0) {
-    recordingDurationSeconds = elements.previewVideo.duration;
-    renderHeader();
+    setSourceDuration(elements.previewVideo.duration);
   }
 });
+
+elements.previewVideo.addEventListener("play", () => {
+  const range = getSelectedTimeRange();
+  if (elements.previewVideo.currentTime < range.start || elements.previewVideo.currentTime >= range.end - 0.05) {
+    elements.previewVideo.currentTime = range.start;
+  }
+});
+
+elements.previewVideo.addEventListener("timeupdate", () => {
+  const range = getSelectedTimeRange();
+  const currentTime = elements.previewVideo.currentTime;
+  if (currentTime < range.start - 0.05) {
+    elements.previewVideo.currentTime = range.start;
+    updateTrimPlayhead(range.start);
+    return;
+  }
+  if (currentTime >= range.end - 0.02 && !elements.previewVideo.paused) {
+    elements.previewVideo.pause();
+    elements.previewVideo.currentTime = range.end;
+    updateTrimPlayhead(range.end);
+    return;
+  }
+  if (currentTime > range.end + 0.05) {
+    elements.previewVideo.currentTime = range.end;
+    updateTrimPlayhead(range.end);
+    return;
+  }
+  updateTrimPlayhead(currentTime);
+});
+
+elements.trimStartRange.addEventListener("input", () => {
+  setTrimRange(Number(elements.trimStartRange.value), trimEndSeconds, "start", true);
+});
+
+elements.trimEndRange.addEventListener("input", () => {
+  setTrimRange(trimStartSeconds, Number(elements.trimEndRange.value), "end", true);
+});
+
+for (const input of [elements.trimStartRange, elements.trimEndRange]) {
+  input.addEventListener("change", () => elements.trimTimeline.removeAttribute("data-snap-guide"));
+}
+
+elements.trimStartInput.addEventListener("change", () => {
+  const value = parseTimeInput(elements.trimStartInput.value);
+  setTrimRange(Number.isFinite(value) ? value : trimStartSeconds, trimEndSeconds, "start");
+});
+
+elements.trimEndInput.addEventListener("change", () => {
+  const value = parseTimeInput(elements.trimEndInput.value);
+  setTrimRange(trimStartSeconds, Number.isFinite(value) ? value : trimEndSeconds, "end");
+});
+
+elements.trimStartDecreaseButton.addEventListener("click", () => {
+  setTrimRange(trimStartSeconds - TRIM_STEP_SECONDS, trimEndSeconds, "start");
+});
+
+elements.trimStartIncreaseButton.addEventListener("click", () => {
+  setTrimRange(trimStartSeconds + TRIM_STEP_SECONDS, trimEndSeconds, "start");
+});
+
+elements.trimEndDecreaseButton.addEventListener("click", () => {
+  setTrimRange(trimStartSeconds, trimEndSeconds - TRIM_STEP_SECONDS, "end");
+});
+
+elements.trimEndIncreaseButton.addEventListener("click", () => {
+  setTrimRange(trimStartSeconds, trimEndSeconds + TRIM_STEP_SECONDS, "end");
+});
+
+elements.trimResetButton.addEventListener("click", () => {
+  const duration = getFullSourceDuration();
+  trimStartSeconds = 0;
+  trimEndSeconds = duration;
+  renderTrimEditor(true, "start");
+});
+
+for (const [handle, input] of [["start", elements.trimStartRange], ["end", elements.trimEndRange]] as const) {
+  const activate = () => {
+    elements.trimTimeline.dataset.activeHandle = handle;
+  };
+  input.addEventListener("pointerdown", activate);
+  input.addEventListener("focus", activate);
+}
 
 elements.splitModeSelect.addEventListener("change", () => {
   renderSplitMode();
 });
+
+for (const [button, direction] of [[elements.splitValueDecreaseButton, -1], [elements.splitValueIncreaseButton, 1]] as const) {
+  button.addEventListener("click", () => {
+    direction < 0 ? elements.splitValueInput.stepDown() : elements.splitValueInput.stepUp();
+    updateSplitPresetButtons();
+  });
+}
+
+elements.splitValueInput.addEventListener("input", () => updateSplitPresetButtons());
+
+for (const button of elements.splitPresetButtons) {
+  button.addEventListener("click", () => {
+    elements.splitValueInput.value = button.dataset.splitValue ?? "45";
+    updateSplitPresetButtons();
+  });
+}
 
 elements.splitButton.addEventListener("click", () => {
   void (async () => {
@@ -998,10 +1353,16 @@ elements.splitButton.addEventListener("click", () => {
     try {
       const mode = elements.splitModeSelect.value;
       const outputFormat = elements.splitFormatSelect.value === RECORDING_FORMAT.mp4 ? RECORDING_FORMAT.mp4 : RECORDING_FORMAT.webm;
-      const splitValue = Math.max(1, Number(elements.splitValueInput.value || 1));
+      const minimum = mode === "duration" ? TRIM_STEP_SECONDS : 1;
+      const splitValue = Math.max(minimum, Number(elements.splitValueInput.value || minimum));
+      const range = getActiveTimeRange();
+      const selectedRange = getSelectedTimeRange();
+      if (mode === "duration" && splitValue >= roundTrimTime(selectedRange.end - selectedRange.start)) {
+        throw new Error("나누기 시간은 선택 구간보다 짧아야 합니다.");
+      }
       const segments = mode === "size"
-        ? await createSizeSplit(part, splitValue, outputFormat)
-        : await createDurationSplit(part, splitValue, outputFormat);
+        ? await createSizeSplit(part, splitValue, outputFormat, range)
+        : await createDurationSplit(part, splitValue, outputFormat, range);
 
       renderSplitResults(segments);
       setWorkStatus("파일 나누기가 완료되었습니다.");
@@ -1027,4 +1388,6 @@ window.addEventListener("unload", () => {
 
 void boot().catch((error: Error) => {
   elements.emptyMessage.textContent = error.message;
+}).finally(() => {
+  elements.resultLoading.hidden = true;
 });

@@ -1,6 +1,6 @@
 import { DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, DEFAULT_SETTINGS, DEFAULT_SHORTCUT_KEYS, FPS_WARNING_VIDEO_BITS_PER_SECOND, MAX_MULTI_REGION_COUNT, MAX_SEEK_SECONDS, MAX_VIDEO_BITS_PER_SECOND, MIN_MULTI_REGION_COUNT, MIN_SEEK_SECONDS, MIN_VIDEO_BITS_PER_SECOND, RECORDING_FORMAT, RECORDING_MODE, RECORDING_STATUS, type AppState, type RecordingFormat, type Settings, type ShortcutAction } from "../shared/types.js";
 import { loadAppState, normalizeRecordingState, normalizeRegion, normalizeRegions, normalizeSettings, saveSettings } from "../shared/storage.js";
-import type { MessageResponse } from "../shared/messages.js";
+import type { MessageResponse, PopupCommand } from "../shared/messages.js";
 
 const elements = {
   versionBadge: document.getElementById("version-badge") as HTMLSpanElement,
@@ -237,7 +237,7 @@ async function stepMultiRegionCount(direction: -1 | 1): Promise<void> {
   await persistUiSettings();
 }
 
-async function sendCommand<T = undefined>(message: { type: string }): Promise<MessageResponse<T>> {
+async function sendCommand<T = undefined>(message: PopupCommand): Promise<MessageResponse<T>> {
   return (await chrome.runtime.sendMessage(message)) as MessageResponse<T>;
 }
 

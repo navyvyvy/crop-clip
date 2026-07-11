@@ -1,11 +1,12 @@
 {
   "name": "crop-clip",
   "private": true,
-  "version": "0.2.2",
+  "version": "0.2.3",
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
     "check:layout": "node scripts/check-layout.mjs",
+    "check:range": "npm run build --silent && node scripts/check-time-range.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
