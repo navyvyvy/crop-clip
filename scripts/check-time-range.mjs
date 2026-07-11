@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { estimateRangeSize, isFullTimeRange, normalizeTimeRange, parseTimeInput, snapTimeRangeToSecond, snapTimeRangeValue, updateTimeRangeHandle } from "../dist/shared/time_range.js";
+import { estimateRangeSize, isFullTimeRange, normalizeTimeRange, parseTimeInput, snapTimeRangeValue, updateTimeRangeHandle } from "../dist/shared/time_range.js";
 
 assert.deepEqual(normalizeTimeRange(-5, 80, 50), { start: 0, end: 50 });
 assert.deepEqual(normalizeTimeRange(10, 40, 50), { start: 10, end: 40 });
@@ -16,7 +16,5 @@ assert.equal(Number.isNaN(parseTimeInput("1::3")), true);
 assert.equal(snapTimeRangeValue(3.1, 3.143), 3.143);
 assert.equal(snapTimeRangeValue(0.02, 3.143), 0);
 assert.equal(snapTimeRangeValue(8.7, 20), 8.7);
-assert.equal(snapTimeRangeToSecond(4.12, 10, 0.15), 4);
-assert.equal(snapTimeRangeToSecond(4.2, 10, 0.15), 4.2);
 
 console.log("time range checks passed");

@@ -44,14 +44,6 @@ export function snapTimeRangeValue(value: number, duration: number, step = MIN_T
   return Number((Math.round(value / step) * step).toFixed(10));
 }
 
-export function snapTimeRangeToSecond(value: number, duration: number, threshold: number): number {
-  if (!Number.isFinite(value) || !Number.isFinite(duration) || !Number.isFinite(threshold) || duration <= 0 || threshold <= 0) {
-    return value;
-  }
-  const second = Math.round(value);
-  return second >= 0 && second <= duration && Math.abs(value - second) <= threshold ? second : value;
-}
-
 export function isFullTimeRange(range: TimeRange, duration: number): boolean {
   return range.start < 0.05 && Math.abs(range.end - duration) < 0.05;
 }

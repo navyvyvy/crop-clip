@@ -5,7 +5,6 @@ import {
   isFullTimeRange,
   normalizeTimeRange,
   parseTimeInput,
-  snapTimeRangeToSecond,
   snapTimeRangeValue,
   updateTimeRangeHandle,
   type TimeRange,
@@ -72,6 +71,7 @@ let splitDefaultRequestId = 0;
 let sourceDurationSeconds = 0;
 let sourceSizeMegabytes = 0;
 let ffmpegLoadPromise: Promise<FfmpegLike> | null = null;
+let ffmpegProgressBase = 0;
 let trimStartSeconds = 0;
 let trimEndSeconds = 0;
 let workBusy = false;
@@ -112,6 +112,7 @@ const SEQUENTIAL_DOWNLOAD_DELAY_MS = 350;
 const SEEK_METADATA_VERSION = 1;
 const TRIM_STEP_SECONDS = 0.1;
 const MEDIA_EVENT_TIMEOUT_MS = 15_000;
+const FFMPEG_EXEC_PROGRESS_MAX = 92;
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) {
@@ -241,22 +242,34 @@ async function getSourceBytes(source: Blob | string): Promise<Uint8Array> {
   return new Uint8Array(data);
 }
 
+function setProgressPercent(percent: number): void {
+  elements.splitProgress.hidden = false;
+  elements.splitProgressBar.style.width = `${Math.max(0, Math.min(100, Math.round(percent)))}%`;
+}
+
+function setFfmpegProgressBase(percent: number): void {
+  ffmpegProgressBase = percent;
+  elements.splitProgressBar.toggleAttribute("data-preparing", percent < 18);
+  setProgressPercent(percent);
+}
+
 async function loadFfmpeg(): Promise<FfmpegLike> {
   if (!ffmpegLoadPromise) {
     ffmpegLoadPromise = (async () => {
       setWorkStatus("변환 엔진을 불러오는 중입니다.");
+      setFfmpegProgressBase(3);
       const module = await import(chrome.runtime.getURL("vendor/ffmpeg/ffmpeg/index.js")) as { FFmpeg: new () => FfmpegLike };
       const ffmpeg = new module.FFmpeg();
       ffmpeg.on("progress", ({ progress }) => {
         if (typeof progress === "number" && Number.isFinite(progress)) {
-          elements.splitProgress.hidden = false;
-          elements.splitProgressBar.style.width = `${Math.max(0, Math.min(100, Math.round(progress * 100)))}%`;
+          setProgressPercent(ffmpegProgressBase + progress * (FFMPEG_EXEC_PROGRESS_MAX - ffmpegProgressBase));
         }
       });
       await ffmpeg.load({
         coreURL: chrome.runtime.getURL("vendor/ffmpeg/core/ffmpeg-core.js"),
         wasmURL: chrome.runtime.getURL("vendor/ffmpeg/core/ffmpeg-core.wasm"),
       });
+      setFfmpegProgressBase(8);
       return ffmpeg;
     })().catch((error) => {
       ffmpegLoadPromise = null;
@@ -303,16 +316,21 @@ async function convertPartWithFfmpeg(part: LoadedPart, outputFormat: ConvertForm
   const ffmpeg = await loadFfmpeg();
   const inputName = `input.${part.extension}`;
   const outputName = `output.${outputFormat}`;
+  setFfmpegProgressBase(8);
   await clearFfmpegOutputs(ffmpeg);
   try {
-    await ffmpeg.writeFile(inputName, await getSourceBytes(getPartSource(part)));
-    const rangeArgs = range
-      ? ["-ss", String(range.start), "-t", String(range.end - range.start)]
-      : [];
+    setWorkStatus("원본 파일을 준비하는 중입니다.");
+    setFfmpegProgressBase(10);
+    const sourceBytes = await getSourceBytes(getPartSource(part));
+    setFfmpegProgressBase(14);
+    await ffmpeg.writeFile(inputName, sourceBytes);
+    setFfmpegProgressBase(18);
+    const seekArgs = range ? ["-ss", String(range.start)] : [];
+    const durationArgs = range ? ["-t", String(range.end - range.start)] : [];
     const args = outputFormat === "gif"
-      ? ["-i", inputName, ...rangeArgs, "-an", outputName]
+      ? [...seekArgs, "-i", inputName, ...durationArgs, "-an", outputName]
       : range
-        ? ["-i", inputName, ...rangeArgs, outputName]
+        ? [...seekArgs, "-i", inputName, ...durationArgs, outputName]
         : [
           "-i", inputName,
           "-map", "0",
@@ -324,7 +342,9 @@ async function convertPartWithFfmpeg(part: LoadedPart, outputFormat: ConvertForm
     if (code !== 0) {
       throw new Error("빠른 변환에 실패했습니다.");
     }
+    setProgressPercent(94);
     const blob = await readFfmpegBlob(ffmpeg, outputName, getConvertedMimeType(outputFormat));
+    setProgressPercent(98);
     return { source: blob, filename: getRangeFilename(part, outputFormat, range) };
   } finally {
     await clearFfmpegOutputs(ffmpeg);
@@ -559,19 +579,9 @@ function renderTrimEditor(clearPreviousResults = false, seekHandle?: TimeRangeHa
   }
 }
 
-function setTrimRange(start: number, end: number, changedHandle: TimeRangeHandle, useSecondGuide = false): void {
+function setTrimRange(start: number, end: number, changedHandle: TimeRangeHandle): void {
   const duration = getFullSourceDuration();
-  const rawValue = changedHandle === "start" ? start : end;
-  const preciseValue = snapTimeRangeValue(rawValue, duration, TRIM_STEP_SECONDS);
-  const guideThreshold = Math.min(0.45, Math.max(0.12, duration / Math.max(1, elements.trimTimeline.clientWidth) * 8));
-  const value = useSecondGuide ? snapTimeRangeToSecond(preciseValue, duration, guideThreshold) : preciseValue;
-  const guided = useSecondGuide
-    && Math.abs(value - Math.round(value)) < 0.001
-    && Math.abs(value - rawValue) <= guideThreshold;
-  elements.trimTimeline.toggleAttribute("data-snap-guide", guided);
-  if (guided) {
-    elements.trimTimeline.style.setProperty("--trim-snap", `${value / duration * 100}%`);
-  }
+  const value = snapTimeRangeValue(changedHandle === "start" ? start : end, duration, TRIM_STEP_SECONDS);
   const range = updateTimeRangeHandle(getSelectedTimeRange(duration), changedHandle, value, duration);
   trimStartSeconds = range.start;
   trimEndSeconds = range.end;
@@ -637,13 +647,14 @@ function renderSplitResults(segments: SplitSegment[]): void {
 }
 
 function setSplitProgress(done: number, total: number): void {
-  elements.splitProgress.hidden = false;
+  elements.splitProgressBar.removeAttribute("data-preparing");
   const percent = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
-  elements.splitProgressBar.style.width = `${percent}%`;
+  setProgressPercent(percent);
 }
 
 function hideSplitProgress(): void {
   elements.splitProgress.hidden = true;
+  elements.splitProgressBar.removeAttribute("data-preparing");
   elements.splitProgressBar.style.width = "0";
 }
 
@@ -858,9 +869,15 @@ async function createDurationSplitWithFfmpeg(part: LoadedPart, segmentSeconds: n
 
   const ffmpeg = await loadFfmpeg();
   const inputName = `input.${part.extension}`;
+  setFfmpegProgressBase(8);
   await clearFfmpegOutputs(ffmpeg);
   try {
-    await ffmpeg.writeFile(inputName, await getSourceBytes(getPartSource(part)));
+    setWorkStatus("원본 파일을 준비하는 중입니다.");
+    setFfmpegProgressBase(10);
+    const sourceBytes = await getSourceBytes(getPartSource(part));
+    setFfmpegProgressBase(14);
+    await ffmpeg.writeFile(inputName, sourceBytes);
+    setFfmpegProgressBase(18);
     const pattern = `output%03d.${outputFormat}`;
     const code = await ffmpeg.exec([
       "-i", inputName,
@@ -890,7 +907,7 @@ async function createDurationSplitWithFfmpeg(part: LoadedPart, segmentSeconds: n
         startSeconds: start,
         endSeconds: end,
       });
-      setSplitProgress(index + 1, files.length);
+      setProgressPercent(FFMPEG_EXEC_PROGRESS_MAX + (index + 1) / files.length * (100 - FFMPEG_EXEC_PROGRESS_MAX));
     }
     return segments;
   } finally {
@@ -1268,16 +1285,12 @@ elements.previewVideo.addEventListener("timeupdate", () => {
 });
 
 elements.trimStartRange.addEventListener("input", () => {
-  setTrimRange(Number(elements.trimStartRange.value), trimEndSeconds, "start", true);
+  setTrimRange(Number(elements.trimStartRange.value), trimEndSeconds, "start");
 });
 
 elements.trimEndRange.addEventListener("input", () => {
-  setTrimRange(trimStartSeconds, Number(elements.trimEndRange.value), "end", true);
+  setTrimRange(trimStartSeconds, Number(elements.trimEndRange.value), "end");
 });
-
-for (const input of [elements.trimStartRange, elements.trimEndRange]) {
-  input.addEventListener("change", () => elements.trimTimeline.removeAttribute("data-snap-guide"));
-}
 
 elements.trimStartInput.addEventListener("change", () => {
   const value = parseTimeInput(elements.trimStartInput.value);
