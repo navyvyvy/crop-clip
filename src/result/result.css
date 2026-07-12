@@ -368,25 +368,103 @@ select:focus-visible {
   box-shadow: inset 0 0 0 1px rgba(169, 195, 211, 0.18);
 }
 
+.trim-rail::before,
+.trim-rail::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  bottom: 0;
+  background: rgba(3, 6, 8, 0.68);
+  pointer-events: none;
+}
+
+.trim-rail::before {
+  left: 0;
+  width: var(--trim-start);
+}
+
+.trim-rail::after {
+  right: 0;
+  left: var(--trim-end);
+}
+
+.trim-thumbnails {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  background: #18242e;
+}
+
+.trim-thumbnails[data-loading]:empty {
+  background: linear-gradient(90deg, #18242e 0 35%, #223440 50%, #18242e 65% 100%);
+  background-size: 220% 100%;
+  animation: thumbnail-loading 1.2s linear infinite;
+}
+
+.trim-thumbnail {
+  min-width: 0;
+  flex: 1;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  background: #18242e;
+  cursor: pointer;
+}
+
+.trim-thumbnail img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.82;
+  transition: opacity 160ms ease;
+}
+
+.trim-thumbnail:hover img,
+.trim-thumbnail:focus-visible img {
+  opacity: 1;
+}
+
+.trim-thumbnail.is-active {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid rgba(255, 255, 255, 0.9);
+  outline-offset: -2px;
+}
+
+.trim-thumbnail.is-active img {
+  opacity: 1;
+}
+
+@keyframes thumbnail-loading {
+  to {
+    background-position: -220% 0;
+  }
+}
+
 .trim-selection {
   position: absolute;
+  z-index: 2;
   top: 0;
   bottom: 0;
   left: var(--trim-start);
   width: calc(var(--trim-end) - var(--trim-start));
-  background: var(--primary);
+  background: rgba(67, 196, 135, 0.16);
+  box-shadow: inset 0 2px var(--primary), inset 0 -2px var(--primary);
+  pointer-events: none;
 }
 
 .trim-selection::after {
   content: "";
   position: absolute;
   inset: 0;
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .trim-ticks {
   position: absolute;
-  z-index: 2;
+  z-index: 3;
   right: 0;
   bottom: 3px;
   left: 0;
@@ -407,7 +485,7 @@ select:focus-visible {
 
 .trim-playhead {
   position: absolute;
-  z-index: 3;
+  z-index: 4;
   top: -5px;
   bottom: -5px;
   left: var(--trim-playhead);
@@ -592,6 +670,56 @@ select:focus-visible {
   text-align: right;
 }
 
+.trim-speed {
+  display: flex;
+  align-items: center;
+  height: 38px;
+  padding-left: 10px;
+  border: var(--control-border);
+  border-radius: var(--control-radius);
+  background: var(--control-bg);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.trim-speed select {
+  flex: 0 0 76px;
+  width: 76px;
+  min-width: 76px;
+  align-self: stretch;
+  padding: 0 22px 0 8px;
+  border: 0;
+  outline: 0;
+  background-color: transparent;
+  color: var(--text);
+  -webkit-text-fill-color: var(--text);
+  cursor: pointer;
+  font-weight: 800;
+  text-align: left;
+}
+
+.trim-speed select option {
+  background: var(--card-2);
+  color: var(--text);
+}
+
+.trim-speed select option:hover,
+.trim-speed select option:checked {
+  background: var(--primary);
+  color: var(--primary-ink);
+}
+
+.trim-speed select:disabled {
+  color: var(--muted);
+  -webkit-text-fill-color: var(--muted);
+  opacity: 1;
+}
+
+.trim-speed:focus-within {
+  border-color: rgba(143, 233, 192, 0.72);
+}
+
 .tool-row {
   justify-content: space-between;
   gap: 16px;
@@ -716,6 +844,23 @@ select:focus-visible {
   padding: 0 12px;
 }
 
+.speed-select {
+  font-variant-numeric: tabular-nums;
+}
+
+.speed-convert-button {
+  min-width: 112px;
+}
+
+.speed-save-control {
+  display: inline-flex;
+  cursor: help;
+}
+
+.speed-save-control .speed-convert-button:disabled {
+  pointer-events: none;
+}
+
 .split-status,
 .empty-message {
   margin-top: 8px;
@@ -823,7 +968,7 @@ select:focus-visible {
   height: 18px;
 }
 
-@media (max-width: 760px) {
+@media (max-width: 640px) {
   .page {
     padding: 12px;
   }
@@ -898,5 +1043,13 @@ select:focus-visible {
   .progress-bar {
     animation: none;
     transition: none;
+  }
+
+  .trim-thumbnail img {
+    transition: none;
+  }
+
+  .trim-thumbnails[data-loading]:empty {
+    animation: none;
   }
 }

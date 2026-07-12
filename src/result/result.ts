@@ -25,6 +25,7 @@ const elements = {
   formatChip: document.getElementById("format-chip") as HTMLDivElement,
   previewVideo: document.getElementById("preview-video") as HTMLVideoElement,
   trimTimeline: document.getElementById("trim-timeline") as HTMLDivElement,
+  trimThumbnails: document.getElementById("trim-thumbnails") as HTMLDivElement,
   trimStartRange: document.getElementById("trim-start-range") as HTMLInputElement,
   trimEndRange: document.getElementById("trim-end-range") as HTMLInputElement,
   trimStartInput: document.getElementById("trim-start-input") as HTMLInputElement,
@@ -36,6 +37,7 @@ const elements = {
   trimStartBubble: document.getElementById("trim-start-bubble") as HTMLOutputElement,
   trimEndBubble: document.getElementById("trim-end-bubble") as HTMLOutputElement,
   trimDurationValue: document.getElementById("trim-duration-value") as HTMLElement,
+  captureFrameButton: document.getElementById("capture-frame-button") as HTMLButtonElement,
   trimResetButton: document.getElementById("trim-reset-button") as HTMLButtonElement,
   splitModeSelect: document.getElementById("split-mode-select") as HTMLSelectElement,
   splitFormatSelect: document.getElementById("split-format-select") as HTMLSelectElement,
@@ -57,6 +59,9 @@ const elements = {
   downloadCurrentLabel: document.getElementById("download-current-label") as HTMLSpanElement,
   closeButton: document.getElementById("close-button") as HTMLButtonElement,
   convertButtons: Array.from(document.querySelectorAll<HTMLButtonElement>("[data-convert-format]")),
+  speedSelect: document.getElementById("speed-select") as HTMLSelectElement,
+  speedSaveControl: document.getElementById("speed-save-control") as HTMLSpanElement,
+  speedConvertButton: document.getElementById("speed-convert-button") as HTMLButtonElement,
   downloadAllButton: document.getElementById("download-all-button") as HTMLButtonElement,
 };
 
@@ -75,6 +80,8 @@ let ffmpegProgressBase = 0;
 let trimStartSeconds = 0;
 let trimEndSeconds = 0;
 let workBusy = false;
+let thumbnailRequestId = 0;
+let thumbnailUrls: string[] = [];
 interface SplitSegment {
   blob: Blob;
   filename: string;
@@ -113,6 +120,12 @@ const SEEK_METADATA_VERSION = 1;
 const TRIM_STEP_SECONDS = 0.1;
 const MEDIA_EVENT_TIMEOUT_MS = 15_000;
 const FFMPEG_EXEC_PROGRESS_MAX = 92;
+const MAX_TIMELINE_THUMBNAILS = 24;
+const MIN_TIMELINE_THUMBNAILS = 6;
+const TIMELINE_THUMBNAIL_INTERVAL_SECONDS = 3;
+const TIMELINE_THUMBNAIL_DISPLAY_WIDTH = 72;
+const TIMELINE_THUMBNAIL_WIDTH = 160;
+const TIMELINE_THUMBNAIL_HEIGHT = 90;
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) {
@@ -182,6 +195,11 @@ function getRangeFilename(part: LoadedPart, extension: string, range?: TimeRange
   const start = String(roundTrimTime(range.start)).replace(".", "_");
   const end = String(roundTrimTime(range.end)).replace(".", "_");
   return `${base}_trim_${start}s-${end}s.${extension}`;
+}
+
+function getSpeedFilename(part: LoadedPart, speed: number, range?: TimeRange): string {
+  const base = getRangeFilename(part, RECORDING_FORMAT.mp4, range).replace(/\.mp4$/i, "");
+  return `${base}_speed_${String(speed).replace(".", "_")}x.mp4`;
 }
 
 function getStreamerNameFromFilename(): string {
@@ -346,6 +364,50 @@ async function convertPartWithFfmpeg(part: LoadedPart, outputFormat: ConvertForm
     const blob = await readFfmpegBlob(ffmpeg, outputName, getConvertedMimeType(outputFormat));
     setProgressPercent(98);
     return { source: blob, filename: getRangeFilename(part, outputFormat, range) };
+  } finally {
+    await clearFfmpegOutputs(ffmpeg);
+  }
+}
+
+async function convertPartAtSpeed(part: LoadedPart, speed: number, range?: TimeRange): Promise<{ source: Blob; filename: string }> {
+  const ffmpeg = await loadFfmpeg();
+  const inputName = `input.${part.extension}`;
+  const outputName = "output-speed.mp4";
+  setFfmpegProgressBase(8);
+  await clearFfmpegOutputs(ffmpeg);
+  try {
+    setWorkStatus("배속 파일을 준비하는 중입니다.");
+    setFfmpegProgressBase(10);
+    const sourceBytes = await getSourceBytes(getPartSource(part));
+    setFfmpegProgressBase(14);
+    await ffmpeg.writeFile(inputName, sourceBytes);
+    setFfmpegProgressBase(18);
+    const seekArgs = range ? ["-ss", String(range.start)] : [];
+    const durationArgs = range ? ["-t", String(range.end - range.start)] : [];
+    const speedText = String(speed);
+    const code = await ffmpeg.exec([
+      ...seekArgs,
+      ...durationArgs,
+      "-i", inputName,
+      "-map", "0:v:0",
+      "-map", "0:a:0?",
+      "-vf", `setpts=PTS/${speedText}`,
+      "-af", `atempo=${speedText}`,
+      "-c:v", "libx264",
+      "-preset", "ultrafast",
+      "-crf", "26",
+      "-c:a", "aac",
+      "-b:a", "128k",
+      "-movflags", "+faststart",
+      outputName,
+    ]);
+    if (code !== 0) {
+      throw new Error("배속 변환에 실패했습니다.");
+    }
+    setProgressPercent(94);
+    const blob = await readFfmpegBlob(ffmpeg, outputName, "video/mp4");
+    setProgressPercent(98);
+    return { source: blob, filename: getSpeedFilename(part, speed, range) };
   } finally {
     await clearFfmpegOutputs(ffmpeg);
   }
@@ -523,6 +585,11 @@ function updateTrimPlayhead(seconds = elements.previewVideo.currentTime): void {
   const duration = getFullSourceDuration();
   const percent = duration > 0 ? Math.max(0, Math.min(100, seconds / duration * 100)) : 0;
   elements.trimTimeline.style.setProperty("--trim-playhead", `${percent}%`);
+  const thumbnails = Array.from(elements.trimThumbnails.children);
+  const activeIndex = duration > 0 && thumbnails.length > 0
+    ? Math.min(thumbnails.length - 1, Math.floor(seconds / duration * thumbnails.length))
+    : -1;
+  thumbnails.forEach((thumbnail, index) => thumbnail.classList.toggle("is-active", index === activeIndex));
 }
 
 function updateTrimControlState(): void {
@@ -537,6 +604,7 @@ function updateTrimControlState(): void {
   elements.trimStartIncreaseButton.disabled = disabled || range.start >= range.end - TRIM_STEP_SECONDS;
   elements.trimEndDecreaseButton.disabled = disabled || range.end <= range.start + TRIM_STEP_SECONDS;
   elements.trimEndIncreaseButton.disabled = disabled || range.end >= duration;
+  elements.captureFrameButton.disabled = disabled || elements.previewVideo.readyState < HTMLMediaElement.HAVE_CURRENT_DATA;
   elements.trimResetButton.disabled = disabled || isFullTimeRange(range, duration);
 }
 
@@ -610,6 +678,21 @@ function setSourceDuration(duration: number): void {
   renderTrimEditor();
 }
 
+function getSelectedPlaybackSpeed(): number {
+  const speed = Number(elements.speedSelect.value);
+  return Number.isFinite(speed) && speed >= 0.5 && speed <= 2 ? speed : 1;
+}
+
+function updateSpeedControls(): void {
+  const speed = getSelectedPlaybackSpeed();
+  elements.previewVideo.playbackRate = speed;
+  elements.speedSaveControl.title = speed === 1
+    ? "1×에서는 기본 다운로드를 이용하세요."
+    : `${speed}× 속도를 적용해 MP4로 저장합니다.`;
+  elements.speedSelect.disabled = workBusy || parts.length === 0;
+  elements.speedConvertButton.disabled = workBusy || parts.length === 0 || speed === 1;
+}
+
 function setSplitBusy(isBusy: boolean): void {
   workBusy = isBusy;
   elements.splitButton.disabled = isBusy || parts.length === 0;
@@ -623,6 +706,7 @@ function setSplitBusy(isBusy: boolean): void {
   for (const button of elements.convertButtons) {
     button.disabled = isBusy || parts.length === 0;
   }
+  updateSpeedControls();
   elements.downloadAllButton.disabled = isBusy || splitSegments.length === 0;
   renderActions();
 }
@@ -751,6 +835,98 @@ async function seekVideo(video: HTMLVideoElement, seconds: number): Promise<void
 
   video.currentTime = target;
   await waitForMediaEvent(video, "seeked");
+}
+
+function clearTimelineThumbnails(): void {
+  thumbnailRequestId += 1;
+  for (const url of thumbnailUrls) {
+    URL.revokeObjectURL(url);
+  }
+  thumbnailUrls = [];
+  elements.trimThumbnails.innerHTML = "";
+  elements.trimThumbnails.removeAttribute("data-loading");
+}
+
+function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality?: number): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) {
+        resolve(blob);
+      } else {
+        reject(new Error("이미지를 만들지 못했습니다."));
+      }
+    }, type, quality);
+  });
+}
+
+function drawThumbnailFrame(context: CanvasRenderingContext2D, video: HTMLVideoElement): void {
+  const scale = Math.max(TIMELINE_THUMBNAIL_WIDTH / video.videoWidth, TIMELINE_THUMBNAIL_HEIGHT / video.videoHeight);
+  const sourceWidth = TIMELINE_THUMBNAIL_WIDTH / scale;
+  const sourceHeight = TIMELINE_THUMBNAIL_HEIGHT / scale;
+  const sourceX = (video.videoWidth - sourceWidth) / 2;
+  const sourceY = (video.videoHeight - sourceHeight) / 2;
+  context.drawImage(video, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, TIMELINE_THUMBNAIL_WIDTH, TIMELINE_THUMBNAIL_HEIGHT);
+}
+
+async function renderTimelineThumbnails(part: LoadedPart | undefined): Promise<void> {
+  clearTimelineThumbnails();
+  if (!part) {
+    return;
+  }
+
+  const requestId = thumbnailRequestId;
+  elements.trimThumbnails.setAttribute("data-loading", "");
+  let loaded: Awaited<ReturnType<typeof loadVideoForPart>> | null = null;
+  try {
+    loaded = await loadVideoForPart(part);
+    const widthCount = Math.ceil((elements.trimThumbnails.clientWidth || 720) / TIMELINE_THUMBNAIL_DISPLAY_WIDTH);
+    const durationCount = Math.ceil(loaded.duration / TIMELINE_THUMBNAIL_INTERVAL_SECONDS);
+    const count = Math.min(MAX_TIMELINE_THUMBNAILS, Math.max(MIN_TIMELINE_THUMBNAILS, widthCount, durationCount));
+    const canvas = document.createElement("canvas");
+    canvas.width = TIMELINE_THUMBNAIL_WIDTH;
+    canvas.height = TIMELINE_THUMBNAIL_HEIGHT;
+    const context = canvas.getContext("2d", { alpha: false });
+    if (!context) {
+      return;
+    }
+
+    for (let index = 0; index < count && requestId === thumbnailRequestId; index += 1) {
+      const seconds = loaded.duration * (index + 0.5) / count;
+      await seekVideo(loaded.video, seconds);
+      drawThumbnailFrame(context, loaded.video);
+      const url = URL.createObjectURL(await canvasToBlob(canvas, "image/jpeg", 0.72));
+      if (requestId !== thumbnailRequestId) {
+        URL.revokeObjectURL(url);
+        break;
+      }
+
+      thumbnailUrls.push(url);
+      const button = document.createElement("button");
+      button.className = "trim-thumbnail";
+      button.type = "button";
+      button.title = `${formatTimeInput(seconds)}로 이동`;
+      button.setAttribute("aria-label", `${formatTimeInput(seconds)} 장면으로 이동`);
+      button.addEventListener("click", () => {
+        elements.previewVideo.currentTime = seconds;
+        updateTrimPlayhead(seconds);
+      });
+      const image = document.createElement("img");
+      image.src = url;
+      image.alt = "";
+      button.appendChild(image);
+      elements.trimThumbnails.appendChild(button);
+      updateTrimPlayhead();
+    }
+  } catch {
+    // The timeline remains usable without thumbnail images.
+  } finally {
+    if (requestId === thumbnailRequestId) {
+      elements.trimThumbnails.removeAttribute("data-loading");
+    }
+    if (loaded) {
+      releaseVideoSource(loaded.video, loaded.url, loaded.revoke);
+    }
+  }
 }
 
 async function recordVideoRange(video: HTMLVideoElement, startSeconds: number, endSeconds: number, mimeType: string): Promise<Blob> {
@@ -1025,6 +1201,7 @@ function renderActions(): void {
   const hasSelectedRange = Boolean(getActiveTimeRange());
   elements.downloadOriginalButton.hidden = !hasSelectedRange;
   elements.downloadCurrentLabel.textContent = hasSelectedRange ? "구간 다운로드" : "다운로드";
+  updateSpeedControls();
   if (!recording || parts.length === 0 || workBusy) {
     elements.downloadOriginalButton.disabled = true;
     elements.downloadCurrentButton.disabled = true;
@@ -1080,6 +1257,7 @@ function renderParts(): void {
   }
 
   if (parts.length === 0) {
+    clearTimelineThumbnails();
     elements.emptyMessage.textContent = "녹화 파일을 찾지 못했습니다.";
     renderActions();
     return;
@@ -1093,6 +1271,7 @@ function renderParts(): void {
   }
   renderSplitMode();
   setPreviewFromPart(parts[0]);
+  void renderTimelineThumbnails(parts[0]);
   void updateSplitDefaultValues(parts[0]);
   renderSplitDownloads();
   setSplitBusy(false);
@@ -1245,15 +1424,78 @@ for (const button of elements.convertButtons) {
   });
 }
 
+elements.speedSelect.addEventListener("change", () => {
+  updateSpeedControls();
+});
+
+elements.captureFrameButton.addEventListener("click", () => {
+  void (async () => {
+    const video = elements.previewVideo;
+    const part = getSelectedSourcePart();
+    if (!part || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.videoWidth <= 0 || video.videoHeight <= 0) {
+      window.alert("저장할 영상 장면이 아직 준비되지 않았습니다.");
+      return;
+    }
+
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const context = canvas.getContext("2d", { alpha: false });
+      if (!context) {
+        throw new Error();
+      }
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const blob = await canvasToBlob(canvas, "image/png");
+      const seconds = video.currentTime.toFixed(1).replace(".", "_");
+      downloadSource(blob, `${getFilenameBase(part.filename)}_frame_${seconds}s.png`);
+    } catch {
+      window.alert("현재 장면을 저장하지 못했습니다.");
+    }
+  })();
+});
+
+elements.speedConvertButton.addEventListener("click", () => {
+  void (async () => {
+    const speed = getSelectedPlaybackSpeed();
+    if (speed === 1) {
+      return;
+    }
+
+    setSplitBusy(true);
+    try {
+      const range = getActiveTimeRange();
+      const sourceParts = range ? [getSelectedSourcePart()].filter((part): part is LoadedPart => Boolean(part)) : parts;
+      setSplitProgress(0, Math.max(1, sourceParts.length));
+      setWorkStatus(`${speed}배속 MP4를 만드는 중입니다.`);
+      const items: Array<{ source: Blob; filename: string }> = [];
+      for (const [index, part] of sourceParts.entries()) {
+        items.push(await convertPartAtSpeed(part, speed, range));
+        setSplitProgress(index + 1, sourceParts.length);
+      }
+      await downloadSourcesSequentially(items);
+      setWorkStatus(`${speed}배속 MP4 다운로드가 준비되었습니다.`);
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "배속 MP4를 만들지 못했습니다.");
+    } finally {
+      hideSplitProgress();
+      setSplitBusy(false);
+    }
+  })();
+});
+
 elements.downloadAllButton.addEventListener("click", () => {
   void downloadSourcesSequentially(splitSegments.map((segment) => ({ source: segment.blob, filename: segment.filename })));
 });
 
 elements.previewVideo.addEventListener("loadedmetadata", () => {
+  updateSpeedControls();
   if (Number.isFinite(elements.previewVideo.duration) && elements.previewVideo.duration > 0) {
     setSourceDuration(elements.previewVideo.duration);
   }
 });
+
+elements.previewVideo.addEventListener("loadeddata", updateTrimControlState);
 
 elements.previewVideo.addEventListener("play", () => {
   const range = getSelectedTimeRange();
@@ -1396,6 +1638,7 @@ window.addEventListener("pagehide", () => {
 });
 
 window.addEventListener("unload", () => {
+  clearTimelineThumbnails();
   revokePreviewUrl();
 });
 
