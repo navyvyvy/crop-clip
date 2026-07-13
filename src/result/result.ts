@@ -1720,8 +1720,10 @@ document.addEventListener("keydown", (event) => {
   }
   const target = event.target instanceof Element ? event.target : null;
   const input = target?.closest("input");
-  const formControl = (input && input.getAttribute("type") !== "range")
-    || target?.closest("select, textarea, [contenteditable='true']");
+  if (input instanceof HTMLElement && input.getAttribute("type") !== "range") {
+    input.blur();
+  }
+  const formControl = target?.closest("select, textarea, [contenteditable='true']");
   const unrelatedButton = target?.closest("button") && !target.closest(".trim-details, .trim-timeline");
   if (formControl || unrelatedButton) {
     return;
@@ -1738,6 +1740,15 @@ document.addEventListener("keydown", (event) => {
 document.addEventListener("change", (event) => {
   if (event.target instanceof HTMLElement && event.target.matches("select, input:not([type='range'])")) {
     event.target.blur();
+  }
+});
+
+document.addEventListener("pointerup", (event) => {
+  const button = event.target instanceof Element
+    ? event.target.closest(".trim-stepper button, .split-value button")
+    : null;
+  if (button instanceof HTMLButtonElement) {
+    button.blur();
   }
 });
 
