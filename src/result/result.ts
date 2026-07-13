@@ -1,5 +1,6 @@
 import { getPartsByRecordingId, getRecording, putPart, putRecording } from "../shared/idb.js";
 import type { DeletionCancelRequest, DeletionScheduleRequest } from "../shared/messages.js";
+import { loadAppState } from "../shared/storage.js";
 import {
   estimateRangeSize,
   isFullTimeRange,
@@ -24,7 +25,12 @@ const elements = {
   title: document.getElementById("title") as HTMLHeadingElement,
   formatChip: document.getElementById("format-chip") as HTMLDivElement,
   previewVideo: document.getElementById("preview-video") as HTMLVideoElement,
+  framePreviewCard: document.getElementById("frame-preview-card") as HTMLDivElement,
+  framePreviewImage: document.getElementById("frame-preview-image") as HTMLImageElement,
+  framePreviewDownloadButton: document.getElementById("frame-preview-download-button") as HTMLButtonElement,
+  framePreviewCloseButton: document.getElementById("frame-preview-close-button") as HTMLButtonElement,
   trimTimeline: document.getElementById("trim-timeline") as HTMLDivElement,
+  trimSelection: document.getElementById("trim-selection") as HTMLSpanElement,
   trimThumbnails: document.getElementById("trim-thumbnails") as HTMLDivElement,
   trimStartRange: document.getElementById("trim-start-range") as HTMLInputElement,
   trimEndRange: document.getElementById("trim-end-range") as HTMLInputElement,
@@ -37,6 +43,10 @@ const elements = {
   trimStartBubble: document.getElementById("trim-start-bubble") as HTMLOutputElement,
   trimEndBubble: document.getElementById("trim-end-bubble") as HTMLOutputElement,
   trimDurationValue: document.getElementById("trim-duration-value") as HTMLElement,
+  setTrimStartButton: document.getElementById("set-trim-start-button") as HTMLButtonElement,
+  setTrimEndButton: document.getElementById("set-trim-end-button") as HTMLButtonElement,
+  previousFrameButton: document.getElementById("previous-frame-button") as HTMLButtonElement,
+  nextFrameButton: document.getElementById("next-frame-button") as HTMLButtonElement,
   captureFrameButton: document.getElementById("capture-frame-button") as HTMLButtonElement,
   trimResetButton: document.getElementById("trim-reset-button") as HTMLButtonElement,
   splitModeSelect: document.getElementById("split-mode-select") as HTMLSelectElement,
@@ -82,6 +92,10 @@ let trimEndSeconds = 0;
 let workBusy = false;
 let thumbnailRequestId = 0;
 let thumbnailUrls: string[] = [];
+let framePreviewBlob: Blob | null = null;
+let framePreviewFilename = "";
+let framePreviewUrl: string | null = null;
+let frameStepSeconds = 1 / 30;
 interface SplitSegment {
   blob: Blob;
   filename: string;
@@ -232,6 +246,26 @@ function downloadSource(source: Blob | string, filename: string): void {
   if (revoke) {
     window.setTimeout(() => URL.revokeObjectURL(url), DOWNLOAD_URL_REVOKE_DELAY_MS);
   }
+}
+
+function clearFramePreview(): void {
+  if (framePreviewUrl) {
+    URL.revokeObjectURL(framePreviewUrl);
+  }
+  framePreviewBlob = null;
+  framePreviewFilename = "";
+  framePreviewUrl = null;
+  elements.framePreviewImage.removeAttribute("src");
+  elements.framePreviewCard.hidden = true;
+}
+
+function showFramePreview(blob: Blob, filename: string): void {
+  clearFramePreview();
+  framePreviewBlob = blob;
+  framePreviewFilename = filename;
+  framePreviewUrl = URL.createObjectURL(blob);
+  elements.framePreviewImage.src = framePreviewUrl;
+  elements.framePreviewCard.hidden = false;
 }
 
 function getPartSource(part: LoadedPart): Blob | string {
@@ -585,11 +619,34 @@ function updateTrimPlayhead(seconds = elements.previewVideo.currentTime): void {
   const duration = getFullSourceDuration();
   const percent = duration > 0 ? Math.max(0, Math.min(100, seconds / duration * 100)) : 0;
   elements.trimTimeline.style.setProperty("--trim-playhead", `${percent}%`);
-  const thumbnails = Array.from(elements.trimThumbnails.children);
-  const activeIndex = duration > 0 && thumbnails.length > 0
-    ? Math.min(thumbnails.length - 1, Math.floor(seconds / duration * thumbnails.length))
-    : -1;
-  thumbnails.forEach((thumbnail, index) => thumbnail.classList.toggle("is-active", index === activeIndex));
+  const range = getSelectedTimeRange(duration);
+  const boundaryTolerance = Math.max(0.01, frameStepSeconds / 2);
+  const atBoundary = Math.abs(seconds - range.start) <= boundaryTolerance || Math.abs(seconds - range.end) <= boundaryTolerance;
+  elements.setTrimStartButton.hidden = atBoundary;
+  elements.setTrimEndButton.hidden = atBoundary;
+}
+
+function getTimelineSecondsAt(clientX: number, duration = getFullSourceDuration()): number {
+  const rect = elements.trimThumbnails.getBoundingClientRect();
+  if (duration <= 0 || rect.width <= 0) {
+    return 0;
+  }
+  return duration * Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+}
+
+function seekPreviewTo(seconds: number): void {
+  elements.previewVideo.currentTime = seconds;
+  updateTrimPlayhead(seconds);
+}
+
+function stepPreviewFrame(direction: -1 | 1): void {
+  const video = elements.previewVideo;
+  const range = getSelectedTimeRange();
+  const end = Math.max(range.start, range.end - 0.001);
+  const target = Math.max(range.start, Math.min(end, video.currentTime + direction * frameStepSeconds));
+  video.pause();
+  video.currentTime = target;
+  updateTrimPlayhead(target);
 }
 
 function updateTrimControlState(): void {
@@ -604,7 +661,11 @@ function updateTrimControlState(): void {
   elements.trimStartIncreaseButton.disabled = disabled || range.start >= range.end - TRIM_STEP_SECONDS;
   elements.trimEndDecreaseButton.disabled = disabled || range.end <= range.start + TRIM_STEP_SECONDS;
   elements.trimEndIncreaseButton.disabled = disabled || range.end >= duration;
-  elements.captureFrameButton.disabled = disabled || elements.previewVideo.readyState < HTMLMediaElement.HAVE_CURRENT_DATA;
+  elements.setTrimStartButton.disabled = disabled;
+  elements.setTrimEndButton.disabled = disabled;
+  elements.previousFrameButton.disabled = disabled;
+  elements.nextFrameButton.disabled = disabled;
+  elements.captureFrameButton.disabled = parts.length === 0;
   elements.trimResetButton.disabled = disabled || isFullTimeRange(range, duration);
 }
 
@@ -879,8 +940,9 @@ async function renderTimelineThumbnails(part: LoadedPart | undefined): Promise<v
   let loaded: Awaited<ReturnType<typeof loadVideoForPart>> | null = null;
   try {
     loaded = await loadVideoForPart(part);
+    const { duration, video } = loaded;
     const widthCount = Math.ceil((elements.trimThumbnails.clientWidth || 720) / TIMELINE_THUMBNAIL_DISPLAY_WIDTH);
-    const durationCount = Math.ceil(loaded.duration / TIMELINE_THUMBNAIL_INTERVAL_SECONDS);
+    const durationCount = Math.ceil(duration / TIMELINE_THUMBNAIL_INTERVAL_SECONDS);
     const count = Math.min(MAX_TIMELINE_THUMBNAILS, Math.max(MIN_TIMELINE_THUMBNAILS, widthCount, durationCount));
     const canvas = document.createElement("canvas");
     canvas.width = TIMELINE_THUMBNAIL_WIDTH;
@@ -891,9 +953,9 @@ async function renderTimelineThumbnails(part: LoadedPart | undefined): Promise<v
     }
 
     for (let index = 0; index < count && requestId === thumbnailRequestId; index += 1) {
-      const seconds = loaded.duration * (index + 0.5) / count;
-      await seekVideo(loaded.video, seconds);
-      drawThumbnailFrame(context, loaded.video);
+      const seconds = duration * index / count;
+      await seekVideo(video, Math.min(duration, seconds + 0.001));
+      drawThumbnailFrame(context, video);
       const url = URL.createObjectURL(await canvasToBlob(canvas, "image/jpeg", 0.72));
       if (requestId !== thumbnailRequestId) {
         URL.revokeObjectURL(url);
@@ -906,9 +968,8 @@ async function renderTimelineThumbnails(part: LoadedPart | undefined): Promise<v
       button.type = "button";
       button.title = `${formatTimeInput(seconds)}로 이동`;
       button.setAttribute("aria-label", `${formatTimeInput(seconds)} 장면으로 이동`);
-      button.addEventListener("click", () => {
-        elements.previewVideo.currentTime = seconds;
-        updateTrimPlayhead(seconds);
+      button.addEventListener("click", (event) => {
+        seekPreviewTo(event.detail > 0 ? getTimelineSecondsAt(event.clientX, duration) : seconds);
       });
       const image = document.createElement("img");
       image.src = url;
@@ -1201,6 +1262,7 @@ function renderActions(): void {
   const hasSelectedRange = Boolean(getActiveTimeRange());
   elements.downloadOriginalButton.hidden = !hasSelectedRange;
   elements.downloadCurrentLabel.textContent = hasSelectedRange ? "구간 다운로드" : "다운로드";
+  elements.downloadCurrentButton.title = hasSelectedRange ? "현재 선택 구간 다운로드" : "전체 결과 다운로드";
   updateSpeedControls();
   if (!recording || parts.length === 0 || workBusy) {
     elements.downloadOriginalButton.disabled = true;
@@ -1308,6 +1370,9 @@ function restoreSourceTab(): void {
 }
 
 async function boot(): Promise<void> {
+  // ponytail: recordings do not persist FPS yet; use the current recording setting until per-record metadata is needed.
+  const appState = await loadAppState().catch(() => null);
+  frameStepSeconds = appState?.settings.enable60fps ? 1 / 60 : 1 / 30;
   if (!recordingId) {
     elements.emptyMessage.textContent = "녹화 ID가 없습니다.";
     elements.downloadCurrentButton.disabled = true;
@@ -1428,16 +1493,41 @@ elements.speedSelect.addEventListener("change", () => {
   updateSpeedControls();
 });
 
+elements.setTrimStartButton.addEventListener("click", () => {
+  setTrimRange(elements.previewVideo.currentTime, trimEndSeconds, "start");
+});
+
+elements.setTrimEndButton.addEventListener("click", () => {
+  setTrimRange(trimStartSeconds, elements.previewVideo.currentTime, "end");
+});
+
+elements.previousFrameButton.addEventListener("click", () => stepPreviewFrame(-1));
+elements.nextFrameButton.addEventListener("click", () => stepPreviewFrame(1));
+
+elements.framePreviewDownloadButton.addEventListener("click", () => {
+  if (framePreviewBlob && framePreviewFilename) {
+    downloadSource(framePreviewBlob, framePreviewFilename);
+  }
+});
+
+elements.framePreviewCloseButton.addEventListener("click", clearFramePreview);
+
 elements.captureFrameButton.addEventListener("click", () => {
   void (async () => {
     const video = elements.previewVideo;
     const part = getSelectedSourcePart();
-    if (!part || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.videoWidth <= 0 || video.videoHeight <= 0) {
+    if (!part) {
       window.alert("저장할 영상 장면이 아직 준비되지 않았습니다.");
       return;
     }
 
     try {
+      if (video.seeking) {
+        await waitForMediaEvent(video, "seeked");
+      }
+      if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.videoWidth <= 0 || video.videoHeight <= 0) {
+        throw new Error();
+      }
       const canvas = document.createElement("canvas");
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
@@ -1448,7 +1538,7 @@ elements.captureFrameButton.addEventListener("click", () => {
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
       const blob = await canvasToBlob(canvas, "image/png");
       const seconds = video.currentTime.toFixed(1).replace(".", "_");
-      downloadSource(blob, `${getFilenameBase(part.filename)}_frame_${seconds}s.png`);
+      showFramePreview(blob, `${getFilenameBase(part.filename)}_frame_${seconds}s.png`);
     } catch {
       window.alert("현재 장면을 저장하지 못했습니다.");
     }
@@ -1494,8 +1584,6 @@ elements.previewVideo.addEventListener("loadedmetadata", () => {
     setSourceDuration(elements.previewVideo.duration);
   }
 });
-
-elements.previewVideo.addEventListener("loadeddata", updateTrimControlState);
 
 elements.previewVideo.addEventListener("play", () => {
   const range = getSelectedTimeRange();
@@ -1565,6 +1653,82 @@ elements.trimResetButton.addEventListener("click", () => {
   trimStartSeconds = 0;
   trimEndSeconds = duration;
   renderTrimEditor(true, "start");
+});
+
+let trimDrag: { pointerId: number; startX: number; range: TimeRange; dragged: boolean } | null = null;
+
+elements.trimSelection.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || elements.trimStartRange.disabled) {
+    return;
+  }
+  trimDrag = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    range: getSelectedTimeRange(),
+    dragged: false,
+  };
+  elements.trimSelection.setPointerCapture(event.pointerId);
+  event.preventDefault();
+});
+
+elements.trimSelection.addEventListener("pointermove", (event) => {
+  if (!trimDrag || event.pointerId !== trimDrag.pointerId) {
+    return;
+  }
+  const totalDuration = getFullSourceDuration();
+  const railWidth = elements.trimThumbnails.getBoundingClientRect().width;
+  const selectedDuration = trimDrag.range.end - trimDrag.range.start;
+  if (totalDuration <= 0 || railWidth <= 0 || selectedDuration >= totalDuration) {
+    return;
+  }
+  const movedPixels = event.clientX - trimDrag.startX;
+  if (!trimDrag.dragged && Math.abs(movedPixels) < 3) {
+    return;
+  }
+  trimDrag.dragged = true;
+  const maxStart = Math.max(0, totalDuration - selectedDuration);
+  const nextStart = Math.max(0, Math.min(maxStart, roundTrimTime(trimDrag.range.start + movedPixels / railWidth * totalDuration)));
+  trimStartSeconds = nextStart;
+  trimEndSeconds = Math.min(totalDuration, nextStart + selectedDuration);
+  renderTrimEditor(true);
+});
+
+function finishTrimDrag(event: PointerEvent, cancelled = false): void {
+  if (!trimDrag || event.pointerId !== trimDrag.pointerId) {
+    return;
+  }
+  const { dragged, pointerId } = trimDrag;
+  trimDrag = null;
+  if (elements.trimSelection.hasPointerCapture(pointerId)) {
+    elements.trimSelection.releasePointerCapture(pointerId);
+  }
+  if (!cancelled && !dragged) {
+    seekPreviewTo(getTimelineSecondsAt(event.clientX));
+  }
+}
+
+elements.trimSelection.addEventListener("pointerup", (event) => finishTrimDrag(event));
+elements.trimSelection.addEventListener("pointercancel", (event) => finishTrimDrag(event, true));
+
+document.addEventListener("keydown", (event) => {
+  if (event.code !== "Space" || event.repeat || elements.previewVideo.readyState < HTMLMediaElement.HAVE_METADATA) {
+    return;
+  }
+  const target = event.target instanceof Element ? event.target : null;
+  const input = target?.closest("input");
+  const formControl = (input && input.getAttribute("type") !== "range")
+    || target?.closest("select, textarea, [contenteditable='true']");
+  const unrelatedButton = target?.closest("button") && !target.closest(".trim-details, .trim-timeline");
+  if (formControl || unrelatedButton) {
+    return;
+  }
+
+  event.preventDefault();
+  if (elements.previewVideo.paused) {
+    void elements.previewVideo.play().catch(() => {});
+  } else {
+    elements.previewVideo.pause();
+  }
 });
 
 for (const [handle, input] of [["start", elements.trimStartRange], ["end", elements.trimEndRange]] as const) {
@@ -1638,6 +1802,7 @@ window.addEventListener("pagehide", () => {
 });
 
 window.addEventListener("unload", () => {
+  clearFramePreview();
   clearTimelineThumbnails();
   revokePreviewUrl();
 });

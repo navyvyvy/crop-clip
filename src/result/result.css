@@ -258,12 +258,69 @@ select:focus-visible {
 }
 
 .preview-frame {
+  position: relative;
   display: flex;
   justify-content: center;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: #030608;
+}
+
+.frame-preview-card {
+  position: absolute;
+  z-index: 6;
+  top: 10px;
+  left: 10px;
+  width: min(240px, 42%);
+  overflow: hidden;
+  border: 1px solid rgba(91, 214, 191, 0.5);
+  border-radius: 8px;
+  background: rgba(5, 10, 16, 0.9);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.38);
+}
+
+.frame-preview-card[hidden] {
+  display: none;
+}
+
+.frame-preview-card img {
+  display: block;
+  width: 100%;
+  max-height: 150px;
+  object-fit: contain;
+  background: #000;
+}
+
+.frame-preview-actions {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  gap: 4px;
+}
+
+.frame-preview-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid rgba(238, 244, 251, 0.52);
+  border-radius: 7px;
+  background: rgba(6, 13, 20, 0.84);
+  color: #f4fbff;
+  cursor: pointer;
+}
+
+.frame-preview-action:hover {
+  background: rgba(15, 26, 36, 0.94);
+}
+
+.frame-preview-action svg {
+  width: 14px;
+  height: 14px;
 }
 
 .preview-video {
@@ -354,13 +411,13 @@ select:focus-visible {
 
 .trim-timeline {
   position: relative;
-  height: 82px;
+  height: 122px;
   margin-top: 10px;
 }
 
 .trim-rail {
   position: absolute;
-  inset: 34px 10px auto;
+  inset: 48px 10px auto;
   height: 38px;
   overflow: hidden;
   border-radius: 19px;
@@ -426,17 +483,6 @@ select:focus-visible {
   opacity: 1;
 }
 
-.trim-thumbnail.is-active {
-  position: relative;
-  z-index: 1;
-  outline: 2px solid rgba(255, 255, 255, 0.9);
-  outline-offset: -2px;
-}
-
-.trim-thumbnail.is-active img {
-  opacity: 1;
-}
-
 @keyframes thumbnail-loading {
   to {
     background-position: -220% 0;
@@ -452,7 +498,12 @@ select:focus-visible {
   width: calc(var(--trim-end) - var(--trim-start));
   background: rgba(67, 196, 135, 0.16);
   box-shadow: inset 0 2px var(--primary), inset 0 -2px var(--primary);
-  pointer-events: none;
+  cursor: grab;
+  touch-action: none;
+}
+
+.trim-selection:active {
+  cursor: grabbing;
 }
 
 .trim-selection::after {
@@ -494,12 +545,43 @@ select:focus-visible {
   background: #fff;
   box-shadow: 0 0 0 1px #071019, 0 0 7px rgba(255, 255, 255, 0.9);
   transform: translateX(-1.5px);
+  pointer-events: none;
+}
+
+.trim-playhead-actions {
+  position: absolute;
+  z-index: 7;
+  inset: 0;
+  pointer-events: none;
+}
+
+.playhead-action-button {
+  position: absolute;
+  left: clamp(13px, var(--trim-playhead), calc(100% - 13px));
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  transform: translateX(-50%);
+  pointer-events: auto;
+}
+
+.playhead-action-button.start {
+  top: 22px;
+}
+
+.playhead-action-button.end {
+  top: 90px;
+}
+
+.playhead-action-button svg {
+  width: 16px;
+  height: 16px;
 }
 
 .trim-range {
   position: absolute;
   z-index: 4;
-  top: 26px;
+  top: 40px;
   left: 0;
   width: 100%;
   height: 54px;
@@ -507,6 +589,15 @@ select:focus-visible {
   appearance: none;
   pointer-events: none;
   background: transparent;
+}
+
+.trim-range:focus-visible {
+  outline: 0;
+}
+
+.trim-range:focus-visible::-webkit-slider-thumb {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 
 .trim-range-end {
@@ -670,6 +761,45 @@ select:focus-visible {
   text-align: right;
 }
 
+.trim-tool-buttons,
+.trim-range-fields,
+.trim-action-controls,
+.frame-step-controls {
+  display: inline-flex;
+  align-items: center;
+}
+
+.trim-tool-buttons,
+.trim-range-fields {
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.trim-action-controls,
+.frame-step-controls {
+  gap: 4px;
+}
+
+.trim-reset-control {
+  display: inline-flex;
+  cursor: help;
+}
+
+.trim-reset-control .trim-icon-button:disabled {
+  pointer-events: none;
+}
+
+.trim-icon-button {
+  width: 38px;
+  height: 38px;
+  padding: 0;
+}
+
+.trim-icon-button svg {
+  width: 18px;
+  height: 18px;
+}
+
 .trim-speed {
   display: flex;
   align-items: center;
@@ -746,6 +876,11 @@ select:focus-visible {
 .convert-group {
   justify-content: flex-end;
   margin-left: auto;
+}
+
+.convert-group .help-popover {
+  right: 0;
+  left: auto;
 }
 
 .tool-row select,

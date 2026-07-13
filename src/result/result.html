@@ -27,14 +27,14 @@
             <div class="meta-chip" id="format-chip">WEBM · - · -</div>
           </div>
           <div class="header-actions">
-            <button id="download-original-button" class="button tertiary" type="button" hidden>
+            <button id="download-original-button" class="button tertiary" type="button" title="편집 전 원본 파일 다운로드" hidden>
               <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                 <path d="M12 4v10m0 0 4-4m-4 4-4-4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
                 <path d="M5 17.5v1.2c0 .7.6 1.3 1.3 1.3h11.4c.7 0 1.3-.6 1.3-1.3v-1.2" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
               </svg>
               <span>원본 다운로드</span>
             </button>
-            <button id="download-current-button" class="button primary" type="button">
+            <button id="download-current-button" class="button primary" type="button" title="현재 선택 구간 다운로드">
               <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                 <path d="M12 4v10m0 0 4-4m-4 4-4-4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
                 <path d="M5 17.5v1.2c0 .7.6 1.3 1.3 1.3h11.4c.7 0 1.3-.6 1.3-1.3v-1.2" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
@@ -46,6 +46,17 @@
 
         <div class="preview-frame">
           <video id="preview-video" class="preview-video" controls playsinline muted preload="auto"></video>
+          <div id="frame-preview-card" class="frame-preview-card" hidden>
+            <img id="frame-preview-image" alt="현재 장면 미리보기" title="이미지를 우클릭해 복사">
+            <div class="frame-preview-actions">
+              <button id="frame-preview-download-button" class="frame-preview-action" type="button" aria-label="현재 장면 저장" title="현재 장면 저장">
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M12 4v11m0 0 4-4m-4 4-4-4M5 19h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+              <button id="frame-preview-close-button" class="frame-preview-action" type="button" aria-label="현재 장면 미리보기 닫기" title="닫기">×</button>
+            </div>
+          </div>
         </div>
 
         <section class="trim-editor" aria-labelledby="trim-title">
@@ -60,32 +71,52 @@
               </span>
             </div>
             <div class="trim-details">
-              <button id="capture-frame-button" class="button tertiary compact-button" type="button" title="현재 미리보기 장면을 원본 크기 PNG로 저장" disabled>
-                <svg class="button-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
-                  <path d="M7.5 7.5 9 5.5h6l1.5 2H19c1.1 0 2 .9 2 2V18c0 1.1-.9 2-2 2H5c-1.1 0-2-.9-2-2V9.5c0-1.1.9-2 2-2h2.5Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
-                  <circle cx="12" cy="13.5" r="3.2" stroke="currentColor" stroke-width="2"/>
-                </svg>
-                <span>장면 저장</span>
-              </button>
-              <div class="trim-time-field">
+              <div class="trim-tool-buttons">
+                <div class="trim-action-controls" aria-label="구간 도구">
+                <button id="capture-frame-button" class="button tertiary trim-icon-button" type="button" aria-label="현재 장면 캡처" title="현재 미리보기 장면을 캡처" disabled>
+                  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+                    <path d="M7.5 7.5 9 5.5h6l1.5 2H19c1.1 0 2 .9 2 2V18c0 1.1-.9 2-2 2H5c-1.1 0-2-.9-2-2V9.5c0-1.1.9-2 2-2h2.5Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+                    <circle cx="12" cy="13.5" r="3.2" stroke="currentColor" stroke-width="2"/>
+                  </svg>
+                </button>
+                <span class="trim-reset-control" title="선택 범위를 전체 영상으로 되돌리기">
+                  <button id="trim-reset-button" class="button tertiary trim-icon-button" type="button" aria-label="전체 구간">
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+                      <path d="M8 4H4v4M4.6 8A8 8 0 1 1 4 15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                  </button>
+                </span>
+                </div>
+                <div class="frame-step-controls" aria-label="프레임 이동">
+                <button id="previous-frame-button" class="button tertiary trim-icon-button" type="button" aria-label="이전 프레임" title="이전 프레임" disabled>
+                  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false"><path d="m14.5 7-5 5 5 5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+                <button id="next-frame-button" class="button tertiary trim-icon-button" type="button" aria-label="다음 프레임" title="다음 프레임" disabled>
+                  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false"><path d="m9.5 7 5 5-5 5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+                </div>
+              </div>
+              <div class="trim-range-fields">
+                <div class="trim-time-field">
                 <span>시작</span>
                 <span class="trim-stepper">
-                  <button id="trim-start-decrease-button" type="button" aria-label="시작 시간 감소">−</button>
+                  <button id="trim-start-decrease-button" type="button" aria-label="시작 시간 감소" title="시작 시간을 0.1초 줄이기">−</button>
                   <input id="trim-start-input" type="text" inputmode="decimal" value="0:00" aria-label="사용 구간 시작 시간" />
-                  <button id="trim-start-increase-button" type="button" aria-label="시작 시간 증가">+</button>
+                  <button id="trim-start-increase-button" type="button" aria-label="시작 시간 증가" title="시작 시간을 0.1초 늘리기">+</button>
                 </span>
-              </div>
-              <div class="trim-time-field">
+                </div>
+                <div class="trim-time-field">
                 <span>끝</span>
                 <span class="trim-stepper">
-                  <button id="trim-end-decrease-button" type="button" aria-label="끝 시간 감소">−</button>
+                  <button id="trim-end-decrease-button" type="button" aria-label="끝 시간 감소" title="끝 시간을 0.1초 줄이기">−</button>
                   <input id="trim-end-input" type="text" inputmode="decimal" value="0:00.1" aria-label="사용 구간 끝 시간" />
-                  <button id="trim-end-increase-button" type="button" aria-label="끝 시간 증가">+</button>
+                  <button id="trim-end-increase-button" type="button" aria-label="끝 시간 증가" title="끝 시간을 0.1초 늘리기">+</button>
                 </span>
-              </div>
-              <div class="trim-duration" aria-live="polite">
-                <span>길이</span>
-                <strong id="trim-duration-value">0.1초</strong>
+                </div>
+                <div class="trim-duration" aria-live="polite">
+                  <span>길이</span>
+                  <strong id="trim-duration-value">0.1초</strong>
+                </div>
               </div>
             </div>
             <div class="trim-speed">
@@ -98,20 +129,22 @@
                 <option value="2">2×</option>
               </select>
             </div>
-            <button id="trim-reset-button" class="button tertiary compact-button" type="button" title="선택 범위를 전체 영상으로 되돌리기">
-              <svg class="button-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
-                <path d="M8 4H4v4M4.6 8A8 8 0 1 1 4 15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-              <span>전체 구간</span>
-            </button>
           </header>
 
           <div id="trim-timeline" class="trim-timeline" style="--trim-start: 0%; --trim-end: 100%; --trim-playhead: 0%;">
             <output id="trim-start-bubble" class="trim-bubble trim-bubble-start" for="trim-start-range">0:00</output>
             <output id="trim-end-bubble" class="trim-bubble trim-bubble-end" for="trim-end-range">0:00.1</output>
+            <div class="trim-playhead-actions">
+              <button id="set-trim-start-button" class="button tertiary playhead-action-button start" type="button" aria-label="현재 위치를 시작으로 지정" title="현재 위치를 사용 구간 시작으로 지정" disabled>
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false"><path d="M10 5H7v14h3" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="15" cy="12" r="2.2" fill="currentColor"/></svg>
+              </button>
+              <button id="set-trim-end-button" class="button tertiary playhead-action-button end" type="button" aria-label="현재 위치를 끝으로 지정" title="현재 위치를 사용 구간 끝으로 지정" disabled>
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false"><circle cx="9" cy="12" r="2.2" fill="currentColor"/><path d="M14 5h3v14h-3" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>
+            </div>
             <div class="trim-rail">
               <div id="trim-thumbnails" class="trim-thumbnails" aria-label="영상 장면 미리보기"></div>
-              <span class="trim-selection"></span>
+              <span id="trim-selection" class="trim-selection" title="선택 구간 이동"></span>
               <span class="trim-ticks"></span>
               <span class="trim-playhead"></span>
             </div>
@@ -131,21 +164,21 @@
                 <span class="help-popover" role="tooltip">선택 구간을 시간 또는 예상 용량 기준으로 나눕니다.</span>
               </span>
             </div>
-            <select id="split-mode-select" aria-label="나누기 기준">
+            <select id="split-mode-select" aria-label="나누기 기준" title="시간 또는 예상 용량 기준 선택">
               <option value="duration">시간</option>
               <option value="size">용량</option>
             </select>
             <div class="split-value">
-              <button id="split-value-decrease-button" type="button" aria-label="나누기 값 감소">−</button>
+              <button id="split-value-decrease-button" type="button" aria-label="나누기 값 감소" title="나누기 값 줄이기">−</button>
               <input id="split-value-input" type="number" min="0.1" max="3600" step="0.1" value="45" aria-label="나누기 값" />
               <span id="split-unit-label">초</span>
-              <button id="split-value-increase-button" type="button" aria-label="나누기 값 증가">+</button>
+              <button id="split-value-increase-button" type="button" aria-label="나누기 값 증가" title="나누기 값 늘리기">+</button>
             </div>
-            <select id="split-format-select" aria-label="나누기 파일 형식">
+            <select id="split-format-select" aria-label="나누기 파일 형식" title="나눈 파일의 저장 형식 선택">
               <option value="mp4">MP4</option>
               <option value="webm">WebM</option>
             </select>
-            <button id="split-button" class="button primary split-button" type="button">
+            <button id="split-button" class="button primary split-button" type="button" title="현재 선택 구간을 설정한 기준으로 나누기">
               <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                 <path d="M6 8.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Zm0 12a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
                 <path d="m8.2 8.2 10.3 10.3M8.2 15.8 18.5 5.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
@@ -153,15 +186,23 @@
               <span>나누기</span>
             </button>
             <div class="split-presets" aria-label="나누기 빠른 선택">
-              <button type="button" data-split-mode="duration" data-split-value="30">30초</button>
-              <button type="button" data-split-mode="duration" data-split-value="45">45초</button>
-              <button type="button" data-split-mode="size" data-split-value="40">40MB</button>
+              <button type="button" data-split-mode="duration" data-split-value="30" title="30초 단위로 나누기">30초</button>
+              <button type="button" data-split-mode="duration" data-split-value="45" title="45초 단위로 나누기">45초</button>
+              <button type="button" data-split-mode="size" data-split-value="40" title="예상 용량 40MB 단위로 나누기">40MB</button>
             </div>
           </div>
           <div class="tool-group convert-group" aria-label="파일 변환">
-            <h2>파일 변환</h2>
-            <button class="button secondary convert-button" type="button" data-convert-format="mp4">MP4</button>
-            <button class="button secondary convert-button" type="button" data-convert-format="gif">GIF</button>
+            <div class="section-title">
+              <h2>파일 변환</h2>
+              <span class="help-tooltip">
+                <button class="help-button" type="button" aria-label="파일 변환 도움말">
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5"/><path d="M8.2 7.7a2 2 0 0 1 3.9.6c0 1.6-2.1 1.7-2.1 3.1M10 14h.01"/></svg>
+                </button>
+                <span class="help-popover" role="tooltip">선택 구간을 MP4, 움직이는 GIF 또는 선택한 재생 속도의 MP4로 저장합니다.</span>
+              </span>
+            </div>
+            <button class="button secondary convert-button" type="button" data-convert-format="mp4" title="현재 선택 구간을 MP4로 변환">MP4</button>
+            <button class="button secondary convert-button" type="button" data-convert-format="gif" title="현재 선택 구간을 움직이는 GIF로 변환">GIF</button>
             <span id="speed-save-control" class="speed-save-control" title="1×에서는 기본 다운로드를 이용하세요.">
               <button id="speed-convert-button" class="button secondary convert-button speed-convert-button" type="button" disabled>
                 <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -182,7 +223,7 @@
         <section id="split-downloads" class="split-downloads" hidden>
           <div class="split-download-head">
             <strong id="split-result-summary">나눈 파일 (0개)</strong>
-            <button id="download-all-button" class="button primary compact-button" type="button">
+            <button id="download-all-button" class="button primary compact-button" type="button" title="나눈 파일 모두 다운로드">
               <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                 <path d="M12 4v10m0 0 4-4m-4 4-4-4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
                 <path d="M5 17.5v1.2c0 .7.6 1.3 1.3 1.3h11.4c.7 0 1.3-.6 1.3-1.3v-1.2" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
