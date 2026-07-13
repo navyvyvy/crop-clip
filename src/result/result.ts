@@ -426,7 +426,7 @@ async function convertPartAtSpeed(part: LoadedPart, speed: number, range?: TimeR
       "-map", "0:v:0",
       "-map", "0:a:0?",
       "-vf", `setpts=PTS/${speedText}`,
-      "-af", `atempo=${speedText}`,
+      "-af", `atempo=sqrt(${speedText}),atempo=sqrt(${speedText})`,
       "-c:v", "libx264",
       "-preset", "ultrafast",
       "-crf", "26",
@@ -741,7 +741,7 @@ function setSourceDuration(duration: number): void {
 
 function getSelectedPlaybackSpeed(): number {
   const speed = Number(elements.speedSelect.value);
-  return Number.isFinite(speed) && speed >= 0.5 && speed <= 2 ? speed : 1;
+  return Number.isFinite(speed) && speed >= 0.5 && speed <= 4 ? speed : 1;
 }
 
 function updateSpeedControls(): void {
