@@ -12,6 +12,10 @@ const functionNames = new Set([
   "getPairLayoutDirection",
   "getGroupedLayout",
   "computeDirectLayout",
+  "computeResizedEdges",
+  "getResizeFocusPoint",
+  "regionEdges",
+  "clamp",
 ]);
 const selectedStatements = [];
 function collectStatements(node) {
@@ -23,10 +27,32 @@ function collectStatements(node) {
 }
 collectStatements(sourceFile);
 const statements = selectedStatements.join("\n");
-const runtime = ts.transpileModule(`${statements}\nreturn { computeDirectLayout, scaleLayout };`, {
+const runtime = ts.transpileModule(`${statements}\nreturn { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint };`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
 }).outputText;
-const { computeDirectLayout, scaleLayout } = new Function(runtime)();
+const { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint } = new Function(runtime)();
+
+const resizeStart = { left: 100, top: 100, right: 300, bottom: 200 };
+const resizeBounds = { left: 0, top: 0, right: 500, bottom: 500 };
+assert.deepEqual(computeResizedEdges(resizeStart, "e", 50, 0, resizeBounds, 50, 50, true, false), {
+  left: 100, top: 87.5, right: 350, bottom: 212.5,
+});
+assert.deepEqual(computeResizedEdges(resizeStart, "e", 50, 0, resizeBounds, 50, 50, false, true), {
+  left: 50, top: 100, right: 350, bottom: 200,
+});
+assert.deepEqual(computeResizedEdges(resizeStart, "se", 50, 0, resizeBounds, 50, 50, true, true), {
+  left: 50, top: 75, right: 350, bottom: 225,
+});
+assert.deepEqual(computeResizedEdges(resizeStart, "se", 500, 500, resizeBounds, 50, 50, true, true), {
+  left: 0, top: 50, right: 400, bottom: 250,
+});
+assert.deepEqual(computeResizedEdges(resizeStart, "e", -500, 0, resizeBounds, 50, 50, true, false), {
+  left: 100, top: 125, right: 200, bottom: 175,
+});
+const focusRegion = { x: 100, y: 100, width: 200, height: 100 };
+assert.deepEqual(getResizeFocusPoint(focusRegion, "e", 309, 140), { x: 300, y: 140 });
+assert.deepEqual(getResizeFocusPoint(focusRegion, "n", 150, 89), { x: 150, y: 100 });
+assert.deepEqual(getResizeFocusPoint(focusRegion, "se", 309, 209), { x: 300, y: 200 });
 
 function permutations(items) {
   if (items.length <= 1) return [items];

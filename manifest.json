@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "CropClip",
   "description": "치지직 방송 화면에서 원하는 영역만 선택해 로컬로 녹화하고 미리보기, 저장, 파일 나누기를 지원합니다.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "minimum_chrome_version": "116",
   "icons": {
     "16": "icons/icon16.png",

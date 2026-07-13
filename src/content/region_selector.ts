@@ -27,11 +27,17 @@ const BORDER_ID = "crop-clip-border";
 const BORDER_CLASS = "crop-clip-border";
 const SEEK_FEEDBACK_ID = "crop-clip-seek-feedback";
 const SCREENSHOT_STACK_ID = "crop-clip-screenshot-stack";
+const RESIZE_MAGNIFIER_ID = "crop-clip-resize-magnifier";
 const STYLE_ID = "crop-clip-style";
 const MIN_WIDTH = 50;
 const MIN_HEIGHT = 50;
 const BORDER_WIDTH = 2;
 const RESIZE_HIT_SIZE = 22;
+const RESIZE_MAGNIFIER_WIDTH = 112;
+const RESIZE_MAGNIFIER_HEIGHT = 84;
+const RESIZE_MAGNIFIER_BORDER = 2;
+const RESIZE_MAGNIFIER_SAMPLE_WIDTH = 28;
+const RESIZE_MAGNIFIER_SAMPLE_HEIGHT = 21;
 const SNAP_DISTANCE = 10;
 const MAX_ACTIVE_REGIONS = 4;
 const DEFAULT_MULTI_REGION_COUNT = 2;
@@ -341,6 +347,41 @@ function ensureStyle(): void {
       cursor: nwse-resize;
     }
 
+    .${BORDER_CLASS} .resize-modifiers {
+      position: absolute;
+      left: 50%;
+      top: 10px;
+      z-index: 5;
+      display: flex;
+      gap: 5px;
+      transform: translateX(-50%);
+      pointer-events: none;
+      white-space: nowrap;
+    }
+
+    .${BORDER_CLASS} .resize-modifiers[hidden],
+    .${BORDER_CLASS} .resize-modifier[hidden] {
+      display: none;
+    }
+
+    .${BORDER_CLASS} .resize-modifier {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 7px;
+      border: 1px solid rgba(255, 209, 102, 0.68);
+      border-radius: 7px;
+      background: rgba(6, 13, 20, 0.9);
+      color: #f7fbff;
+      font: 700 11px/1 "Segoe UI Variable", "Noto Sans KR", system-ui, sans-serif;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.32);
+    }
+
+    .${BORDER_CLASS} .resize-modifier kbd {
+      color: ${CROP_GUIDE};
+      font: inherit;
+    }
+
     .${BORDER_CLASS} .region-toolbar {
       position: absolute;
       right: -2px;
@@ -434,6 +475,48 @@ function ensureStyle(): void {
 
     .${BORDER_CLASS} .clear-region {
       color: rgba(255, 215, 215, 0.96);
+    }
+
+    #${RESIZE_MAGNIFIER_ID} {
+      position: fixed;
+      z-index: 2147483647;
+      width: ${RESIZE_MAGNIFIER_WIDTH}px;
+      height: ${RESIZE_MAGNIFIER_HEIGHT}px;
+      overflow: hidden;
+      border: ${RESIZE_MAGNIFIER_BORDER}px solid rgba(244, 251, 255, 0.92);
+      border-radius: 9px;
+      background: #000;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.42);
+      pointer-events: none;
+    }
+
+    #${RESIZE_MAGNIFIER_ID} canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      image-rendering: pixelated;
+    }
+
+    #${RESIZE_MAGNIFIER_ID}::before,
+    #${RESIZE_MAGNIFIER_ID}::after {
+      content: "";
+      position: absolute;
+      background: rgba(255, 209, 102, 0.92);
+      box-shadow: 0 0 0 1px rgba(5, 10, 16, 0.55);
+    }
+
+    #${RESIZE_MAGNIFIER_ID}::before {
+      left: 50%;
+      top: 0;
+      width: 1px;
+      height: 100%;
+    }
+
+    #${RESIZE_MAGNIFIER_ID}::after {
+      left: 0;
+      top: 50%;
+      width: 100%;
+      height: 1px;
     }
 
     #${SCREENSHOT_STACK_ID} {
@@ -688,6 +771,68 @@ function regionEdges(region: RegionSelection): { left: number; top: number; righ
     top: region.y,
     right: region.x + region.width,
     bottom: region.y + region.height,
+  };
+}
+
+function computeResizedEdges(
+  start: { left: number; top: number; right: number; bottom: number },
+  edge: string,
+  dx: number,
+  dy: number,
+  bounds: { left: number; top: number; right: number; bottom: number },
+  minWidth: number,
+  minHeight: number,
+  preserveRatio: boolean,
+  fromCenter: boolean,
+): { left: number; top: number; right: number; bottom: number } {
+  const startWidth = start.right - start.left;
+  const startHeight = start.bottom - start.top;
+  const centerX = (start.left + start.right) / 2;
+  const centerY = (start.top + start.bottom) / 2;
+  const multiplier = fromCenter ? 2 : 1;
+  const changesWidth = edge.includes("w") || edge.includes("e");
+  const changesHeight = edge.includes("n") || edge.includes("s");
+  let width = startWidth + (edge.includes("e") ? dx : edge.includes("w") ? -dx : 0) * multiplier;
+  let height = startHeight + (edge.includes("s") ? dy : edge.includes("n") ? -dy : 0) * multiplier;
+
+  width = Math.max(minWidth, width);
+  height = Math.max(minHeight, height);
+  if (preserveRatio) {
+    const widthScale = width / startWidth;
+    const heightScale = height / startHeight;
+    const requestedScale = changesWidth && (!changesHeight || Math.abs(widthScale - 1) >= Math.abs(heightScale - 1))
+      ? widthScale
+      : heightScale;
+    const scale = Math.max(requestedScale, minWidth / startWidth, minHeight / startHeight);
+    width = startWidth * scale;
+    height = startHeight * scale;
+  }
+
+  const maxWidth = fromCenter || !changesWidth
+    ? 2 * Math.min(centerX - bounds.left, bounds.right - centerX)
+    : edge.includes("w") ? start.right - bounds.left : bounds.right - start.left;
+  const maxHeight = fromCenter || !changesHeight
+    ? 2 * Math.min(centerY - bounds.top, bounds.bottom - centerY)
+    : edge.includes("n") ? start.bottom - bounds.top : bounds.bottom - start.top;
+  if (preserveRatio) {
+    const scale = Math.min(1, maxWidth / width, maxHeight / height);
+    width *= scale;
+    height *= scale;
+  } else {
+    width = Math.min(width, maxWidth);
+    height = Math.min(height, maxHeight);
+  }
+
+  const left = fromCenter || !changesWidth ? centerX - width / 2 : edge.includes("w") ? start.right - width : start.left;
+  const top = fromCenter || !changesHeight ? centerY - height / 2 : edge.includes("n") ? start.bottom - height : start.top;
+  return { left, top, right: left + width, bottom: top + height };
+}
+
+function getResizeFocusPoint(region: RegionSelection, edge: string, clientX: number, clientY: number): { x: number; y: number } {
+  const { left, top, right, bottom } = regionEdges(region);
+  return {
+    x: edge.includes("w") ? left : edge.includes("e") ? right : clamp(clientX, left, right),
+    y: edge.includes("n") ? top : edge.includes("s") ? bottom : clamp(clientY, top, bottom),
   };
 }
 
@@ -1098,6 +1243,66 @@ function getRegionToolbarHtml(): string {
   `;
 }
 
+function hideResizeMagnifier(): void {
+  document.getElementById(RESIZE_MAGNIFIER_ID)?.remove();
+}
+
+function updateResizeMagnifier(video: HTMLVideoElement, clientX: number, clientY: number): void {
+  if (video.videoWidth <= 0 || video.videoHeight <= 0) {
+    hideResizeMagnifier();
+    return;
+  }
+
+  const rendered = getRenderedVideoRect(video).rect;
+  if (clientX < rendered.left || clientX > rendered.right || clientY < rendered.top || clientY > rendered.bottom) {
+    hideResizeMagnifier();
+    return;
+  }
+
+  let magnifier = document.getElementById(RESIZE_MAGNIFIER_ID) as HTMLDivElement | null;
+  if (!magnifier) {
+    magnifier = document.createElement("div");
+    magnifier.id = RESIZE_MAGNIFIER_ID;
+    magnifier.innerHTML = `<canvas width="${RESIZE_MAGNIFIER_SAMPLE_WIDTH}" height="${RESIZE_MAGNIFIER_SAMPLE_HEIGHT}"></canvas>`;
+    document.body.appendChild(magnifier);
+  }
+  const canvas = magnifier.querySelector("canvas");
+  const context = canvas?.getContext("2d", { alpha: false });
+  if (!canvas || !context) {
+    hideResizeMagnifier();
+    return;
+  }
+
+  const sourceX = (clientX - rendered.left) / rendered.width * video.videoWidth;
+  const sourceY = (clientY - rendered.top) / rendered.height * video.videoHeight;
+  const sampleX = Math.round(sourceX - canvas.width / 2);
+  const sampleY = Math.round(sourceY - canvas.height / 2);
+  const sourceLeft = clamp(sampleX, 0, video.videoWidth);
+  const sourceTop = clamp(sampleY, 0, video.videoHeight);
+  const sourceRight = clamp(sampleX + canvas.width, 0, video.videoWidth);
+  const sourceBottom = clamp(sampleY + canvas.height, 0, video.videoHeight);
+  const sampleWidth = sourceRight - sourceLeft;
+  const sampleHeight = sourceBottom - sourceTop;
+  try {
+    context.imageSmoothingEnabled = false;
+    context.fillStyle = "#000";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    if (sampleWidth > 0 && sampleHeight > 0) {
+      context.drawImage(video, sourceLeft, sourceTop, sampleWidth, sampleHeight, sourceLeft - sampleX, sourceTop - sampleY, sampleWidth, sampleHeight);
+    }
+  } catch {
+    hideResizeMagnifier();
+    return;
+  }
+
+  const width = RESIZE_MAGNIFIER_WIDTH + RESIZE_MAGNIFIER_BORDER * 2;
+  const height = RESIZE_MAGNIFIER_HEIGHT + RESIZE_MAGNIFIER_BORDER * 2;
+  const preferredLeft = clientX + 18 + width <= window.innerWidth ? clientX + 18 : clientX - width - 18;
+  const preferredTop = clientY - height - 18 >= 0 ? clientY - height - 18 : clientY + 18;
+  magnifier.style.left = `${clamp(preferredLeft, 8, Math.max(8, window.innerWidth - width - 8))}px`;
+  magnifier.style.top = `${clamp(preferredTop, 8, Math.max(8, window.innerHeight - height - 8))}px`;
+}
+
 function blobFromCanvas(canvas: HTMLCanvasElement): Promise<Blob> {
   return new Promise((resolve, reject) => {
     canvas.toBlob((blob) => {
@@ -1154,7 +1359,7 @@ function showScreenshotPreview(blob: Blob): void {
     <img alt="스크린샷 미리보기" src="${objectUrl}">
     <div class="screenshot-actions">
       <button class="screenshot-action save" type="button" aria-label="스크린샷 저장" title="스크린샷 저장">${getDownloadIconSvg()}</button>
-      <button class="screenshot-action close" type="button" aria-label="스크린샷 닫기" title="스크린샷 닫기">×</button>
+      <button class="screenshot-action close" type="button" aria-label="스크린샷 닫기" title="스크린샷 닫기">${getCloseIconSvg()}</button>
     </div>
   `;
 
@@ -1679,6 +1884,10 @@ function showSelectionBorders(regions: RegionSelection[]): void {
     border.dataset.regionIndex = String(index);
     border.innerHTML = `
       ${getRegionToolbarHtml()}
+      <span class="resize-modifiers" aria-live="polite" hidden>
+        <span class="resize-modifier" data-modifier="shift" hidden><kbd>Shift</kbd> 비율 고정</span>
+        <span class="resize-modifier" data-modifier="alt" hidden><kbd>Alt</kbd> 중앙 기준</span>
+      </span>
       <span class="resize-zone" data-edge="n" aria-hidden="true"></span>
       <span class="resize-zone" data-edge="s" aria-hidden="true"></span>
       <span class="resize-zone" data-edge="w" aria-hidden="true"></span>
@@ -2192,45 +2401,74 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
     stopActiveDrag?.();
     const minWidth = Math.min(MIN_WIDTH, bounds.width);
     const minHeight = Math.min(MIN_HEIGHT, bounds.height);
+    const modifierHud = border.querySelector<HTMLElement>(".resize-modifiers");
+    const shiftModifier = border.querySelector<HTMLElement>('[data-modifier="shift"]');
+    const altModifier = border.querySelector<HTMLElement>('[data-modifier="alt"]');
+    const updateResizeModifiers = (shiftKey: boolean, altKey: boolean) => {
+      modifierHud?.toggleAttribute("hidden", !shiftKey && !altKey);
+      shiftModifier?.toggleAttribute("hidden", !shiftKey);
+      altModifier?.toggleAttribute("hidden", !altKey);
+    };
+    const onModifierChange = (keyEvent: KeyboardEvent) => {
+      if (keyEvent.key !== "Shift" && keyEvent.key !== "Alt") {
+        return;
+      }
+      keyEvent.preventDefault();
+      updateResizeModifiers(keyEvent.shiftKey, keyEvent.altKey);
+    };
+    updateResizeModifiers(event.shiftKey, event.altKey);
+    const magnifierVideo = findPrimaryVideoElement();
+    if (magnifierVideo) {
+      const focus = getResizeFocusPoint(startRegion, edge, event.clientX, event.clientY);
+      updateResizeMagnifier(magnifierVideo, focus.x, focus.y);
+    }
 
     const onMove = (moveEvent: PointerEvent) => {
+      updateResizeModifiers(moveEvent.shiftKey, moveEvent.altKey);
       const dx = moveEvent.clientX - startX;
       const dy = moveEvent.clientY - startY;
-      let left = startLeft;
-      let top = startTop;
-      let right = startRight;
-      let bottom = startBottom;
-
-      if (edge.includes("w")) {
-        left = clamp(startLeft + dx, bounds.left, right - minWidth);
-      }
-      if (edge.includes("e")) {
-        right = clamp(startRight + dx, left + minWidth, bounds.right);
-      }
-      if (edge.includes("n")) {
-        top = clamp(startTop + dy, bounds.top, bottom - minHeight);
-      }
-      if (edge.includes("s")) {
-        bottom = clamp(startBottom + dy, top + minHeight, bounds.bottom);
-      }
-
-      let nextRegion = buildRegionSelection(left, top, right - left, bottom - top);
-      const snap = snapRegionEdges(nextRegion, index, edge);
+      const resized = computeResizedEdges(
+        { left: startLeft, top: startTop, right: startRight, bottom: startBottom },
+        edge,
+        dx,
+        dy,
+        bounds,
+        minWidth,
+        minHeight,
+        moveEvent.shiftKey,
+        moveEvent.altKey,
+      );
+      let nextRegion = buildRegionSelection(resized.left, resized.top, resized.right - resized.left, resized.bottom - resized.top);
+      const snap = moveEvent.shiftKey || moveEvent.altKey
+        ? { region: nextRegion, guides: new Map<number, Set<GuideSide>>() }
+        : snapRegionEdges(nextRegion, index, edge);
       nextRegion = snap.region;
       if (collidesWithOtherRegion(nextRegion, index)) {
+        if (magnifierVideo) {
+          const focus = getResizeFocusPoint(resolveRegionToViewport(currentRegions[index]), edge, moveEvent.clientX, moveEvent.clientY);
+          updateResizeMagnifier(magnifierVideo, focus.x, focus.y);
+        }
         return;
       }
       currentRegions[index] = nextRegion;
       currentRegion = getActiveRegion();
       applyBorderGeometry(border, nextRegion);
       syncBorderState(snap.guides);
+      if (magnifierVideo) {
+        const focus = getResizeFocusPoint(nextRegion, edge, moveEvent.clientX, moveEvent.clientY);
+        updateResizeMagnifier(magnifierVideo, focus.x, focus.y);
+      }
     };
 
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
+      window.removeEventListener("keydown", onModifierChange);
+      window.removeEventListener("keyup", onModifierChange);
       stopActiveDrag = null;
+      updateResizeModifiers(false, false);
+      hideResizeMagnifier();
       syncBorderState();
       void saveRegions(currentRegions);
     };
@@ -2239,6 +2477,8 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp, { once: true });
     window.addEventListener("pointercancel", onUp, { once: true });
+    window.addEventListener("keydown", onModifierChange);
+    window.addEventListener("keyup", onModifierChange);
   };
 
   const zones = Array.from(border.querySelectorAll<HTMLElement>(".resize-zone"));
@@ -2469,6 +2709,7 @@ async function initializePageState(): Promise<void> {
 function teardownOverlay(): void {
   removeSelectionHandlers?.();
   removeSelectionHandlers = null;
+  hideResizeMagnifier();
   currentOverlay?.remove();
   currentOverlay = null;
   selectionActive = false;
@@ -2605,6 +2846,7 @@ function startSelection(): void {
   let dragging = false;
   let startX = 0;
   let startY = 0;
+  let magnifierVideo: HTMLVideoElement | null = null;
 
   const onPointerDown = (event: PointerEvent) => {
     if (event.button !== 0) {
@@ -2618,9 +2860,13 @@ function startSelection(): void {
     }
 
     dragging = true;
+    magnifierVideo = findPrimaryVideoElement();
     startX = clamp(event.clientX, bounds.left, bounds.right);
     startY = clamp(event.clientY, bounds.top, bounds.bottom);
     updateSelectionBox(selectionBox, startX, startY, startX, startY);
+    if (magnifierVideo) {
+      updateResizeMagnifier(magnifierVideo, startX, startY);
+    }
     event.preventDefault();
   };
 
@@ -2634,7 +2880,12 @@ function startSelection(): void {
       return;
     }
 
-    updateSelectionBox(selectionBox, startX, startY, clamp(event.clientX, bounds.left, bounds.right), clamp(event.clientY, bounds.top, bounds.bottom));
+    const endX = clamp(event.clientX, bounds.left, bounds.right);
+    const endY = clamp(event.clientY, bounds.top, bounds.bottom);
+    updateSelectionBox(selectionBox, startX, startY, endX, endY);
+    if (magnifierVideo) {
+      updateResizeMagnifier(magnifierVideo, endX, endY);
+    }
     event.preventDefault();
   };
 
@@ -2644,6 +2895,8 @@ function startSelection(): void {
     }
 
     dragging = false;
+    magnifierVideo = null;
+    hideResizeMagnifier();
     const bounds = getVideoSelectionRect();
     if (!bounds) {
       setOverlayError("재생 가능한 비디오 영역을 찾지 못했습니다.");
@@ -2680,6 +2933,8 @@ function startSelection(): void {
 
   const onPointerCancel = () => {
     dragging = false;
+    magnifierVideo = null;
+    hideResizeMagnifier();
     updateSelectionBox(selectionBox, 0, 0, 0, 0);
   };
 
