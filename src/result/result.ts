@@ -1711,6 +1711,10 @@ elements.trimSelection.addEventListener("pointerup", (event) => finishTrimDrag(e
 elements.trimSelection.addEventListener("pointercancel", (event) => finishTrimDrag(event, true));
 
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && event.target instanceof HTMLElement && event.target.matches("select, input:not([type='range'])")) {
+    event.target.blur();
+    return;
+  }
   if (event.code !== "Space" || event.repeat || elements.previewVideo.readyState < HTMLMediaElement.HAVE_METADATA) {
     return;
   }
@@ -1728,6 +1732,12 @@ document.addEventListener("keydown", (event) => {
     void elements.previewVideo.play().catch(() => {});
   } else {
     elements.previewVideo.pause();
+  }
+});
+
+document.addEventListener("change", (event) => {
+  if (event.target instanceof HTMLElement && event.target.matches("select, input:not([type='range'])")) {
+    event.target.blur();
   }
 });
 
