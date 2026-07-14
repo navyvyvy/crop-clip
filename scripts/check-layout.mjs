@@ -14,6 +14,7 @@ const functionNames = new Set([
   "computeDirectLayout",
   "computeResizedEdges",
   "getResizeFocusPoint",
+  "getStreamerNameFromTitle",
   "regionEdges",
   "clamp",
 ]);
@@ -27,10 +28,16 @@ function collectStatements(node) {
 }
 collectStatements(sourceFile);
 const statements = selectedStatements.join("\n");
-const runtime = ts.transpileModule(`${statements}\nreturn { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint };`, {
+const runtime = ts.transpileModule(`${statements}\nreturn { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle };`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
 }).outputText;
-const { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint } = new Function(runtime)();
+const { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle } = new Function(runtime)();
+
+assert.equal(getStreamerNameFromTitle("치지직 게임 - CHZZK"), "치지직 게임");
+assert.equal(getStreamerNameFromTitle("치지직 스포츠 - CHZZK"), "치지직 스포츠");
+assert.equal(getStreamerNameFromTitle("치지직 배구 중계 - CHZZK"), "치지직 배구 중계");
+assert.equal(getStreamerNameFromTitle("치지직 - CHZZK"), "치지직");
+assert.equal(getStreamerNameFromTitle("Streamer | CHZZK"), "Streamer");
 
 const resizeStart = { left: 100, top: 100, right: 300, bottom: 200 };
 const resizeBounds = { left: 0, top: 0, right: 500, bottom: 500 };

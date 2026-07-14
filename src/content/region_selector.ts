@@ -1153,9 +1153,13 @@ function sanitizeFilenamePart(value: string): string {
   return value.replace(/[\\/:*?"<>|]/g, "").replace(/\s+/g, "_").trim().slice(0, 60);
 }
 
+function getStreamerNameFromTitle(title: string): string {
+  return title.split(/[-|]/)[0]?.trim() ?? "";
+}
+
 function getStreamerName(): string {
   const title = document.querySelector<HTMLMetaElement>('meta[property="og:title"]')?.content || document.title;
-  const titleName = title.split(/[-|]/)[0]?.replace(/치지직|CHZZK/gi, "").trim();
+  const titleName = getStreamerNameFromTitle(title);
   if (titleName) {
     return titleName;
   }
@@ -1172,7 +1176,7 @@ function getStreamerName(): string {
     }
   }
 
-  return document.title.split(/[-|]/)[0]?.trim() ?? "";
+  return getStreamerNameFromTitle(document.title);
 }
 
 function getCameraIconSvg(): string {
