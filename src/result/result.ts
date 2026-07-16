@@ -1775,7 +1775,7 @@ elements.splitValueInput.addEventListener("input", () => updateSplitPresetButton
 
 for (const button of elements.splitPresetButtons) {
   button.addEventListener("click", () => {
-    elements.splitValueInput.value = button.dataset.splitValue ?? "45";
+    elements.splitValueInput.value = button.dataset.splitValue ?? "40";
     updateSplitPresetButtons();
   });
 }
