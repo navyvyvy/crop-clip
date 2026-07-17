@@ -127,6 +127,7 @@ interface DirectRecordingSession {
   totalSize: number;
   currentChunks: BlobPart[];
   createdAt: number;
+  endedAt?: number;
   drawTimerId: number;
   stopRequested: boolean;
   cancelRequested: boolean;
@@ -1495,7 +1496,14 @@ async function cancelRecording(): Promise<void> {
 }
 
 function buildDirectFilename(session: DirectRecordingSession): string {
-  return `${session.baseName}.${session.extension}`;
+  const totalSeconds = Math.max(1, Math.round(((session.endedAt ?? Date.now()) - session.createdAt) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor(totalSeconds % 3600 / 60);
+  const seconds = totalSeconds % 60;
+  const duration = hours > 0
+    ? `${hours}h${String(minutes).padStart(2, "0")}m${String(seconds).padStart(2, "0")}s`
+    : minutes > 0 ? `${minutes}m${String(seconds).padStart(2, "0")}s` : `${seconds}s`;
+  return `${session.baseName}_${duration}.${session.extension}`;
 }
 
 function sendRuntimeMessage<T = undefined>(message: Record<string, unknown>): Promise<MessageResponse & { data?: T }> {
@@ -1588,7 +1596,7 @@ async function finalizeDirectRecording(session: DirectRecordingSession): Promise
       recording: {
         id: session.recordingId,
         createdAt: session.createdAt,
-        endedAt: Date.now(),
+        endedAt: session.endedAt ?? Date.now(),
         totalSize: session.totalSize,
         actualExtension: session.extension,
       },
@@ -1637,6 +1645,7 @@ function requestDirectPartStop(session: DirectRecordingSession): void {
   }
 
   session.closingPart = true;
+  session.endedAt ??= Date.now();
   try {
     session.recorder.requestData();
   } catch {

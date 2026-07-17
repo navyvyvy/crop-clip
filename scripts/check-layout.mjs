@@ -15,6 +15,7 @@ const functionNames = new Set([
   "computeResizedEdges",
   "getResizeFocusPoint",
   "getStreamerNameFromTitle",
+  "buildDirectFilename",
   "regionEdges",
   "clamp",
 ]);
@@ -28,16 +29,19 @@ function collectStatements(node) {
 }
 collectStatements(sourceFile);
 const statements = selectedStatements.join("\n");
-const runtime = ts.transpileModule(`${statements}\nreturn { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle };`, {
+const runtime = ts.transpileModule(`${statements}\nreturn { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename };`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
 }).outputText;
-const { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle } = new Function(runtime)();
+const { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename } = new Function(runtime)();
 
 assert.equal(getStreamerNameFromTitle("치지직 게임 - CHZZK"), "치지직 게임");
 assert.equal(getStreamerNameFromTitle("치지직 스포츠 - CHZZK"), "치지직 스포츠");
 assert.equal(getStreamerNameFromTitle("치지직 배구 중계 - CHZZK"), "치지직 배구 중계");
 assert.equal(getStreamerNameFromTitle("치지직 - CHZZK"), "치지직");
 assert.equal(getStreamerNameFromTitle("Streamer | CHZZK"), "Streamer");
+assert.equal(buildDirectFilename({ baseName: "streamer_20260717_120000", extension: "webm", createdAt: 1_000, endedAt: 43_400 }), "streamer_20260717_120000_42s.webm");
+assert.equal(buildDirectFilename({ baseName: "streamer_20260717_120000", extension: "webm", createdAt: 1_000, endedAt: 66_000 }), "streamer_20260717_120000_1m05s.webm");
+assert.equal(buildDirectFilename({ baseName: "streamer_20260717_120000", extension: "mp4", createdAt: 1_000, endedAt: 3_724_000 }), "streamer_20260717_120000_1h02m03s.mp4");
 
 const resizeStart = { left: 100, top: 100, right: 300, bottom: 200 };
 const resizeBounds = { left: 0, top: 0, right: 500, bottom: 500 };
