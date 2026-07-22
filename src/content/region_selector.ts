@@ -70,23 +70,12 @@ const DEFAULT_CONTENT_SHORTCUT_KEYS: ShortcutKeys = {
 
 type ContentCommand = import("../shared/messages.js").ContentCommand;
 type MessageResponse<T = undefined> = import("../shared/messages.js").MessageResponse<T>;
-type PlayerStatusRequest = import("../shared/messages.js").PlayerStatusRequest;
 type RecordingState = import("../shared/types.js").RecordingState;
 type RegionSelection = import("../shared/types.js").RegionSelection;
 type Settings = import("../shared/types.js").Settings;
 type ShortcutAction = import("../shared/types.js").ShortcutAction;
 type ShortcutKeys = import("../shared/types.js").ShortcutKeys;
 type LocalRecordingState = Pick<RecordingState, "status" | "startedAt" | "mode">;
-
-type PlayerStatusResponse =
-  | {
-      ok: true;
-      data: {
-        muted: boolean;
-        volume: number;
-      };
-    }
-  | { ok: false; error: string };
 
 type GuideSide = "n" | "s" | "w" | "e";
 type RegionGeometryResponse = MessageResponse<RegionSelection>;
@@ -3637,25 +3626,8 @@ function findPrimaryVideoElement(): HTMLVideoElement | null {
   return best;
 }
 
-function getPlayerStatus(): PlayerStatusResponse {
-  const video = findPrimaryVideoElement();
-  if (!video) {
-    return {
-      ok: false,
-      error: "재생 가능한 비디오 요소를 찾지 못했습니다.",
-    };
-  }
-
-  return { ok: true, data: { muted: video.muted, volume: video.volume } };
-}
-
 if (isExtensionContextAvailable()) {
-  chrome.runtime.onMessage.addListener((message: ContentCommand | PlayerStatusRequest, _sender, sendResponse: (response: MessageResponse | PlayerStatusResponse | RegionGeometryResponse | RegionGeometriesResponse) => void) => {
-    if (message.type === "GET_PLAYER_STATUS") {
-      sendResponse(getPlayerStatus());
-      return false;
-    }
-
+  chrome.runtime.onMessage.addListener((message: ContentCommand, _sender, sendResponse: (response: MessageResponse | RegionGeometryResponse | RegionGeometriesResponse) => void) => {
     if (message.type === "CLEAR_REGION") {
       void (async () => {
         const state = await loadState();

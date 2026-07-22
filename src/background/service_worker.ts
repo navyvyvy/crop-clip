@@ -68,20 +68,6 @@ async function getActiveRecordableTab(): Promise<chrome.tabs.Tab> {
   return tab;
 }
 
-async function queryPlayerStatus(tabId: number): Promise<{ ok: true; data: { muted: boolean; volume: number } } | { ok: false; error: string }> {
-  try {
-    const response = await sendToTab<{ ok: true; data: { muted: boolean; volume: number } } | { ok: false; error: string }>(tabId, { type: "GET_PLAYER_STATUS" });
-    if (!response) {
-      return { ok: false, error: "재생 상태를 확인할 수 없습니다." };
-    }
-
-    return response;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "재생 상태를 확인할 수 없습니다.";
-    return { ok: false, error: message };
-  }
-}
-
 async function sendCommandToContentScript<T = undefined>(tabId: number, message: ContentCommand): Promise<MessageResponse<T>> {
   const sendMessage = async (): Promise<MessageResponse<T>> => {
     return (await sendToTab<MessageResponse<T>>(tabId, message)) ?? fail("현재 탭에서 응답하지 않았습니다.");
@@ -215,18 +201,6 @@ async function startRecordingSession(fullPlayer: boolean): Promise<MessageRespon
   });
 
   try {
-    const playerStatus = await queryPlayerStatus(tabId);
-    if (!playerStatus.ok) {
-      await markRecordingErrorIfCurrent(recordingId);
-      return fail(playerStatus.error);
-    }
-
-    if (playerStatus.data.muted || playerStatus.data.volume === 0) {
-      const error = "현재 탭의 영상이 음소거되어 있어 녹화할 수 없습니다.";
-      await markRecordingErrorIfCurrent(recordingId);
-      return fail(error);
-    }
-
     const regionResponse = fullPlayer
       ? await getPlayerRegionGeometry(tabId)
       : settings.enableMultiRegion

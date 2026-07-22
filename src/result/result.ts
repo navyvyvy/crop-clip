@@ -1081,7 +1081,7 @@ async function createDurationSplitWithRecorder(part: LoadedPart, segmentSeconds:
       const blob = await recordVideoRange(video, start, end, mimeType);
       segments.push({
         blob,
-        filename: `${getFilenameBase(part.filename)}_split_${String(index + 1).padStart(3, "0")}.${outputFormat}`,
+        filename: `${getFilenameBase(part.filename)}_${String(index + 1).padStart(3, "0")}.${outputFormat}`,
         index: index + 1,
         startSeconds: start,
         endSeconds: end,
@@ -1139,7 +1139,7 @@ async function createDurationSplitWithFfmpeg(part: LoadedPart, segmentSeconds: n
       const end = Math.min(selectedRange.end, start + segmentSeconds);
       segments.push({
         blob: await readFfmpegBlob(ffmpeg, files[index].name, `video/${outputFormat}`),
-        filename: `${getFilenameBase(part.filename)}_split_${String(index + 1).padStart(3, "0")}.${outputFormat}`,
+        filename: `${getFilenameBase(part.filename)}_${String(index + 1).padStart(3, "0")}.${outputFormat}`,
         index: index + 1,
         startSeconds: start,
         endSeconds: end,
