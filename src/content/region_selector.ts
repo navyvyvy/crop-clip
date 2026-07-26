@@ -1389,13 +1389,13 @@ async function captureScreenshot(region: RegionSelection | null, missingMessage:
   }
 
   if (video.videoWidth <= 0 || video.videoHeight <= 0) {
-    window.alert("비디오 크기를 확인할 수 없습니다.");
+    window.alert("영상 크기를 확인하지 못했습니다.");
     return;
   }
 
   const crop = computeDirectCrop(region, video);
   if (!crop) {
-    window.alert("선택 영역이 비디오 화면과 겹치지 않습니다.");
+    window.alert("선택 영역이 영상 밖에 있습니다.");
     return;
   }
 
@@ -1709,15 +1709,15 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
 
   const video = findPrimaryVideoElement();
   if (!video) {
-    return { ok: false, error: "재생 가능한 비디오 요소를 찾지 못했습니다." };
+    return { ok: false, error: "재생 중인 영상을 찾지 못했습니다." };
   }
 
   if (video.muted || video.volume === 0) {
-    return { ok: false, error: "현재 탭의 영상이 음소거되어 있어 녹화할 수 없습니다." };
+    return { ok: false, error: "영상이 음소거되어 녹화할 수 없습니다." };
   }
 
   if (video.videoWidth <= 0 || video.videoHeight <= 0) {
-    return { ok: false, error: "비디오 크기를 확인할 수 없습니다." };
+    return { ok: false, error: "영상 크기를 확인하지 못했습니다." };
   }
 
   const sourceRegions = (command.regions?.length ? command.regions : [command.region]).slice(0, command.settings.enableMultiRegion ? getMultiRegionLimit(command.settings) : 1);
@@ -1725,7 +1725,7 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
     .map((region) => computeDirectCropFromSelection(region, video))
     .filter((crop): crop is DirectCrop => crop !== null);
   if (crops.length === 0) {
-    return { ok: false, error: "선택 영역이 비디오 화면과 겹치지 않습니다." };
+    return { ok: false, error: "선택 영역이 영상 밖에 있습니다." };
   }
 
   const layout = computeDirectLayout(crops);
@@ -1733,7 +1733,7 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
   const mime = selectDirectMimeType(command.settings);
   const sourceStream = getVideoStream(video);
   if (!sourceStream) {
-    return { ok: false, error: "이 브라우저에서는 비디오 스트림 직접 녹화를 지원하지 않습니다." };
+    return { ok: false, error: "이 브라우저에서는 현재 영상 녹화를 지원하지 않습니다." };
   }
 
   const canvas = document.createElement("canvas");
@@ -1748,7 +1748,7 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
   if (!context) {
     canvas.remove();
     sourceStream.getTracks().forEach((track) => track.stop());
-    return { ok: false, error: "캔버스 렌더링을 초기화할 수 없습니다." };
+    return { ok: false, error: "녹화 화면을 준비하지 못했습니다." };
   }
 
   const frameRate = command.settings.enable60fps ? 60 : 30;
@@ -2857,7 +2857,7 @@ function startSelection(): void {
 
     const bounds = getVideoSelectionRect();
     if (!bounds) {
-      setOverlayError("재생 가능한 비디오 영역을 찾지 못했습니다.");
+      setOverlayError("재생 중인 영상 영역을 찾지 못했습니다.");
       return;
     }
 
@@ -2901,7 +2901,7 @@ function startSelection(): void {
     hideResizeMagnifier();
     const bounds = getVideoSelectionRect();
     if (!bounds) {
-      setOverlayError("재생 가능한 비디오 영역을 찾지 못했습니다.");
+      setOverlayError("재생 중인 영상 영역을 찾지 못했습니다.");
       return;
     }
 
@@ -3661,7 +3661,7 @@ if (isExtensionContextAvailable()) {
 
     if (message.type === "GET_PLAYER_REGION_GEOMETRY") {
       const region = getPlayerRegionGeometry();
-      sendResponse(region ? { ok: true, data: region } : { ok: false, error: "재생 가능한 비디오 영역을 찾지 못했습니다." });
+      sendResponse(region ? { ok: true, data: region } : { ok: false, error: "재생 중인 영상 영역을 찾지 못했습니다." });
       return false;
     }
 

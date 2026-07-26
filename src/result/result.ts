@@ -134,6 +134,8 @@ const SEEK_METADATA_VERSION = 1;
 const TRIM_STEP_SECONDS = 0.1;
 const MEDIA_EVENT_TIMEOUT_MS = 15_000;
 const FFMPEG_EXEC_PROGRESS_MAX = 92;
+const PROGRESS_PREPARING_PERCENT = 6;
+const PROGRESS_FINALIZING_PERCENT = 96;
 const MAX_TIMELINE_THUMBNAILS = 24;
 const MIN_TIMELINE_THUMBNAILS = 6;
 const TIMELINE_THUMBNAIL_INTERVAL_SECONDS = 3;
@@ -299,6 +301,11 @@ function setProgressPercent(percent: number): void {
   elements.splitProgressBar.style.width = `${Math.max(0, Math.min(100, Math.round(percent)))}%`;
 }
 
+function setPreparingProgress(message: string): void {
+  setWorkStatus(message);
+  setProgressPercent(PROGRESS_PREPARING_PERCENT);
+}
+
 function setFfmpegProgressBase(percent: number): void {
   ffmpegProgressBase = percent;
   elements.splitProgressBar.toggleAttribute("data-preparing", percent < 18);
@@ -394,9 +401,10 @@ async function convertPartWithFfmpeg(part: LoadedPart, outputFormat: ConvertForm
     if (code !== 0) {
       throw new Error("빠른 변환에 실패했습니다.");
     }
+    setWorkStatus("파일을 마무리하는 중입니다.");
     setProgressPercent(94);
     const blob = await readFfmpegBlob(ffmpeg, outputName, getConvertedMimeType(outputFormat));
-    setProgressPercent(98);
+    setProgressPercent(PROGRESS_FINALIZING_PERCENT);
     return { source: blob, filename: getRangeFilename(part, outputFormat, range) };
   } finally {
     await clearFfmpegOutputs(ffmpeg);
@@ -438,9 +446,10 @@ async function convertPartAtSpeed(part: LoadedPart, speed: number, range?: TimeR
     if (code !== 0) {
       throw new Error("배속 변환에 실패했습니다.");
     }
+    setWorkStatus("파일을 마무리하는 중입니다.");
     setProgressPercent(94);
     const blob = await readFfmpegBlob(ffmpeg, outputName, "video/mp4");
-    setProgressPercent(98);
+    setProgressPercent(PROGRESS_FINALIZING_PERCENT);
     return { source: blob, filename: getSpeedFilename(part, speed, range) };
   } finally {
     await clearFfmpegOutputs(ffmpeg);
@@ -793,7 +802,11 @@ function renderSplitResults(segments: SplitSegment[]): void {
 
 function setSplitProgress(done: number, total: number): void {
   elements.splitProgressBar.removeAttribute("data-preparing");
-  const percent = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  const percent = done <= 0
+    ? PROGRESS_PREPARING_PERCENT
+    : total > 0 && done >= total
+      ? PROGRESS_FINALIZING_PERCENT
+      : total > 0 ? Math.round((done / total) * 100) : PROGRESS_PREPARING_PERCENT;
   setProgressPercent(percent);
 }
 
@@ -1438,7 +1451,7 @@ elements.downloadCurrentButton.addEventListener("click", () => {
     setSplitBusy(true);
     setSplitProgress(0, 1);
     try {
-      setWorkStatus("선택 구간을 준비하는 중입니다.");
+      setPreparingProgress("선택 구간을 준비하는 중입니다.");
       const item = await convertPart(part, part.extension, range);
       setSplitProgress(1, 1);
       await downloadSourcesSequentially([item]);
@@ -1470,7 +1483,7 @@ for (const button of elements.convertButtons) {
         const range = getActiveTimeRange();
         const sourceParts = range ? [getSelectedSourcePart()].filter((part): part is LoadedPart => Boolean(part)) : parts;
         setSplitProgress(0, Math.max(1, sourceParts.length));
-        setWorkStatus(`${outputFormat.toUpperCase()} 변환 중입니다.`);
+        setPreparingProgress(`${outputFormat.toUpperCase()} 변환을 준비하는 중입니다.`);
         const items: Array<{ source: Blob | string; filename: string }> = [];
         for (const [index, part] of sourceParts.entries()) {
           items.push(await convertPart(part, outputFormat, range));
@@ -1557,7 +1570,7 @@ elements.speedConvertButton.addEventListener("click", () => {
       const range = getActiveTimeRange();
       const sourceParts = range ? [getSelectedSourcePart()].filter((part): part is LoadedPart => Boolean(part)) : parts;
       setSplitProgress(0, Math.max(1, sourceParts.length));
-      setWorkStatus(`${speed}배속 MP4를 만드는 중입니다.`);
+      setPreparingProgress(`${speed}배속 MP4를 준비하는 중입니다.`);
       const items: Array<{ source: Blob; filename: string }> = [];
       for (const [index, part] of sourceParts.entries()) {
         items.push(await convertPartAtSpeed(part, speed, range));
@@ -1791,6 +1804,7 @@ elements.splitButton.addEventListener("click", () => {
     clearSplitResults();
     setSplitBusy(true);
     try {
+      setPreparingProgress("파일 나누기를 준비하는 중입니다.");
       const mode = elements.splitModeSelect.value;
       const outputFormat = elements.splitFormatSelect.value === RECORDING_FORMAT.mp4 ? RECORDING_FORMAT.mp4 : RECORDING_FORMAT.webm;
       const minimum = mode === "duration" ? TRIM_STEP_SECONDS : 1;

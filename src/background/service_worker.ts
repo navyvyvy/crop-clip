@@ -5,6 +5,7 @@ import { RECORDING_MODE, RECORDING_STATUS, type RegionSelection, type Settings }
 const DELETE_AFTER_MINUTES = 10;
 const DELETE_RETRY_MINUTES = 1;
 const DELETE_ALARM_PREFIX = "delete-recording:";
+const TAB_MESSAGE_RETRY_DELAY_MS = 80;
 let recordingStartInFlight = false;
 
 function sendToTab<T = undefined>(tabId: number, message: unknown): Promise<T | undefined> {
@@ -23,6 +24,17 @@ function sendToTab<T = undefined>(tabId: number, message: unknown): Promise<T | 
 
 function getDeleteAlarmName(recordingId: string): string {
   return `${DELETE_ALARM_PREFIX}${recordingId}`;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getContentScriptErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  return /message port closed|receiving end does not exist|extension context invalidated/i.test(message)
+    ? "현재 페이지가 아직 준비되지 않았습니다. 잠시 후 다시 시도하세요."
+    : message || "현재 탭에서 명령을 실행할 수 없습니다.";
 }
 
 async function markRecordingErrorIfCurrent(recordingId?: string): Promise<void> {
@@ -81,15 +93,10 @@ async function sendCommandToContentScript<T = undefined>(tabId: number, message:
         target: { tabId },
         files: ["content/region_selector.js"],
       });
+      await delay(TAB_MESSAGE_RETRY_DELAY_MS);
       return await sendMessage();
     } catch (fallbackError) {
-      const message =
-        fallbackError instanceof Error
-          ? fallbackError.message
-          : error instanceof Error
-            ? error.message
-            : "현재 탭에서 명령을 실행할 수 없습니다.";
-      return fail(message);
+      return fail(getContentScriptErrorMessage(fallbackError instanceof Error ? fallbackError : error));
     }
   }
 }
@@ -182,7 +189,7 @@ async function startRecordingSession(fullPlayer: boolean): Promise<MessageRespon
   const storedRegion = state.region;
 
   if (!fullPlayer && !storedRegion) {
-    return fail("먼저 녹화 영역을 선택하세요.");
+    return fail("녹화 영역을 먼저 선택하세요.");
   }
 
   if (state.recordingState.status === RECORDING_STATUS.recording) {
@@ -207,14 +214,14 @@ async function startRecordingSession(fullPlayer: boolean): Promise<MessageRespon
         ? await getCurrentRegionGeometries(tabId)
         : await getCurrentRegionGeometry(tabId);
     if (!regionResponse.ok || !regionResponse.data) {
-      const error = regionResponse.ok ? "녹화할 비디오 영역을 찾지 못했습니다." : regionResponse.error;
+      const error = regionResponse.ok ? "녹화할 영상 영역을 찾지 못했습니다." : regionResponse.error;
       await markRecordingErrorIfCurrent(recordingId);
       return fail(error);
     }
 
     const regions = Array.isArray(regionResponse.data) ? regionResponse.data : [regionResponse.data];
     if (!regions[0]) {
-      const error = "녹화할 비디오 영역을 찾지 못했습니다.";
+      const error = "녹화할 영상 영역을 찾지 못했습니다.";
       await markRecordingErrorIfCurrent(recordingId);
       return fail(error);
     }
