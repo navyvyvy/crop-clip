@@ -42,6 +42,7 @@ const SNAP_DISTANCE = 10;
 const MAX_ACTIVE_REGIONS = 4;
 const DEFAULT_MULTI_REGION_COUNT = 2;
 const DEFAULT_SEEK_SECONDS = 5;
+const VIDEO_FRAME_READY_TIMEOUT_MS = 3_000;
 const DIRECT_RECORDING_PART_INDEX = 1;
 const POINTER_CLICK_DEDUP_MS = 500;
 const CROP_ACCENT = "#5bd6bf";
@@ -659,6 +660,34 @@ function isExtensionContextAvailable(): boolean {
 function getVideoStream(video: HTMLVideoElement): MediaStream | null {
   const source = video as HTMLVideoElement & { captureStream?: () => MediaStream; mozCaptureStream?: () => MediaStream };
   return source.captureStream?.() ?? source.mozCaptureStream?.() ?? null;
+}
+
+function waitForCurrentVideoFrame(video: HTMLVideoElement): Promise<boolean> {
+  const isReady = () => video.isConnected
+    && !video.seeking
+    && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+    && video.videoWidth > 0
+    && video.videoHeight > 0;
+  if (isReady()) {
+    return Promise.resolve(true);
+  }
+
+  return new Promise((resolve) => {
+    const events = ["seeked", "loadeddata", "canplay"] as const;
+    const finish = (ready: boolean) => {
+      window.clearTimeout(timeoutId);
+      events.forEach((eventName) => video.removeEventListener(eventName, check));
+      resolve(ready);
+    };
+    const check = () => {
+      if (isReady()) {
+        finish(true);
+      }
+    };
+    const timeoutId = window.setTimeout(() => finish(isReady()), VIDEO_FRAME_READY_TIMEOUT_MS);
+    events.forEach((eventName) => video.addEventListener(eventName, check));
+    check();
+  });
 }
 
 function getRenderedVideoRect(video: HTMLVideoElement): { rect: DOMRect; fit: "fill" | "uniform" } {
@@ -1388,8 +1417,8 @@ async function captureScreenshot(region: RegionSelection | null, missingMessage:
     return;
   }
 
-  if (video.videoWidth <= 0 || video.videoHeight <= 0) {
-    window.alert("영상 크기를 확인하지 못했습니다.");
+  if (!await waitForCurrentVideoFrame(video)) {
+    window.alert("영상 프레임이 아직 준비되지 않았습니다. 잠시 후 다시 시도하세요.");
     return;
   }
 
@@ -1712,12 +1741,12 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
     return { ok: false, error: "재생 중인 영상을 찾지 못했습니다." };
   }
 
-  if (video.muted || video.volume === 0) {
-    return { ok: false, error: "영상이 음소거되어 녹화할 수 없습니다." };
+  if (!await waitForCurrentVideoFrame(video)) {
+    return { ok: false, error: "영상 프레임이 아직 준비되지 않았습니다. 잠시 후 다시 시도하세요." };
   }
 
-  if (video.videoWidth <= 0 || video.videoHeight <= 0) {
-    return { ok: false, error: "영상 크기를 확인하지 못했습니다." };
+  if (video.muted || video.volume === 0) {
+    return { ok: false, error: "영상이 음소거되어 녹화할 수 없습니다." };
   }
 
   const sourceRegions = (command.regions?.length ? command.regions : [command.region]).slice(0, command.settings.enableMultiRegion ? getMultiRegionLimit(command.settings) : 1);
