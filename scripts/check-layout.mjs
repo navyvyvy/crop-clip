@@ -21,6 +21,7 @@ assert.doesNotMatch(sourceText, /setInterval\(updateRecordButton/);
 assert.doesNotMatch(sourceText, /setInterval\(\(\) => requestChzzkToolSync/);
 assert.doesNotMatch(sourceText, /regionLayoutTimerId/);
 assert.match(sourceText, /new ResizeObserver\(requestRegionLayoutSync\)/);
+assert.match(sourceText, /if \(toolHost && \(!toolHost\.isConnected \|\| missingExpectedButton\)\) \{\s*syncPlayerToolsForLocation\(\)/);
 assert.match(sourceText, /if \(style\.textContent !== css\)/);
 assert.match(sourceText, /applyBorderGeometry\(border, region, renderedRect\)/);
 assert.match(sourceText, /const bounds = selectionBounds;/);
@@ -36,7 +37,9 @@ assert.match(sourceText, /video\.readyState >= HTMLMediaElement\.HAVE_CURRENT_DA
 assert.doesNotMatch(sourceText, /visibleArea === 0/);
 assert.match(serviceWorkerText, /await scheduleRecordingDeletion\(recording\.id\)\.catch\(\(\) => \{\}\);/);
 assert.match(serviceWorkerText, /checkpointStores = new Map<string, Promise<void>>\(\)/);
-assert.match(serviceWorkerText, /checkpointFinalizations = new Map<string, Promise<MessageResponse>>\(\)/);
+assert.match(serviceWorkerText, /recordingTerminalOperations = new Map<string, Promise<void>>\(\)/);
+assert.match(serviceWorkerText, /RECOVERY_FINALIZE_ATTEMPTS = 3/);
+assert.match(serviceWorkerText, /runRecordingTerminalOperation\(recordingId, \(\) => finalizeRecordingFromChunksUnlocked/);
 assert.match(serviceWorkerText, /await checkpointStores\.get\(recordingId\)/);
 assert.match(serviceWorkerText, /async function recoverRecording\(recordingId: string, endedAt: number\): Promise<boolean>/);
 assert.match(serviceWorkerText, /state\.status === RECORDING_STATUS\.completed && state\.recordingId === recordingId/);
@@ -70,6 +73,7 @@ const functionNames = new Set([
   "buildDirectFilename",
   "getFinalRecordingEndedAt",
   "decodeRecordingDataUrl",
+  "runRecordingTerminalOperation",
   "regionEdges",
   "clamp",
 ]);
@@ -84,10 +88,10 @@ function collectStatements(node, file) {
 collectStatements(sourceFile, sourceFile);
 collectStatements(serviceWorkerFile, serviceWorkerFile);
 const statements = selectedStatements.join("\n");
-const runtime = ts.transpileModule(`${statements}\nreturn { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl };`, {
+const runtime = ts.transpileModule(`const recordingTerminalOperations = new Map();\n${statements}\nreturn { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, runRecordingTerminalOperation };`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
 }).outputText;
-const { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl } = new Function(runtime)();
+const { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, runRecordingTerminalOperation } = new Function(runtime)();
 
 assert.equal(getStreamerNameFromTitle("치지직 게임 - CHZZK"), "치지직 게임");
 assert.equal(getStreamerNameFromTitle("치지직 스포츠 - CHZZK"), "치지직 스포츠");
@@ -103,6 +107,25 @@ assert.equal(getFinalRecordingEndedAt(1_000, 10_000), 10_000);
 const decodedCheckpoint = decodeRecordingDataUrl("data:video/webm;codecs=vp8,opus;base64,AQID", "video/webm;codecs=vp8,opus");
 assert.equal(decodedCheckpoint.type, "video/webm;codecs=vp8,opus");
 assert.equal(decodedCheckpoint.size, 3);
+let releaseFirstTerminalOperation;
+const terminalOrder = [];
+const firstTerminalOperation = runRecordingTerminalOperation("same-recording", async () => {
+  terminalOrder.push("first-start");
+  await new Promise((resolve) => {
+    releaseFirstTerminalOperation = resolve;
+  });
+  terminalOrder.push("first-end");
+  return 1;
+});
+const secondTerminalOperation = runRecordingTerminalOperation("same-recording", async () => {
+  terminalOrder.push("second");
+  return 2;
+});
+await new Promise((resolve) => setImmediate(resolve));
+assert.deepEqual(terminalOrder, ["first-start"]);
+releaseFirstTerminalOperation();
+assert.deepEqual(await Promise.all([firstTerminalOperation, secondTerminalOperation]), [1, 2]);
+assert.deepEqual(terminalOrder, ["first-start", "first-end", "second"]);
 const resizeStart = { left: 100, top: 100, right: 300, bottom: 200 };
 const resizeBounds = { left: 0, top: 0, right: 500, bottom: 500 };
 assert.deepEqual(computeResizedEdges(resizeStart, "e", 50, 0, resizeBounds, 50, 50, true, false), {

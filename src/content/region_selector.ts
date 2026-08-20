@@ -3653,11 +3653,11 @@ function installChzzkToolButton(): void {
       || (expectsFullRecordingControls && cancelButton?.parentElement !== toolHost)
       || (fullScreenshotButtonEnabled && screenshotButton?.parentElement !== toolHost);
     if (toolHost && (!toolHost.isConnected || missingExpectedButton)) {
-      installChzzkToolButton();
+      syncPlayerToolsForLocation();
       return;
     }
     if (!toolHost && mutationAddsChzzkPlayer(records)) {
-      installChzzkToolButton();
+      syncPlayerToolsForLocation();
     }
   });
   if (toolHost) {

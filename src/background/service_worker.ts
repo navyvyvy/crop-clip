@@ -7,9 +7,10 @@ const DELETE_RETRY_MINUTES = 1;
 const DELETE_ALARM_PREFIX = "delete-recording:";
 const TAB_MESSAGE_RETRY_DELAY_MS = 80;
 const CHECKPOINT_FINALIZE_DELAY_MS = 300;
+const RECOVERY_FINALIZE_ATTEMPTS = 3;
 let recordingStartInFlight = false;
 const checkpointStores = new Map<string, Promise<void>>();
-const checkpointFinalizations = new Map<string, Promise<MessageResponse>>();
+const recordingTerminalOperations = new Map<string, Promise<void>>();
 
 function sendToTab<T = undefined>(tabId: number, message: unknown): Promise<T | undefined> {
   return new Promise<T | undefined>((resolve, reject) => {
@@ -50,11 +51,7 @@ async function markRecordingErrorIfCurrent(recordingId?: string): Promise<boolea
   return true;
 }
 
-async function discardRecordingIfCurrent(recordingId?: string): Promise<void> {
-  if (!recordingId) {
-    return;
-  }
-
+async function discardRecordingIfCurrentUnlocked(recordingId: string): Promise<void> {
   const state = await loadRecordingState();
   if (state.recordingId !== recordingId || state.status === RECORDING_STATUS.completed) {
     return;
@@ -65,6 +62,25 @@ async function discardRecordingIfCurrent(recordingId?: string): Promise<void> {
 
   await checkpointStores.get(recordingId)?.catch(() => {});
   await deleteRecordingEventually(recordingId);
+}
+
+function runRecordingTerminalOperation<T>(recordingId: string, operation: () => Promise<T>): Promise<T> {
+  const previous = recordingTerminalOperations.get(recordingId) ?? Promise.resolve();
+  const result = previous.catch(() => {}).then(operation);
+  const tail = result.then(() => undefined, () => undefined);
+  recordingTerminalOperations.set(recordingId, tail);
+
+  return result.finally(() => {
+    if (recordingTerminalOperations.get(recordingId) === tail) {
+      recordingTerminalOperations.delete(recordingId);
+    }
+  });
+}
+
+async function discardRecordingIfCurrent(recordingId?: string): Promise<void> {
+  if (recordingId) {
+    await runRecordingTerminalOperation(recordingId, () => discardRecordingIfCurrentUnlocked(recordingId));
+  }
 }
 
 async function scheduleRecordingDeletion(recordingId: string): Promise<MessageResponse> {
@@ -348,20 +364,34 @@ async function stopRecording(): Promise<MessageResponse> {
 }
 
 async function cancelRecording(): Promise<MessageResponse> {
-  const state = await loadRecordingState();
-  if (state.status !== RECORDING_STATUS.recording) {
+  const initialState = await loadRecordingState();
+  if (initialState.status !== RECORDING_STATUS.recording) {
     return ok();
   }
 
-  await saveRecordingState({ status: RECORDING_STATUS.idle });
-  if (typeof state.tabId === "number") {
-    await cancelDirectRecording(state.tabId, state.recordingId);
+  if (!initialState.recordingId) {
+    await saveRecordingState({ status: RECORDING_STATUS.idle });
+    if (typeof initialState.tabId === "number") {
+      await cancelDirectRecording(initialState.tabId);
+    }
+    return ok();
   }
-  if (state.recordingId) {
+
+  const recordingId = initialState.recordingId;
+  return await runRecordingTerminalOperation(recordingId, async () => {
+    const state = await loadRecordingState();
+    if (state.status !== RECORDING_STATUS.recording || state.recordingId !== recordingId) {
+      return ok();
+    }
+
+    await saveRecordingState({ status: RECORDING_STATUS.idle });
+    if (typeof state.tabId === "number") {
+      await cancelDirectRecording(state.tabId, state.recordingId);
+    }
     await checkpointStores.get(state.recordingId)?.catch(() => {});
     await deleteRecordingEventually(state.recordingId);
-  }
-  return ok();
+    return ok();
+  });
 }
 
 async function completeRecording(recording: RecordingRecord): Promise<MessageResponse> {
@@ -433,80 +463,79 @@ function storeRecordingChunk(message: StoreRecordingChunkMessage): Promise<Messa
     });
 }
 
-function finalizeRecordingFromChunks(recordingId: string, endedAt: number): Promise<MessageResponse> {
-  const currentFinalization = checkpointFinalizations.get(recordingId);
-  if (currentFinalization) {
-    return currentFinalization;
+async function finalizeRecordingFromChunksUnlocked(recordingId: string, endedAt: number): Promise<MessageResponse> {
+  const state = await loadRecordingState();
+  if (state.status !== RECORDING_STATUS.recording || state.recordingId !== recordingId) {
+    return ok();
   }
 
-  const finalization = (async () => {
-    const state = await loadRecordingState();
-    if (state.status !== RECORDING_STATUS.recording || state.recordingId !== recordingId) {
-      return ok();
-    }
+  await checkpointStores.get(recordingId);
+  const chunks = await getChunksByRecordingId(recordingId);
+  const first = chunks[0];
+  if (!first) {
+    return fail("저장된 녹화 데이터가 없습니다.");
+  }
+  if (chunks.some((chunk, index) => chunk.index !== index + 1 || chunk.mimeType !== first.mimeType)) {
+    return fail("저장된 녹화 데이터의 일부가 누락되었습니다.");
+  }
 
-    await checkpointStores.get(recordingId);
-    const chunks = await getChunksByRecordingId(recordingId);
-    const first = chunks[0];
-    if (!first) {
-      return fail("저장된 녹화 데이터가 없습니다.");
-    }
-    if (chunks.some((chunk, index) => chunk.index !== index + 1 || chunk.mimeType !== first.mimeType)) {
-      return fail("저장된 녹화 데이터의 일부가 누락되었습니다.");
-    }
+  const blob = new Blob(chunks.map((chunk) => chunk.blob), { type: first.mimeType });
+  if (blob.size <= 0) {
+    return fail("녹화 데이터가 비어 있습니다.");
+  }
 
-    const blob = new Blob(chunks.map((chunk) => chunk.blob), { type: first.mimeType });
-    if (blob.size <= 0) {
-      return fail("녹화 데이터가 비어 있습니다.");
-    }
+  const lastCapturedAt = chunks.at(-1)?.capturedAt;
+  const actualEndedAt = getFinalRecordingEndedAt(first.createdAt, endedAt, lastCapturedAt);
+  await putPart({
+    id: `${recordingId}:part:001`,
+    recordingId,
+    index: 1,
+    filename: buildDirectFilename(first.baseName, first.extension, first.createdAt, actualEndedAt),
+    mimeType: first.mimeType,
+    extension: first.extension,
+    outputFormat: first.outputFormat,
+    size: blob.size,
+    blob,
+    createdAt: actualEndedAt,
+  });
 
-    const lastCapturedAt = chunks.at(-1)?.capturedAt;
-    const actualEndedAt = getFinalRecordingEndedAt(first.createdAt, endedAt, lastCapturedAt);
-    await putPart({
-      id: `${recordingId}:part:001`,
-      recordingId,
-      index: 1,
-      filename: buildDirectFilename(first.baseName, first.extension, first.createdAt, actualEndedAt),
-      mimeType: first.mimeType,
-      extension: first.extension,
-      outputFormat: first.outputFormat,
-      size: blob.size,
-      blob,
-      createdAt: actualEndedAt,
-    });
+  return await completeRecording({
+    id: recordingId,
+    createdAt: first.createdAt,
+    endedAt: actualEndedAt,
+    totalSize: blob.size,
+    actualExtension: first.extension,
+  });
+}
 
-    return await completeRecording({
-      id: recordingId,
-      createdAt: first.createdAt,
-      endedAt: actualEndedAt,
-      totalSize: blob.size,
-      actualExtension: first.extension,
-    });
-  })();
-  checkpointFinalizations.set(recordingId, finalization);
-  const clearFinalization = () => {
-    if (checkpointFinalizations.get(recordingId) === finalization) {
-      checkpointFinalizations.delete(recordingId);
-    }
-  };
-  void finalization.then(clearFinalization, clearFinalization);
-  return finalization;
+function finalizeRecordingFromChunks(recordingId: string, endedAt: number): Promise<MessageResponse> {
+  return runRecordingTerminalOperation(recordingId, () => finalizeRecordingFromChunksUnlocked(recordingId, endedAt));
 }
 
 async function recoverRecording(recordingId: string, endedAt: number): Promise<boolean> {
-  try {
-    await finalizeRecordingFromChunks(recordingId, endedAt);
-  } catch {
-    // The state check below decides whether completion succeeded before cleanup.
-  }
+  return await runRecordingTerminalOperation(recordingId, async () => {
+    for (let attempt = 0; attempt < RECOVERY_FINALIZE_ATTEMPTS; attempt += 1) {
+      try {
+        await finalizeRecordingFromChunksUnlocked(recordingId, endedAt);
+      } catch {
+        // A late checkpoint or a transient IndexedDB failure may succeed on retry.
+      }
 
-  const state = await loadRecordingState();
-  if (state.status === RECORDING_STATUS.completed && state.recordingId === recordingId) {
-    return true;
-  }
+      const state = await loadRecordingState();
+      if (state.status === RECORDING_STATUS.completed && state.recordingId === recordingId) {
+        return true;
+      }
+      if (state.status !== RECORDING_STATUS.recording || state.recordingId !== recordingId) {
+        return false;
+      }
+      if (attempt + 1 < RECOVERY_FINALIZE_ATTEMPTS) {
+        await delay(CHECKPOINT_FINALIZE_DELAY_MS);
+      }
+    }
 
-  await discardRecordingIfCurrent(recordingId);
-  return false;
+    await discardRecordingIfCurrentUnlocked(recordingId);
+    return false;
+  });
 }
 
 async function recoverRecordingAfterTabExit(tabId: number): Promise<void> {
