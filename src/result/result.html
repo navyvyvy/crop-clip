@@ -167,12 +167,12 @@
                 <button class="help-button" type="button" aria-label="파일 나누기 도움말">
                   <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5"/><path d="M8.2 7.7a2 2 0 0 1 3.9.6c0 1.6-2.1 1.7-2.1 3.1M10 14h.01"/></svg>
                 </button>
-                <span class="help-popover" role="tooltip">선택 구간을 시간 또는 예상 용량 기준으로 나눕니다.</span>
+                <span class="help-popover" role="tooltip">시간 기준은 같은 재생 시간으로 나눕니다. 용량 기준은 각 파일이 입력한 MB를 넘지 않도록 나누므로 파일별 재생 시간은 달라질 수 있습니다.</span>
               </span>
             </div>
-            <select id="split-mode-select" aria-label="나누기 기준" title="시간 또는 예상 용량 기준 선택">
+            <select id="split-mode-select" aria-label="나누기 기준" title="시간 간격 또는 파일별 최대 용량 기준 선택">
               <option value="duration">시간</option>
-              <option value="size">용량</option>
+              <option value="size">최대 용량</option>
             </select>
             <div class="split-value">
               <button id="split-value-decrease-button" type="button" aria-label="나누기 값 감소" title="나누기 값 줄이기">−</button>
@@ -192,9 +192,10 @@
               <span>나누기</span>
             </button>
             <div class="split-presets" aria-label="나누기 빠른 선택">
+              <button type="button" data-split-mode="duration" data-split-ratio="0.5" title="선택 구간을 두 파일로 나누기">절반</button>
               <button type="button" data-split-mode="duration" data-split-value="25" title="25초 단위로 나누기">25초</button>
               <button type="button" data-split-mode="duration" data-split-value="40" title="40초 단위로 나누기">40초</button>
-              <button type="button" data-split-mode="size" data-split-value="40" title="예상 용량 40MB 단위로 나누기">40MB</button>
+              <button type="button" data-split-mode="size" data-split-value="40" title="파일별 최대 용량을 40MB로 설정">40MB</button>
             </div>
           </div>
           <div class="tool-group convert-group" aria-label="파일 변환">

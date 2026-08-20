@@ -4,6 +4,58 @@ import ts from "typescript";
 
 const sourceText = fs.readFileSync(new URL("../src/content/region_selector.ts", import.meta.url), "utf8");
 const sourceFile = ts.createSourceFile("region_selector.ts", sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+const serviceWorkerText = fs.readFileSync(new URL("../src/background/service_worker.ts", import.meta.url), "utf8");
+const serviceWorkerFile = ts.createSourceFile("service_worker.ts", serviceWorkerText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+const resultText = fs.readFileSync(new URL("../src/result/result.ts", import.meta.url), "utf8");
+const messagesText = fs.readFileSync(new URL("../src/shared/messages.ts", import.meta.url), "utf8");
+const idbText = fs.readFileSync(new URL("../src/shared/idb.ts", import.meta.url), "utf8");
+const manifest = JSON.parse(fs.readFileSync(new URL("../manifest.json", import.meta.url), "utf8"));
+assert.equal(manifest.content_scripts[0].exclude_matches, undefined);
+assert.match(sourceText, /function suspendPlayerTools\(\)/);
+assert.match(sourceText, /currententrychange/);
+assert.match(sourceText, /chzzkToolObserver\.observe\(controlsRoot, \{ childList: true, subtree: true \}\)/);
+assert.doesNotMatch(sourceText, /chzzkToolObserver\.observe\(observerRoot/);
+assert.match(sourceText, /button\.dataset\.cropClipContent === contentKey/);
+assert.doesNotMatch(sourceText, /mutationTouchesChzzkPlayer/);
+assert.doesNotMatch(sourceText, /setInterval\(updateRecordButton/);
+assert.doesNotMatch(sourceText, /setInterval\(\(\) => requestChzzkToolSync/);
+assert.doesNotMatch(sourceText, /regionLayoutTimerId/);
+assert.match(sourceText, /new ResizeObserver\(requestRegionLayoutSync\)/);
+assert.match(sourceText, /if \(style\.textContent !== css\)/);
+assert.match(sourceText, /applyBorderGeometry\(border, region, renderedRect\)/);
+assert.match(sourceText, /const bounds = selectionBounds;/);
+assert.match(sourceText, /getContext\("2d", \{ alpha: false, desynchronized: true \}\)/);
+assert.ok(sourceText.indexOf("const canvasStream = canvas.captureStream(frameRate);") < sourceText.indexOf("paintPlacements(layout.placements);"));
+assert.doesNotMatch(sourceText, /document\.documentElement\.appendChild\(canvas\)/);
+assert.doesNotMatch(sourceText, /overlayObserver\.observe\(document\.documentElement, \{ childList: true, subtree: true \}\)/);
+assert.match(sourceText, /window\.addEventListener\("scroll", requestRegionLayoutSync, \{ capture: true, passive: true \}\)/);
+assert.doesNotMatch(sourceText, /window\.addEventListener\("scroll", \(\) => syncRegionLayoutGeometry/);
+assert.match(sourceText, /function bindDirectPlayerActivation\(/);
+assert.doesNotMatch(sourceText, /function bindDirectPlayer(?:Screenshot|Tool|Record|Cancel)Activation\(/);
+assert.match(sourceText, /video\.readyState >= HTMLMediaElement\.HAVE_CURRENT_DATA/);
+assert.doesNotMatch(sourceText, /visibleArea === 0/);
+assert.match(serviceWorkerText, /await scheduleRecordingDeletion\(recording\.id\)\.catch\(\(\) => \{\}\);/);
+assert.match(serviceWorkerText, /checkpointStores = new Map<string, Promise<void>>\(\)/);
+assert.match(serviceWorkerText, /checkpointFinalizations = new Map<string, Promise<MessageResponse>>\(\)/);
+assert.match(serviceWorkerText, /await checkpointStores\.get\(recordingId\)/);
+assert.match(serviceWorkerText, /async function recoverRecording\(recordingId: string, endedAt: number\): Promise<boolean>/);
+assert.match(serviceWorkerText, /state\.status === RECORDING_STATUS\.completed && state\.recordingId === recordingId/);
+assert.match(serviceWorkerText, /previousState\.status === RECORDING_STATUS\.completed && previousState\.recordingId === recording\.id/);
+assert.match(serviceWorkerText, /chunk\.index !== index \+ 1/);
+assert.match(sourceText, /function readBlobAsDataUrl\(/);
+assert.match(messagesText, /dataUrl: string/);
+assert.doesNotMatch(serviceWorkerText, /message\.chunk\.objectUrl/);
+assert.match(resultText, /function startDeletionKeepalive\(\)/);
+assert.match(resultText, /window\.addEventListener\("pageshow"/);
+assert.doesNotMatch(resultText, /createDurationSplitWithRecorder/);
+assert.match(resultText, /"-break_non_keyframes", "1"/);
+assert.match(resultText, /function getSplitPresetValue\(/);
+assert.match(resultText, /Math\.ceil\(roundTrimTime\(range\.end - range\.start\) \* ratio\)/);
+assert.match(resultText, /querySelectorAll<HTMLButtonElement>\("\[data-split-mode\]"\)/);
+assert.match(resultText, /빠른 변환을 지원하지 않아 실시간으로 처리 중입니다/);
+assert.doesNotMatch(messagesText, /CANCEL_RECORDING_DELETION/);
+assert.doesNotMatch(idbText, /openKeyCursor/);
+assert.match(idbText, /\.openCursor\(IDBKeyRange\.only\(recordingId\)\)/);
 const functionNames = new Set([
   "computeDirectOutput",
   "scaleLayout",
@@ -16,33 +68,41 @@ const functionNames = new Set([
   "getResizeFocusPoint",
   "getStreamerNameFromTitle",
   "buildDirectFilename",
+  "getFinalRecordingEndedAt",
+  "decodeRecordingDataUrl",
   "regionEdges",
   "clamp",
 ]);
 const selectedStatements = [];
-function collectStatements(node) {
+function collectStatements(node, file) {
   if (ts.isFunctionDeclaration(node) && node.name && functionNames.has(node.name.text)) {
-    selectedStatements.push(node.getText(sourceFile));
+    selectedStatements.push(node.getText(file));
     return;
   }
-  ts.forEachChild(node, collectStatements);
+  ts.forEachChild(node, (child) => collectStatements(child, file));
 }
-collectStatements(sourceFile);
+collectStatements(sourceFile, sourceFile);
+collectStatements(serviceWorkerFile, serviceWorkerFile);
 const statements = selectedStatements.join("\n");
-const runtime = ts.transpileModule(`${statements}\nreturn { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename };`, {
+const runtime = ts.transpileModule(`${statements}\nreturn { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl };`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
 }).outputText;
-const { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename } = new Function(runtime)();
+const { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl } = new Function(runtime)();
 
 assert.equal(getStreamerNameFromTitle("치지직 게임 - CHZZK"), "치지직 게임");
 assert.equal(getStreamerNameFromTitle("치지직 스포츠 - CHZZK"), "치지직 스포츠");
 assert.equal(getStreamerNameFromTitle("치지직 배구 중계 - CHZZK"), "치지직 배구 중계");
 assert.equal(getStreamerNameFromTitle("치지직 - CHZZK"), "치지직");
 assert.equal(getStreamerNameFromTitle("Streamer | CHZZK"), "Streamer");
-assert.equal(buildDirectFilename({ baseName: "streamer_20260717_120000", extension: "webm", createdAt: 1_000, endedAt: 43_400 }), "streamer_20260717_120000_42s.webm");
-assert.equal(buildDirectFilename({ baseName: "streamer_20260717_120000", extension: "webm", createdAt: 1_000, endedAt: 66_000 }), "streamer_20260717_120000_1m05s.webm");
-assert.equal(buildDirectFilename({ baseName: "streamer_20260717_120000", extension: "mp4", createdAt: 1_000, endedAt: 3_724_000 }), "streamer_20260717_120000_1h02m03s.mp4");
-
+assert.equal(buildDirectFilename("streamer_20260717_120000", "webm", 1_000, 43_400), "streamer_20260717_120000_42s.webm");
+assert.equal(buildDirectFilename("streamer_20260717_120000", "webm", 1_000, 66_000), "streamer_20260717_120000_1m05s.webm");
+assert.equal(buildDirectFilename("streamer_20260717_120000", "mp4", 1_000, 3_724_000), "streamer_20260717_120000_1h02m03s.mp4");
+assert.equal(getFinalRecordingEndedAt(1_000, 10_000, 10_100), 10_000);
+assert.equal(getFinalRecordingEndedAt(1_000, 60_000, 10_000), 10_000);
+assert.equal(getFinalRecordingEndedAt(1_000, 10_000), 10_000);
+const decodedCheckpoint = decodeRecordingDataUrl("data:video/webm;codecs=vp8,opus;base64,AQID", "video/webm;codecs=vp8,opus");
+assert.equal(decodedCheckpoint.type, "video/webm;codecs=vp8,opus");
+assert.equal(decodedCheckpoint.size, 3);
 const resizeStart = { left: 100, top: 100, right: 300, bottom: 200 };
 const resizeBounds = { left: 0, top: 0, right: 500, bottom: 500 };
 assert.deepEqual(computeResizedEdges(resizeStart, "e", 50, 0, resizeBounds, 50, 50, true, false), {

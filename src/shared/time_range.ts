@@ -4,6 +4,7 @@ export interface TimeRange {
 }
 
 export const MIN_TIME_RANGE_SECONDS = 0.1;
+export const BYTES_PER_MEGABYTE = 1_000_000;
 
 export type TimeRangeHandle = "start" | "end";
 
@@ -53,6 +54,35 @@ export function estimateRangeSize(totalBytes: number, range: TimeRange, duration
     return totalBytes;
   }
   return Math.round(totalBytes * Math.max(0, range.end - range.start) / duration);
+}
+
+export function megabytesToBytes(megabytes: number): number {
+  return megabytes * BYTES_PER_MEGABYTE;
+}
+
+export function bytesToMegabytes(bytes: number): number {
+  return bytes / BYTES_PER_MEGABYTE;
+}
+
+export function getNextSizeSplitSeconds(currentSeconds: number, maxBytes: number, largestBytes: number, minimumSeconds = 0.1, safetyRatio = 0.9): number {
+  const proportional = Math.floor(currentSeconds * maxBytes / largestBytes * safetyRatio * 10) / 10;
+  return Math.max(minimumSeconds, Math.min(currentSeconds - minimumSeconds, proportional));
+}
+
+export function getExpectedSplitCount(duration: number, segmentSeconds: number): number {
+  if (!Number.isFinite(duration) || !Number.isFinite(segmentSeconds) || duration <= 0 || segmentSeconds <= 0) {
+    return 0;
+  }
+  return Math.ceil(duration / segmentSeconds - 1e-6);
+}
+
+export function parseSegmentTimeList(value: string): TimeRange[] {
+  return value.trim().split(/\r?\n/).flatMap((line) => {
+    const columns = line.split(",");
+    const start = Number(columns.at(-2));
+    const end = Number(columns.at(-1));
+    return Number.isFinite(start) && Number.isFinite(end) && end >= start ? [{ start, end }] : [];
+  });
 }
 
 export function parseTimeInput(value: string): number {

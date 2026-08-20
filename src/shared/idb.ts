@@ -1,9 +1,10 @@
-import type { RecordingPartRecord, RecordingRecord } from "./types.js";
+import type { RecordingChunkRecord, RecordingPartRecord, RecordingRecord } from "./types.js";
 
 const DB_NAME = "cropClip";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const RECORDINGS_STORE = "recordings";
 const PARTS_STORE = "parts";
+const CHUNKS_STORE = "chunks";
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -22,6 +23,11 @@ function openDatabase(): Promise<IDBDatabase> {
         const store = db.createObjectStore(PARTS_STORE, { keyPath: "id" });
         store.createIndex("recordingId", "recordingId", { unique: false });
         store.createIndex("index", "index", { unique: false });
+      }
+
+      if (!db.objectStoreNames.contains(CHUNKS_STORE)) {
+        const store = db.createObjectStore(CHUNKS_STORE, { keyPath: "id" });
+        store.createIndex("recordingId", "recordingId", { unique: false });
       }
 
     };
@@ -81,6 +87,13 @@ export async function putPart(part: RecordingPartRecord): Promise<void> {
   await transactionDone(tx, "Failed to store part");
 }
 
+export async function putChunk(chunk: RecordingChunkRecord): Promise<void> {
+  const db = await getDb();
+  const tx = db.transaction(CHUNKS_STORE, "readwrite");
+  tx.objectStore(CHUNKS_STORE).put(chunk);
+  await transactionDone(tx, "Failed to store recording chunk");
+}
+
 export async function getRecording(recordingId: string): Promise<RecordingRecord | undefined> {
   const db = await getDb();
   const tx = db.transaction(RECORDINGS_STORE, "readonly");
@@ -97,17 +110,38 @@ export async function getPartsByRecordingId(recordingId: string): Promise<Record
   return parts.sort((left, right) => left.index - right.index);
 }
 
+export async function getChunksByRecordingId(recordingId: string): Promise<RecordingChunkRecord[]> {
+  const db = await getDb();
+  const tx = db.transaction(CHUNKS_STORE, "readonly");
+  const index = tx.objectStore(CHUNKS_STORE).index("recordingId");
+  const chunks = await requestToPromise<RecordingChunkRecord[]>(index.getAll(recordingId));
+  return chunks.sort((left, right) => left.index - right.index);
+}
+
+function deleteRecordsByRecordingId(store: IDBObjectStore, recordingId: string): void {
+  const request = store.index("recordingId").openCursor(IDBKeyRange.only(recordingId));
+  request.onsuccess = () => {
+    const cursor = request.result;
+    if (!cursor) {
+      return;
+    }
+    cursor.delete();
+    cursor.continue();
+  };
+}
+
+export async function deleteRecordingChunks(recordingId: string): Promise<void> {
+  const db = await getDb();
+  const tx = db.transaction(CHUNKS_STORE, "readwrite");
+  deleteRecordsByRecordingId(tx.objectStore(CHUNKS_STORE), recordingId);
+  await transactionDone(tx, "Failed to delete recording chunks");
+}
+
 export async function deleteRecording(recordingId: string): Promise<void> {
   const db = await getDb();
-  const tx = db.transaction([RECORDINGS_STORE, PARTS_STORE], "readwrite");
+  const tx = db.transaction([RECORDINGS_STORE, PARTS_STORE, CHUNKS_STORE], "readwrite");
   tx.objectStore(RECORDINGS_STORE).delete(recordingId);
-
-  const partStore = tx.objectStore(PARTS_STORE);
-  const index = partStore.index("recordingId");
-  const keys = await requestToPromise<IDBValidKey[]>(index.getAllKeys(recordingId));
-  for (const key of keys) {
-    partStore.delete(key);
-  }
-
+  deleteRecordsByRecordingId(tx.objectStore(PARTS_STORE), recordingId);
+  deleteRecordsByRecordingId(tx.objectStore(CHUNKS_STORE), recordingId);
   await transactionDone(tx, "Failed to delete recording");
 }

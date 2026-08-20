@@ -1,10 +1,15 @@
 import { getPartsByRecordingId, getRecording, putPart, putRecording } from "../shared/idb.js";
-import type { DeletionCancelRequest, DeletionScheduleRequest } from "../shared/messages.js";
+import type { DeletionScheduleRequest } from "../shared/messages.js";
 import { loadAppState } from "../shared/storage.js";
 import {
+  bytesToMegabytes,
   estimateRangeSize,
+  getExpectedSplitCount,
+  getNextSizeSplitSeconds,
   isFullTimeRange,
+  megabytesToBytes,
   normalizeTimeRange,
+  parseSegmentTimeList,
   parseTimeInput,
   snapTimeRangeValue,
   updateTimeRangeHandle,
@@ -55,7 +60,7 @@ const elements = {
   splitValueDecreaseButton: document.getElementById("split-value-decrease-button") as HTMLButtonElement,
   splitValueIncreaseButton: document.getElementById("split-value-increase-button") as HTMLButtonElement,
   splitUnitLabel: document.getElementById("split-unit-label") as HTMLSpanElement,
-  splitPresetButtons: Array.from(document.querySelectorAll<HTMLButtonElement>("[data-split-value]")),
+  splitPresetButtons: Array.from(document.querySelectorAll<HTMLButtonElement>("[data-split-mode]")),
   splitButton: document.getElementById("split-button") as HTMLButtonElement,
   splitStatus: document.getElementById("split-status") as HTMLParagraphElement,
   splitProgress: document.getElementById("split-progress") as HTMLDivElement,
@@ -84,7 +89,7 @@ let previewUrl: string | null = null;
 let recordingDurationSeconds = 0;
 let splitDefaultRequestId = 0;
 let sourceDurationSeconds = 0;
-let sourceSizeMegabytes = 0;
+let sourceSizeBytes = 0;
 let ffmpegLoadPromise: Promise<FfmpegLike> | null = null;
 let ffmpegProgressBase = 0;
 let trimStartSeconds = 0;
@@ -96,6 +101,7 @@ let framePreviewBlob: Blob | null = null;
 let framePreviewFilename = "";
 let framePreviewUrl: string | null = null;
 let frameStepSeconds = 1 / 30;
+let deletionKeepaliveId: number | null = null;
 interface SplitSegment {
   blob: Blob;
   filename: string;
@@ -142,6 +148,10 @@ const TIMELINE_THUMBNAIL_INTERVAL_SECONDS = 3;
 const TIMELINE_THUMBNAIL_DISPLAY_WIDTH = 72;
 const TIMELINE_THUMBNAIL_WIDTH = 160;
 const TIMELINE_THUMBNAIL_HEIGHT = 90;
+const MIN_SIZE_SPLIT_SECONDS = 0.1;
+const MAX_SIZE_SPLIT_ATTEMPTS = 5;
+const SIZE_SPLIT_SAFETY_RATIO = 0.9;
+const DELETION_KEEPALIVE_MS = 60_000;
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) {
@@ -151,8 +161,8 @@ function formatBytes(bytes: number): string {
   const units = ["B", "KB", "MB", "GB"];
   let value = bytes;
   let index = 0;
-  while (value >= 1024 && index < units.length - 1) {
-    value /= 1024;
+  while (value >= 1000 && index < units.length - 1) {
+    value /= 1000;
     index += 1;
   }
   return `${value.toFixed(value >= 10 || index === 0 ? 0 : 1)} ${units[index]}`;
@@ -782,6 +792,10 @@ function setSplitBusy(isBusy: boolean): void {
 }
 
 function clearSplitResults(): void {
+  if (splitSegments.length === 0) {
+    return;
+  }
+
   splitSegments = [];
   renderSplitDownloads();
 }
@@ -793,11 +807,6 @@ function renderSplitMode(): void {
   elements.splitValueInput.step = mode === "duration" ? String(TRIM_STEP_SECONDS) : "1";
   elements.splitStatus.textContent = "";
   applySplitValueDefault();
-}
-
-function renderSplitResults(segments: SplitSegment[]): void {
-  splitSegments = segments;
-  renderSplitDownloads();
 }
 
 function setSplitProgress(done: number, total: number): void {
@@ -824,7 +833,7 @@ function applySplitValueDefault(): void {
   const duration = getFullSourceDuration();
   const range = getSelectedTimeRange(duration);
   const selectedDuration = range.end - range.start;
-  const selectedSizeMegabytes = estimateRangeSize(sourceSizeMegabytes * 1024 * 1024, range, duration) / 1024 / 1024;
+  const selectedSizeMegabytes = bytesToMegabytes(estimateRangeSize(sourceSizeBytes, range, duration));
   const value = elements.splitModeSelect.value === "size"
     ? Math.max(1, Math.ceil(selectedSizeMegabytes))
     : Math.max(TRIM_STEP_SECONDS, roundTrimTime(selectedDuration));
@@ -833,13 +842,24 @@ function applySplitValueDefault(): void {
   updateSplitPresetButtons();
 }
 
+function getSplitPresetValue(button: HTMLButtonElement): number {
+  const ratio = Number(button.dataset.splitRatio);
+  if (Number.isFinite(ratio) && ratio > 0) {
+    const duration = getFullSourceDuration();
+    const range = getSelectedTimeRange(duration);
+    return Math.max(1, Math.ceil(roundTrimTime(range.end - range.start) * ratio));
+  }
+
+  return Number(button.dataset.splitValue);
+}
+
 function updateSplitPresetButtons(): void {
   const mode = elements.splitModeSelect.value;
   const maximum = Number(elements.splitValueInput.max);
   const currentValue = Number(elements.splitValueInput.value);
   for (const button of elements.splitPresetButtons) {
     const matchesMode = button.dataset.splitMode === mode;
-    const value = Number(button.dataset.splitValue);
+    const value = getSplitPresetValue(button);
     button.hidden = !matchesMode;
     button.disabled = workBusy || parts.length === 0 || value >= maximum;
     button.setAttribute("aria-pressed", String(matchesMode && value === currentValue));
@@ -852,7 +872,7 @@ async function updateSplitDefaultValues(part: LoadedPart | undefined = getSelect
   }
 
   const requestId = ++splitDefaultRequestId;
-  sourceSizeMegabytes = part.size / 1024 / 1024;
+  sourceSizeBytes = part.size;
   applySplitValueDefault();
 
   let loaded: Awaited<ReturnType<typeof loadVideoForPart>> | null = null;
@@ -989,6 +1009,8 @@ async function renderTimelineThumbnails(part: LoadedPart | undefined): Promise<v
       image.alt = "";
       button.appendChild(image);
       elements.trimThumbnails.appendChild(button);
+    }
+    if (requestId === thumbnailRequestId) {
       updateTrimPlayhead();
     }
   } catch {
@@ -1073,42 +1095,12 @@ async function recordVideoRange(video: HTMLVideoElement, startSeconds: number, e
   }
 }
 
-async function createDurationSplitWithRecorder(part: LoadedPart, segmentSeconds: number, outputFormat: OutputFormat, range?: TimeRange): Promise<SplitSegment[]> {
-  const { video, url, revoke, duration } = await loadVideoForPart(part);
-  const mimeType = pickRecorderMimeType(outputFormat, part.mimeType);
-  const segments: SplitSegment[] = [];
-  const selectedRange = range ? normalizeTimeRange(range.start, range.end, duration) : { start: 0, end: duration };
-  const selectedDuration = selectedRange.end - selectedRange.start;
-
-  try {
-    if (segmentSeconds >= selectedDuration) {
-      throw new Error("나누기 시간은 선택 구간보다 짧아야 합니다.");
-    }
-
-    const total = Math.ceil(selectedDuration / segmentSeconds);
-    setSplitProgress(0, total);
-    for (let index = 0; index < total; index += 1) {
-      const start = selectedRange.start + index * segmentSeconds;
-      const end = Math.min(selectedRange.end, start + segmentSeconds);
-      elements.splitStatus.textContent = `${index + 1}/${total}번째 파일을 만드는 중입니다.`;
-      const blob = await recordVideoRange(video, start, end, mimeType);
-      segments.push({
-        blob,
-        filename: `${getFilenameBase(part.filename)}_${String(index + 1).padStart(3, "0")}.${outputFormat}`,
-        index: index + 1,
-        startSeconds: start,
-        endSeconds: end,
-      });
-      setSplitProgress(index + 1, total);
-    }
-  } finally {
-    releaseVideoSource(video, url, revoke);
-  }
-
-  return segments;
-}
-
-async function createDurationSplitWithFfmpeg(part: LoadedPart, segmentSeconds: number, outputFormat: OutputFormat, range?: TimeRange): Promise<SplitSegment[]> {
+async function createDurationSplitWithFfmpeg(
+  part: LoadedPart,
+  segmentSeconds: number,
+  outputFormat: OutputFormat,
+  range?: TimeRange,
+): Promise<SplitSegment[]> {
   const { video, url, revoke, duration } = await loadVideoForPart(part);
   releaseVideoSource(video, url, revoke);
   const selectedRange = range ? normalizeTimeRange(range.start, range.end, duration) : { start: 0, end: duration };
@@ -1129,13 +1121,18 @@ async function createDurationSplitWithFfmpeg(part: LoadedPart, segmentSeconds: n
     await ffmpeg.writeFile(inputName, sourceBytes);
     setFfmpegProgressBase(18);
     const pattern = `output%03d.${outputFormat}`;
+    const segmentListName = "output.csv";
     const code = await ffmpeg.exec([
+      ...(range ? ["-ss", String(selectedRange.start)] : []),
       "-i", inputName,
-      ...(range ? ["-ss", String(selectedRange.start), "-t", String(selectedDuration)] : []),
+      ...(range ? ["-t", String(selectedDuration)] : []),
       "-map", "0",
+      "-c", "copy",
       "-f", "segment",
       "-segment_time", String(segmentSeconds),
-      "-c", "copy",
+      "-break_non_keyframes", "1",
+      "-segment_list", segmentListName,
+      "-segment_list_type", "csv",
       "-reset_timestamps", "1",
       pattern,
     ]);
@@ -1146,12 +1143,26 @@ async function createDurationSplitWithFfmpeg(part: LoadedPart, segmentSeconds: n
     const files = (await ffmpeg.listDir("."))
       .filter((file) => !file.isDir && file.name.startsWith("output") && file.name.endsWith(`.${outputFormat}`))
       .sort((a, b) => a.name.localeCompare(b.name));
+    if (files.length === 0) {
+      throw new Error("나눈 파일이 생성되지 않았습니다.");
+    }
+    const expectedCount = getExpectedSplitCount(selectedDuration, segmentSeconds);
+    if (files.length !== expectedCount) {
+      throw new Error(`파일 나누기 결과가 올바르지 않습니다. ${expectedCount}개가 필요하지만 ${files.length}개가 생성되었습니다.`);
+    }
+    const segmentListData = await ffmpeg.readFile(segmentListName);
+    const segmentListText = typeof segmentListData === "string"
+      ? segmentListData
+      : new TextDecoder().decode(segmentListData);
+    const actualTimes = parseSegmentTimeList(segmentListText);
     const segments: SplitSegment[] = [];
     for (let index = 0; index < files.length; index += 1) {
-      const start = selectedRange.start + index * segmentSeconds;
-      const end = Math.min(selectedRange.end, start + segmentSeconds);
+      const actualTime = actualTimes[index];
+      const start = selectedRange.start + (actualTime?.start ?? index * segmentSeconds);
+      const end = Math.min(selectedRange.end, selectedRange.start + (actualTime?.end ?? (index + 1) * segmentSeconds));
+      const blob = await readFfmpegBlob(ffmpeg, files[index].name, `video/${outputFormat}`);
       segments.push({
-        blob: await readFfmpegBlob(ffmpeg, files[index].name, `video/${outputFormat}`),
+        blob,
         filename: `${getFilenameBase(part.filename)}_${String(index + 1).padStart(3, "0")}.${outputFormat}`,
         index: index + 1,
         startSeconds: start,
@@ -1165,28 +1176,37 @@ async function createDurationSplitWithFfmpeg(part: LoadedPart, segmentSeconds: n
   }
 }
 
-async function createDurationSplit(part: LoadedPart, segmentSeconds: number, outputFormat: OutputFormat, range?: TimeRange): Promise<SplitSegment[]> {
-  try {
-    return await createDurationSplitWithFfmpeg(part, segmentSeconds, outputFormat, range);
-  } catch {
-    return await createDurationSplitWithRecorder(part, segmentSeconds, outputFormat, range);
-  }
-}
-
 async function createSizeSplit(part: LoadedPart, maxMegabytes: number, outputFormat: OutputFormat, range?: TimeRange): Promise<SplitSegment[]> {
   const { video, url, revoke, duration } = await loadVideoForPart(part);
   releaseVideoSource(video, url, revoke);
 
-  const maxBytes = maxMegabytes * 1024 * 1024;
+  const maxBytes = megabytesToBytes(maxMegabytes);
   const selectedRange = range ? normalizeTimeRange(range.start, range.end, duration) : { start: 0, end: duration };
   const selectedSize = estimateRangeSize(part.size, selectedRange, duration);
   if (maxBytes >= selectedSize) {
-    throw new Error("나누기 용량은 선택 구간의 예상 용량보다 작아야 합니다.");
+    throw new Error("파일별 최대 용량은 선택 구간의 전체 용량보다 작아야 합니다.");
   }
 
   const averageBytesPerSecond = Math.max(1, part.size / duration);
-  const segmentSeconds = Math.max(1, Math.floor(maxBytes / averageBytesPerSecond));
-  return await createDurationSplit(part, segmentSeconds, outputFormat, selectedRange);
+  let segmentSeconds = Math.max(MIN_SIZE_SPLIT_SECONDS, Math.floor(maxBytes / averageBytesPerSecond * 10) / 10);
+  for (let attempt = 0; attempt < MAX_SIZE_SPLIT_ATTEMPTS; attempt += 1) {
+    setWorkStatus(attempt === 0
+      ? `파일당 최대 ${maxMegabytes}MB로 나누는 중입니다.`
+      : `파일 용량을 확인해 다시 나누는 중입니다. (${attempt + 1}/${MAX_SIZE_SPLIT_ATTEMPTS})`);
+    const segments = await createDurationSplitWithFfmpeg(part, segmentSeconds, outputFormat, selectedRange);
+    const largestBytes = Math.max(...segments.map((segment) => segment.blob.size));
+    if (largestBytes <= maxBytes) {
+      return segments;
+    }
+
+    const nextSeconds = getNextSizeSplitSeconds(segmentSeconds, maxBytes, largestBytes, MIN_SIZE_SPLIT_SECONDS, SIZE_SPLIT_SAFETY_RATIO);
+    if (nextSeconds >= segmentSeconds) {
+      break;
+    }
+    segmentSeconds = nextSeconds;
+  }
+
+  throw new Error("각 파일을 설정한 최대 용량 이하로 만들지 못했습니다. 최대 용량을 높여 주세요.");
 }
 
 async function convertPartWithRecorder(part: LoadedPart, outputFormat: OutputFormat, range?: TimeRange): Promise<{ source: Blob | string; filename: string }> {
@@ -1216,6 +1236,7 @@ async function convertPart(part: LoadedPart, outputFormat: ConvertFormat, range?
     if (outputFormat === "gif") {
       throw new Error(`${outputFormat.toUpperCase()} 변환에 실패했습니다.`);
     }
+    setWorkStatus("빠른 변환을 지원하지 않아 실시간으로 처리 중입니다.");
     return await convertPartWithRecorder(part, outputFormat, range);
   }
 }
@@ -1359,7 +1380,7 @@ async function downloadSourcesSequentially(items: Array<{ source: Blob | string;
   }
 }
 
-async function scheduleDeletionOnClose(): Promise<void> {
+async function scheduleRecordingDeletion(): Promise<void> {
   if (!recording) {
     return;
   }
@@ -1372,8 +1393,21 @@ async function scheduleDeletionOnClose(): Promise<void> {
   try {
     await chrome.runtime.sendMessage(message);
   } catch {
-    // The service worker may already be asleep.
+    // The extension may have been reloaded while this result tab was open.
   }
+}
+
+function stopDeletionKeepalive(): void {
+  if (deletionKeepaliveId !== null) {
+    window.clearInterval(deletionKeepaliveId);
+    deletionKeepaliveId = null;
+  }
+}
+
+function startDeletionKeepalive(): void {
+  stopDeletionKeepalive();
+  void scheduleRecordingDeletion();
+  deletionKeepaliveId = window.setInterval(() => void scheduleRecordingDeletion(), DELETION_KEEPALIVE_MS);
 }
 
 function restoreSourceTab(): void {
@@ -1421,6 +1455,7 @@ async function boot(): Promise<void> {
     return;
   }
 
+  startDeletionKeepalive();
   renderHeader();
   elements.resultLoadingMessage.textContent = "미리보기를 준비하는 중입니다.";
   try {
@@ -1432,7 +1467,6 @@ async function boot(): Promise<void> {
   }
   renderHeader();
   renderParts();
-  await chrome.runtime.sendMessage({ type: "CANCEL_RECORDING_DELETION", recordingId: recording.id } satisfies DeletionCancelRequest).catch(() => {});
 }
 
 elements.downloadCurrentButton.addEventListener("click", () => {
@@ -1668,7 +1702,7 @@ elements.trimResetButton.addEventListener("click", () => {
   renderTrimEditor(true, "start");
 });
 
-let trimDrag: { pointerId: number; startX: number; range: TimeRange; dragged: boolean } | null = null;
+let trimDrag: { pointerId: number; startX: number; railWidth: number; range: TimeRange; dragged: boolean } | null = null;
 
 elements.trimSelection.addEventListener("pointerdown", (event) => {
   if (event.button !== 0 || elements.trimStartRange.disabled) {
@@ -1677,6 +1711,7 @@ elements.trimSelection.addEventListener("pointerdown", (event) => {
   trimDrag = {
     pointerId: event.pointerId,
     startX: event.clientX,
+    railWidth: elements.trimThumbnails.getBoundingClientRect().width,
     range: getSelectedTimeRange(),
     dragged: false,
   };
@@ -1689,7 +1724,7 @@ elements.trimSelection.addEventListener("pointermove", (event) => {
     return;
   }
   const totalDuration = getFullSourceDuration();
-  const railWidth = elements.trimThumbnails.getBoundingClientRect().width;
+  const { railWidth } = trimDrag;
   const selectedDuration = trimDrag.range.end - trimDrag.range.start;
   if (totalDuration <= 0 || railWidth <= 0 || selectedDuration >= totalDuration) {
     return;
@@ -1788,7 +1823,7 @@ elements.splitValueInput.addEventListener("input", () => updateSplitPresetButton
 
 for (const button of elements.splitPresetButtons) {
   button.addEventListener("click", () => {
-    elements.splitValueInput.value = button.dataset.splitValue ?? "40";
+    elements.splitValueInput.value = String(getSplitPresetValue(button));
     updateSplitPresetButtons();
   });
 }
@@ -1816,9 +1851,10 @@ elements.splitButton.addEventListener("click", () => {
       }
       const segments = mode === "size"
         ? await createSizeSplit(part, splitValue, outputFormat, range)
-        : await createDurationSplit(part, splitValue, outputFormat, range);
+        : await createDurationSplitWithFfmpeg(part, splitValue, outputFormat, range);
 
-      renderSplitResults(segments);
+      splitSegments = segments;
+      renderSplitDownloads();
       setWorkStatus("파일 나누기가 완료되었습니다.");
     } catch (error) {
       const message = error instanceof Error ? error.message : "파일을 나누지 못했습니다.";
@@ -1833,7 +1869,14 @@ elements.splitButton.addEventListener("click", () => {
 
 window.addEventListener("pagehide", () => {
   restoreSourceTab();
-  void scheduleDeletionOnClose();
+  stopDeletionKeepalive();
+  void scheduleRecordingDeletion();
+});
+
+window.addEventListener("pageshow", () => {
+  if (recording) {
+    startDeletionKeepalive();
+  }
 });
 
 window.addEventListener("unload", () => {

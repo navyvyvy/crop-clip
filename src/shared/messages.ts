@@ -1,4 +1,4 @@
-import type { RecordingRecord, RegionSelection, Settings } from "./types.js";
+import type { RegionSelection, Settings } from "./types.js";
 
 export type PopupCommand =
   | { type: "SELECT_REGION" }
@@ -26,12 +26,6 @@ export type ContentCommand =
   | { type: "STOP_DIRECT_RECORDING" }
   | { type: "CANCEL_DIRECT_RECORDING"; recordingId?: string };
 export type DeletionScheduleRequest = { type: "SCHEDULE_RECORDING_DELETION"; recordingId: string };
-export type DeletionCancelRequest = { type: "CANCEL_RECORDING_DELETION"; recordingId: string };
-
-export type RecordingFinishedMessage = {
-  type: "RECORDING_FINISHED";
-  recording: RecordingRecord;
-};
 
 export type RecordingErrorMessage = {
   type: "RECORDING_ERROR";
@@ -39,9 +33,15 @@ export type RecordingErrorMessage = {
   error: string;
 };
 
-export type StoreRecordingPartMessage = {
-  type: "STORE_RECORDING_PART";
-  part: import("./types.js").RecordingPartRecord;
+export type StoreRecordingChunkMessage = {
+  type: "STORE_RECORDING_CHUNK";
+  chunk: Omit<import("./types.js").RecordingChunkRecord, "blob"> & { dataUrl: string };
+};
+
+export type FinalizeRecordingMessage = {
+  type: "FINALIZE_RECORDING";
+  recordingId: string;
+  endedAt: number;
 };
 
 type OkResponse<T = undefined> = { ok: true; data?: T };

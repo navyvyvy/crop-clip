@@ -85,6 +85,19 @@ export interface RecordingPartRecord {
   createdAt: number;
 }
 
+export interface RecordingChunkRecord {
+  id: string;
+  recordingId: string;
+  index: number;
+  mimeType: string;
+  extension: RecordingFormat;
+  outputFormat: RecordingFormat;
+  baseName: string;
+  createdAt: number;
+  capturedAt: number;
+  blob: Blob;
+}
+
 export interface AppState {
   settings: Settings;
   region: RegionSelection | null;

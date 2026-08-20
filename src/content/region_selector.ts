@@ -1,5 +1,9 @@
 (() => {
   // This file is emitted as a classic content script, so runtime imports are intentionally avoided.
+  const isChzzkClipEditorPage = (): boolean =>
+    (location.hostname === "chzzk.naver.com" || location.hostname.endsWith(".chzzk.naver.com"))
+    && location.pathname.startsWith("/clip-editor");
+
   const CONTENT_SCRIPT_BOOT_KEY = "__cropClipRegionSelectorBooted";
   const contentScriptGlobal = globalThis as typeof globalThis & { [CONTENT_SCRIPT_BOOT_KEY]?: boolean };
 
@@ -43,7 +47,6 @@ const MAX_ACTIVE_REGIONS = 4;
 const DEFAULT_MULTI_REGION_COUNT = 2;
 const DEFAULT_SEEK_SECONDS = 5;
 const VIDEO_FRAME_READY_TIMEOUT_MS = 3_000;
-const DIRECT_RECORDING_PART_INDEX = 1;
 const POINTER_CLICK_DEDUP_MS = 500;
 const CROP_ACCENT = "#5bd6bf";
 const CROP_SECONDARY = "#5bb0d6";
@@ -114,8 +117,9 @@ interface DirectRecordingSession {
   extension: "webm" | "mp4";
   outputFormat: "webm" | "mp4";
   baseName: string;
-  totalSize: number;
-  currentChunks: BlobPart[];
+  checkpointIndex: number;
+  checkpointSaveChain: Promise<void>;
+  checkpointError?: Error;
   createdAt: number;
   endedAt?: number;
   drawTimerId: number;
@@ -158,8 +162,9 @@ let seekFeedbackTimerId: number | null = null;
 let lastRecordPointerActivationAt = 0;
 let lastScreenshotPointerActivationAt = 0;
 let lastCancelPointerActivationAt = 0;
-let regionLayoutTimerId: number | null = null;
-let lastVideoLayoutKey = "";
+let regionLayoutObserver: ResizeObserver | null = null;
+let regionLayoutVideo: HTMLVideoElement | null = null;
+let regionLayoutSyncFrame: number | null = null;
 
 function ensureStyle(): void {
   let style = document.getElementById(STYLE_ID) as HTMLStyleElement | null;
@@ -169,7 +174,7 @@ function ensureStyle(): void {
     document.documentElement.appendChild(style);
   }
 
-  style.textContent = `
+  const css = `
     #${OVERLAY_ID} {
       position: fixed;
       inset: 0;
@@ -632,6 +637,9 @@ function ensureStyle(): void {
     }
 
   `;
+  if (style.textContent !== css) {
+    style.textContent = css;
+  }
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -712,17 +720,15 @@ function getRenderedVideoRect(video: HTMLVideoElement): { rect: DOMRect; fit: "f
   };
 }
 
-function getVideoSelectionRect(): DOMRect | null {
-  const video = findPrimaryVideoElement();
-  if (!video) {
+function getVideoSelectionRect(renderedRect: DOMRect | null = getVideoRenderedViewportRect()): DOMRect | null {
+  if (!renderedRect) {
     return null;
   }
 
-  const rect = getRenderedVideoRect(video).rect;
-  const left = clamp(rect.left, 0, window.innerWidth);
-  const top = clamp(rect.top, 0, window.innerHeight);
-  const right = clamp(rect.right, left, window.innerWidth);
-  const bottom = clamp(rect.bottom, top, window.innerHeight);
+  const left = clamp(renderedRect.left, 0, window.innerWidth);
+  const top = clamp(renderedRect.top, 0, window.innerHeight);
+  const right = clamp(renderedRect.right, left, window.innerWidth);
+  const bottom = clamp(renderedRect.bottom, top, window.innerHeight);
   if (right - left <= 0 || bottom - top <= 0) {
     return null;
   }
@@ -735,8 +741,13 @@ function getVideoRenderedViewportRect(): DOMRect | null {
   return video ? getRenderedVideoRect(video).rect : null;
 }
 
-function buildRegionSelection(x: number, y: number, width: number, height: number): RegionSelection {
-  const renderedRect = getVideoRenderedViewportRect();
+function buildRegionSelection(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  renderedRect: DOMRect | null = getVideoRenderedViewportRect(),
+): RegionSelection {
   const relativeX = renderedRect && renderedRect.width > 0 ? clamp((x - renderedRect.left) / renderedRect.width, 0, 1) : 0;
   const relativeY = renderedRect && renderedRect.height > 0 ? clamp((y - renderedRect.top) / renderedRect.height, 0, 1) : 0;
   const relative =
@@ -762,12 +773,14 @@ function buildRegionSelection(x: number, y: number, width: number, height: numbe
   };
 }
 
-function resolveRegionToViewport(region: RegionSelection): RegionSelection {
-  const renderedRect = getVideoRenderedViewportRect();
+function resolveRegionToViewport(
+  region: RegionSelection,
+  renderedRect: DOMRect | null = getVideoRenderedViewportRect(),
+): RegionSelection {
   const relative = region.videoRelative;
   if (!renderedRect || !relative) {
-    const bounds = getVideoSelectionRect();
-    return bounds ? clampRegionToRect(region, bounds) : region;
+    const bounds = getVideoSelectionRect(renderedRect);
+    return bounds ? clampRegionToRect(region, bounds, renderedRect) : region;
   }
 
   return buildRegionSelection(
@@ -775,13 +788,14 @@ function resolveRegionToViewport(region: RegionSelection): RegionSelection {
     renderedRect.top + renderedRect.height * relative.y,
     renderedRect.width * relative.width,
     renderedRect.height * relative.height,
+    renderedRect,
   );
 }
 
-function clampRegionToRect(region: RegionSelection, rect: DOMRect): RegionSelection {
+function clampRegionToRect(region: RegionSelection, rect: DOMRect, renderedRect: DOMRect | null = getVideoRenderedViewportRect()): RegionSelection {
   const width = Math.min(region.width, rect.width);
   const height = Math.min(region.height, rect.height);
-  return buildRegionSelection(clamp(region.x, rect.left, rect.right - width), clamp(region.y, rect.top, rect.bottom - height), width, height);
+  return buildRegionSelection(clamp(region.x, rect.left, rect.right - width), clamp(region.y, rect.top, rect.bottom - height), width, height, renderedRect);
 }
 
 function regionEdges(region: RegionSelection): { left: number; top: number; right: number; bottom: number } {
@@ -861,8 +875,8 @@ function regionsOverlap(a: RegionSelection, b: RegionSelection): boolean {
   return ae.left < be.right && ae.right > be.left && ae.top < be.bottom && ae.bottom > be.top;
 }
 
-function collidesWithOtherRegion(region: RegionSelection, index: number): boolean {
-  return currentRegions.some((item, itemIndex) => itemIndex !== index && regionsOverlap(resolveRegionToViewport(item), region));
+function collidesWithOtherRegion(region: RegionSelection, index: number, renderedRect: DOMRect | null = getVideoRenderedViewportRect()): boolean {
+  return currentRegions.some((item, itemIndex) => itemIndex !== index && regionsOverlap(resolveRegionToViewport(item, renderedRect), region));
 }
 
 function normalizeRegions(raw: unknown, fallback?: RegionSelection | null): RegionSelection[] {
@@ -1270,13 +1284,13 @@ function hideResizeMagnifier(): void {
   document.getElementById(RESIZE_MAGNIFIER_ID)?.remove();
 }
 
-function updateResizeMagnifier(video: HTMLVideoElement, clientX: number, clientY: number): void {
+function updateResizeMagnifier(video: HTMLVideoElement, clientX: number, clientY: number, renderedRect?: DOMRect): void {
   if (video.videoWidth <= 0 || video.videoHeight <= 0) {
     hideResizeMagnifier();
     return;
   }
 
-  const rendered = getRenderedVideoRect(video).rect;
+  const rendered = renderedRect ?? getRenderedVideoRect(video).rect;
   if (clientX < rendered.left || clientX > rendered.right || clientY < rendered.top || clientY > rendered.bottom) {
     hideResizeMagnifier();
     return;
@@ -1339,8 +1353,7 @@ function blobFromCanvas(canvas: HTMLCanvasElement): Promise<Blob> {
   });
 }
 
-function positionScreenshotStack(stack: HTMLElement): void {
-  const rect = getVideoSelectionRect();
+function positionScreenshotStack(stack: HTMLElement, rect = getVideoSelectionRect()): void {
   const left = rect ? rect.left + 10 : 10;
   const top = rect ? rect.top + 10 : 10;
   stack.style.left = `${clamp(left, 8, Math.max(8, window.innerWidth - 80))}px`;
@@ -1410,22 +1423,26 @@ function showScreenshotPreview(blob: Blob): void {
   }
 }
 
-async function captureScreenshot(region: RegionSelection | null, missingMessage: string): Promise<void> {
+function screenshotFailure(message: string, alertOnError: boolean): MessageResponse {
+  if (alertOnError) {
+    window.alert(message);
+  }
+  return { ok: false, error: message };
+}
+
+async function captureScreenshot(region: RegionSelection | null, missingMessage: string, alertOnError = true): Promise<MessageResponse> {
   const video = findPrimaryVideoElement();
   if (!region || !video) {
-    window.alert(missingMessage);
-    return;
+    return screenshotFailure(missingMessage, alertOnError);
   }
 
   if (!await waitForCurrentVideoFrame(video)) {
-    window.alert("영상 프레임이 아직 준비되지 않았습니다. 잠시 후 다시 시도하세요.");
-    return;
+    return screenshotFailure("영상 프레임이 아직 준비되지 않았습니다. 잠시 후 다시 시도하세요.", alertOnError);
   }
 
   const crop = computeDirectCrop(region, video);
   if (!crop) {
-    window.alert("선택 영역이 영상 밖에 있습니다.");
-    return;
+    return screenshotFailure("선택 영역이 영상 밖에 있습니다.", alertOnError);
   }
 
   const canvas = document.createElement("canvas");
@@ -1433,24 +1450,24 @@ async function captureScreenshot(region: RegionSelection | null, missingMessage:
   canvas.height = crop.height;
   const context = canvas.getContext("2d", { alpha: false });
   if (!context) {
-    window.alert("스크린샷 캔버스를 만들지 못했습니다.");
-    return;
+    return screenshotFailure("스크린샷 캔버스를 만들지 못했습니다.", alertOnError);
   }
 
   try {
     context.drawImage(video, crop.x, crop.y, crop.width, crop.height, 0, 0, crop.width, crop.height);
     showScreenshotPreview(await blobFromCanvas(canvas));
+    return { ok: true };
   } catch {
-    window.alert("이 영상은 브라우저 보안 제한으로 스크린샷 저장을 지원하지 않습니다.");
+    return screenshotFailure("이 영상은 브라우저 보안 제한으로 스크린샷 저장을 지원하지 않습니다.", alertOnError);
   }
 }
 
-async function captureRegionScreenshot(): Promise<void> {
-  await captureScreenshot(getCurrentRegionGeometry(), "스크린샷을 찍을 영역을 찾지 못했습니다.");
+async function captureRegionScreenshot(): Promise<MessageResponse> {
+  return await captureScreenshot(getCurrentRegionGeometry(), "스크린샷을 찍을 영역을 찾지 못했습니다.");
 }
 
-async function captureFullScreenshot(): Promise<void> {
-  await captureScreenshot(getPlayerRegionGeometry(), "스크린샷을 찍을 비디오 영역을 찾지 못했습니다.");
+async function captureFullScreenshot(alertOnError = true): Promise<MessageResponse> {
+  return await captureScreenshot(getPlayerRegionGeometry(), "스크린샷을 찍을 비디오 영역을 찾지 못했습니다.", alertOnError);
 }
 
 async function toggleRegionRecording(): Promise<void> {
@@ -1513,17 +1530,6 @@ async function cancelRecording(): Promise<void> {
   }
 }
 
-function buildDirectFilename(session: DirectRecordingSession): string {
-  const totalSeconds = Math.max(1, Math.round(((session.endedAt ?? Date.now()) - session.createdAt) / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor(totalSeconds % 3600 / 60);
-  const seconds = totalSeconds % 60;
-  const duration = hours > 0
-    ? `${hours}h${String(minutes).padStart(2, "0")}m${String(seconds).padStart(2, "0")}s`
-    : minutes > 0 ? `${minutes}m${String(seconds).padStart(2, "0")}s` : `${seconds}s`;
-  return `${session.baseName}_${duration}.${session.extension}`;
-}
-
 function sendRuntimeMessage<T = undefined>(message: Record<string, unknown>): Promise<MessageResponse & { data?: T }> {
   return new Promise((resolve, reject) => {
     if (!isExtensionContextAvailable()) {
@@ -1551,41 +1557,49 @@ function sendRuntimeMessage<T = undefined>(message: Record<string, unknown>): Pr
   });
 }
 
-async function saveDirectPart(session: DirectRecordingSession, blob: Blob): Promise<void> {
-  if (blob.size <= 0) {
-    throw new Error("녹화 데이터가 비어 있습니다.");
-  }
-
-  const objectUrl = URL.createObjectURL(blob);
-  try {
-    const response = await sendRuntimeMessage({
-      type: "STORE_RECORDING_PART",
-      part: {
-        id: `${session.recordingId}:part:${String(DIRECT_RECORDING_PART_INDEX).padStart(3, "0")}`,
-        recordingId: session.recordingId,
-        index: DIRECT_RECORDING_PART_INDEX,
-        filename: buildDirectFilename(session),
-        mimeType: session.mimeType,
-        extension: session.extension,
-        outputFormat: session.outputFormat,
-        size: blob.size,
-        objectUrl,
-        createdAt: Date.now(),
-      },
-    });
-    if (!response.ok) {
-      throw new Error(response.error);
-    }
-  } catch (error) {
-    URL.revokeObjectURL(objectUrl);
-    throw error;
-  }
-
-  session.totalSize += blob.size;
+function readBlobAsDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+      } else {
+        reject(new Error("녹화 체크포인트를 변환하지 못했습니다."));
+      }
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("녹화 체크포인트를 변환하지 못했습니다."));
+    reader.readAsDataURL(blob);
+  });
 }
 
-function clearDirectTimers(session: DirectRecordingSession): void {
-  window.clearInterval(session.drawTimerId);
+function queueDirectChunkCheckpoint(session: DirectRecordingSession, blob: Blob): void {
+  const index = ++session.checkpointIndex;
+  const capturedAt = Date.now();
+  session.checkpointSaveChain = session.checkpointSaveChain.then(async () => {
+    try {
+      const dataUrl = await readBlobAsDataUrl(blob);
+      const response = await sendRuntimeMessage({
+        type: "STORE_RECORDING_CHUNK",
+        chunk: {
+          id: `${session.recordingId}:chunk:${String(index).padStart(6, "0")}`,
+          recordingId: session.recordingId,
+          index,
+          mimeType: session.mimeType,
+          extension: session.extension,
+          outputFormat: session.outputFormat,
+          baseName: session.baseName,
+          createdAt: session.createdAt,
+          capturedAt,
+          dataUrl,
+        },
+      });
+      if (!response.ok) {
+        throw new Error(response.error);
+      }
+    } catch (error) {
+      session.checkpointError ??= error instanceof Error ? error : new Error("녹화 체크포인트를 저장하지 못했습니다.");
+    }
+  });
 }
 
 function cleanupDirectRecordingSession(session: DirectRecordingSession): void {
@@ -1594,7 +1608,7 @@ function cleanupDirectRecordingSession(session: DirectRecordingSession): void {
   }
 
   session.cleanedUp = true;
-  clearDirectTimers(session);
+  window.clearInterval(session.drawTimerId);
   session.sourceChangeCleanup?.();
   session.sourceChangeCleanup = undefined;
   session.sourceStream.getTracks().forEach((track) => track.stop());
@@ -1610,14 +1624,9 @@ async function finalizeDirectRecording(session: DirectRecordingSession): Promise
 
   try {
     const response = await sendRuntimeMessage({
-      type: "RECORDING_FINISHED",
-      recording: {
-        id: session.recordingId,
-        createdAt: session.createdAt,
-        endedAt: session.endedAt ?? Date.now(),
-        totalSize: session.totalSize,
-        actualExtension: session.extension,
-      },
+      type: "FINALIZE_RECORDING",
+      recordingId: session.recordingId,
+      endedAt: session.endedAt ?? Date.now(),
     });
     if (!response.ok) {
       throw new Error(response.error);
@@ -1673,7 +1682,6 @@ function requestDirectPartStop(session: DirectRecordingSession): void {
 }
 
 async function startDirectPart(session: DirectRecordingSession): Promise<void> {
-  session.currentChunks = [];
   session.closingPart = false;
 
   const recorder = new MediaRecorder(session.outputStream, {
@@ -1688,7 +1696,7 @@ async function startDirectPart(session: DirectRecordingSession): Promise<void> {
       return;
     }
 
-    session.currentChunks.push(event.data);
+    queueDirectChunkCheckpoint(session, event.data);
   };
 
   recorder.onerror = () => {
@@ -1711,8 +1719,10 @@ async function startDirectPart(session: DirectRecordingSession): Promise<void> {
         return;
       }
 
-      const blob = new Blob(session.currentChunks, { type: session.mimeType });
-      await saveDirectPart(session, blob);
+      await session.checkpointSaveChain;
+      if (session.checkpointError) {
+        throw session.checkpointError;
+      }
       await finalizeDirectRecording(session);
     })().catch((error: Error) => {
       cleanupDirectRecordingSession(session);
@@ -1760,28 +1770,45 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
   const layout = computeDirectLayout(crops);
   const output = layout.output;
   const mime = selectDirectMimeType(command.settings);
-  const sourceStream = getVideoStream(video);
-  if (!sourceStream) {
-    return { ok: false, error: "이 브라우저에서는 현재 영상 녹화를 지원하지 않습니다." };
-  }
 
   const canvas = document.createElement("canvas");
   canvas.width = output.width;
   canvas.height = output.height;
-  canvas.style.position = "fixed";
-  canvas.style.left = "-9999px";
-  canvas.style.top = "0";
-  document.documentElement.appendChild(canvas);
 
-  const context = canvas.getContext("2d", { alpha: false });
+  const context = canvas.getContext("2d", { alpha: false, desynchronized: true });
   if (!context) {
-    canvas.remove();
-    sourceStream.getTracks().forEach((track) => track.stop());
     return { ok: false, error: "녹화 화면을 준비하지 못했습니다." };
   }
 
+  const paintPlacements = (placements: DirectCropPlacement[]) => {
+    context.fillStyle = "#000";
+    context.fillRect(0, 0, output.width, output.height);
+    for (const placement of placements) {
+      context.drawImage(video, placement.crop.x, placement.crop.y, placement.crop.width, placement.crop.height, placement.dx, placement.dy, placement.dw, placement.dh);
+    }
+  };
+
   const frameRate = command.settings.enable60fps ? 60 : 30;
   const canvasStream = canvas.captureStream(frameRate);
+  try {
+    paintPlacements(layout.placements);
+  } catch {
+    canvasStream.getTracks().forEach((track) => track.stop());
+    return { ok: false, error: "녹화 화면을 준비하지 못했습니다." };
+  }
+
+  let sourceStream: MediaStream | null = null;
+  try {
+    sourceStream = getVideoStream(video);
+  } catch {
+    canvasStream.getTracks().forEach((track) => track.stop());
+    return { ok: false, error: "이 브라우저에서는 현재 영상 녹화를 지원하지 않습니다." };
+  }
+  if (!sourceStream) {
+    canvasStream.getTracks().forEach((track) => track.stop());
+    return { ok: false, error: "이 브라우저에서는 현재 영상 녹화를 지원하지 않습니다." };
+  }
+
   const tracks = [
     ...canvasStream.getVideoTracks(),
     ...sourceStream.getAudioTracks(),
@@ -1802,11 +1829,7 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
       const height = nextLayout.output.height * scale;
       session.placements = scaleLayout(nextLayout, scale, Math.round((output.width - width) / 2), Math.round((output.height - height) / 2));
     }
-    context.fillStyle = "#000";
-    context.fillRect(0, 0, output.width, output.height);
-    for (const placement of session.placements) {
-      context.drawImage(video, placement.crop.x, placement.crop.y, placement.crop.width, placement.crop.height, placement.dx, placement.dy, placement.dw, placement.dh);
-    }
+    paintPlacements(session.placements);
   };
 
   let resolveFinish: () => void = () => {};
@@ -1828,8 +1851,8 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
     extension: mime.extension,
     outputFormat: mime.outputFormat,
     baseName: buildBaseName(),
-    totalSize: 0,
-    currentChunks: [],
+    checkpointIndex: 0,
+    checkpointSaveChain: Promise.resolve(),
     createdAt: Date.now(),
     drawTimerId: window.setInterval(drawFrame, Math.max(16, Math.round(1000 / frameRate))),
     stopRequested: false,
@@ -1844,7 +1867,6 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
 
   directSession = session;
   try {
-    drawFrame();
     await startDirectPart(session);
     watchDirectRecordingSource(session);
     return { ok: true };
@@ -1891,8 +1913,7 @@ function stopDirectRecordingForUnload(): void {
   requestDirectPartStop(directSession);
 }
 
-function showSelectionBorders(regions: RegionSelection[]): void {
-  ensureStyle();
+function removeSelectionBorders(): void {
   stopRegionLayoutWatch();
   removeBorderHandlers?.();
   removeBorderHandlers = null;
@@ -1902,12 +1923,18 @@ function showSelectionBorders(regions: RegionSelection[]): void {
     border.remove();
   }
   currentBorders = new Map();
+}
+
+function showSelectionBorders(regions: RegionSelection[]): void {
+  ensureStyle();
+  removeSelectionBorders();
 
   if (regions.length === 0) {
     return;
   }
 
   const cleanupCallbacks: Array<() => void> = [];
+  const renderedRect = getVideoRenderedViewportRect();
   regions.forEach((region, index) => {
     const border = document.createElement("div");
     border.id = index === 0 ? BORDER_ID : `${BORDER_ID}-${index}`;
@@ -1932,7 +1959,7 @@ function showSelectionBorders(regions: RegionSelection[]): void {
       <span class="guide-edge" data-side="w" hidden></span>
       <span class="guide-edge" data-side="e" hidden></span>
     `;
-    applyBorderGeometry(border, region);
+    applyBorderGeometry(border, region, renderedRect);
     const cleanup = attachBorderControls(border, index);
     cleanupCallbacks.push(cleanup);
     document.body.appendChild(border);
@@ -1950,48 +1977,69 @@ function showSelectionBorders(regions: RegionSelection[]): void {
   startRegionLayoutWatch();
 }
 
-function getVideoLayoutKey(): string {
-  const rect = getVideoRenderedViewportRect();
-  return rect ? `${Math.round(rect.left)}:${Math.round(rect.top)}:${Math.round(rect.width)}:${Math.round(rect.height)}` : "";
+function stopRegionLayoutWatch(): void {
+  regionLayoutObserver?.disconnect();
+  regionLayoutObserver = null;
+  regionLayoutVideo = null;
+  if (regionLayoutSyncFrame !== null) {
+    window.cancelAnimationFrame(regionLayoutSyncFrame);
+    regionLayoutSyncFrame = null;
+  }
 }
 
-function stopRegionLayoutWatch(): void {
-  if (regionLayoutTimerId !== null) {
-    window.clearInterval(regionLayoutTimerId);
-    regionLayoutTimerId = null;
+function syncRegionLayoutGeometry(): void {
+  if (currentRegions.length === 0) {
+    stopRegionLayoutWatch();
+    return;
   }
-  lastVideoLayoutKey = "";
+
+  const renderedRect = getVideoRenderedViewportRect();
+  currentRegions.forEach((region, index) => {
+    const border = currentBorders.get(index);
+    if (border?.isConnected) {
+      applyBorderGeometry(border, region, renderedRect);
+    }
+  });
+  const stack = document.getElementById(SCREENSHOT_STACK_ID);
+  if (stack) {
+    positionScreenshotStack(stack, getVideoSelectionRect(renderedRect));
+  }
+}
+
+function requestRegionLayoutSync(): void {
+  if (regionLayoutSyncFrame !== null || currentRegions.length === 0 || isChzzkClipEditorPage()) {
+    return;
+  }
+
+  regionLayoutSyncFrame = window.requestAnimationFrame(() => {
+    regionLayoutSyncFrame = null;
+    syncRegionLayoutGeometry();
+  });
 }
 
 function startRegionLayoutWatch(): void {
-  lastVideoLayoutKey = getVideoLayoutKey();
-  regionLayoutTimerId = window.setInterval(() => {
-    if (currentRegions.length === 0) {
-      stopRegionLayoutWatch();
-      return;
-    }
+  const video = findPrimaryVideoElement();
+  if (regionLayoutObserver && regionLayoutVideo === video) {
+    syncRegionLayoutGeometry();
+    return;
+  }
 
-    const nextKey = getVideoLayoutKey();
-    if (nextKey === lastVideoLayoutKey) {
-      return;
-    }
+  stopRegionLayoutWatch();
+  regionLayoutVideo = video;
+  if (!video) {
+    return;
+  }
 
-    lastVideoLayoutKey = nextKey;
-    currentRegions.forEach((region, index) => {
-      const border = currentBorders.get(index);
-      if (border && document.body.contains(border)) {
-        applyBorderGeometry(border, region);
-      }
-    });
-    const stack = document.getElementById(SCREENSHOT_STACK_ID);
-    if (stack) {
-      positionScreenshotStack(stack);
-    }
-  }, 300);
+  regionLayoutObserver = new ResizeObserver(requestRegionLayoutSync);
+  regionLayoutObserver.observe(video);
+  const player = video.closest(".pzp, .chzzk_player");
+  if (player && player !== video) {
+    regionLayoutObserver.observe(player);
+  }
 }
 
-function applyBorderGeometry(border: HTMLDivElement, region: RegionSelection): void {
-  const displayRegion = resolveRegionToViewport(region);
+function applyBorderGeometry(border: HTMLDivElement, region: RegionSelection, renderedRect: DOMRect | null = getVideoRenderedViewportRect()): void {
+  const displayRegion = resolveRegionToViewport(region, renderedRect);
   const visibleLeft = Math.max(displayRegion.x, 0);
   const visibleTop = Math.max(displayRegion.y, 0);
   const visibleRight = Math.min(displayRegion.x + displayRegion.width, window.innerWidth);
@@ -2030,7 +2078,16 @@ function rgba(value: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-function syncBorderState(guides = new Map<number, Set<GuideSide>>()): void {
+function syncBorderGuides(guides = new Map<number, Set<GuideSide>>()): void {
+  for (const [index, border] of currentBorders) {
+    const guideSides = guides.get(index);
+    for (const side of ["n", "s", "w", "e"] as GuideSide[]) {
+      border.querySelector<HTMLElement>(`.guide-edge[data-side="${side}"]`)?.toggleAttribute("hidden", !guideSides?.has(side));
+    }
+  }
+}
+
+function syncBorderState(): void {
   for (const [index, border] of currentBorders) {
     const active = index === activeRegionIndex;
     const accent = getRegionAccent(index);
@@ -2038,12 +2095,9 @@ function syncBorderState(guides = new Map<number, Set<GuideSide>>()): void {
     border.style.setProperty("--crop-clip-region-outline", rgba(accent, active ? 0.96 : 0.5));
     border.style.setProperty("--crop-clip-region-shadow", rgba(accent, active ? 0.62 : 0.28));
     border.querySelector<HTMLButtonElement>(".add-region")?.toggleAttribute("hidden", !active || !multiRegionEnabled || currentRegions.length >= getActiveRegionLimit() || isRegionRecordingActive());
-    const guideSides = guides.get(index) ?? new Set<GuideSide>();
-    for (const side of ["n", "s", "w", "e"] as GuideSide[]) {
-      border.querySelector<HTMLElement>(`.guide-edge[data-side="${side}"]`)?.toggleAttribute("hidden", !guideSides.has(side));
-    }
     border.querySelector<HTMLButtonElement>(".record-region")?.toggleAttribute("hidden", !active);
   }
+  syncBorderGuides();
   currentBorder = currentBorders.get(activeRegionIndex) ?? currentBorders.get(0) ?? null;
 }
 
@@ -2073,7 +2127,12 @@ function addGuide(guides: Map<number, Set<GuideSide>>, index: number, side: Guid
   guides.set(index, set);
 }
 
-function snapRegionEdges(region: RegionSelection, index: number, edge = "nsew"): { region: RegionSelection; guides: Map<number, Set<GuideSide>> } {
+function snapRegionEdges(
+  region: RegionSelection,
+  index: number,
+  edge = "nsew",
+  renderedRect: DOMRect | null = getVideoRenderedViewportRect(),
+): { region: RegionSelection; guides: Map<number, Set<GuideSide>> } {
   let { left, top, right, bottom } = regionEdges(region);
   const guides = new Map<number, Set<GuideSide>>();
 
@@ -2081,7 +2140,7 @@ function snapRegionEdges(region: RegionSelection, index: number, edge = "nsew"):
     if (itemIndex === index) {
       return;
     }
-    const other = regionEdges(resolveRegionToViewport(item));
+    const other = regionEdges(resolveRegionToViewport(item, renderedRect));
     const checks: Array<{ enabled: boolean; side: "left" | "right" | "top" | "bottom"; guideSide: GuideSide; otherSide: GuideSide; value: number; target: number }> = [
       { enabled: edge.includes("w"), side: "left", guideSide: "w", otherSide: "w", value: left, target: other.left },
       { enabled: edge.includes("w"), side: "left", guideSide: "w", otherSide: "e", value: left, target: other.right },
@@ -2112,12 +2171,16 @@ function snapRegionEdges(region: RegionSelection, index: number, edge = "nsew"):
   });
 
   return {
-    region: buildRegionSelection(left, top, Math.max(MIN_WIDTH, right - left), Math.max(MIN_HEIGHT, bottom - top)),
+    region: buildRegionSelection(left, top, Math.max(MIN_WIDTH, right - left), Math.max(MIN_HEIGHT, bottom - top), renderedRect),
     guides,
   };
 }
 
-function snapRegionMove(region: RegionSelection, index: number): { region: RegionSelection; guides: Map<number, Set<GuideSide>> } {
+function snapRegionMove(
+  region: RegionSelection,
+  index: number,
+  renderedRect: DOMRect | null = getVideoRenderedViewportRect(),
+): { region: RegionSelection; guides: Map<number, Set<GuideSide>> } {
   let { left, top, right, bottom } = regionEdges(region);
   const width = right - left;
   const height = bottom - top;
@@ -2127,7 +2190,7 @@ function snapRegionMove(region: RegionSelection, index: number): { region: Regio
     if (itemIndex === index) {
       return;
     }
-    const other = regionEdges(resolveRegionToViewport(item));
+    const other = regionEdges(resolveRegionToViewport(item, renderedRect));
     const xChecks: Array<{ value: number; target: number; side: GuideSide; otherSide: GuideSide }> = [
       { value: left, target: other.left, side: "w", otherSide: "w" },
       { value: left, target: other.right, side: "w", otherSide: "e" },
@@ -2163,12 +2226,13 @@ function snapRegionMove(region: RegionSelection, index: number): { region: Regio
     }
   });
 
-  return { region: buildRegionSelection(left, top, width, height), guides };
+  return { region: buildRegionSelection(left, top, width, height, renderedRect), guides };
 }
 
 function attachBorderControls(border: HTMLDivElement, index: number): () => void {
   const cleanupCallbacks: Array<() => void> = [];
   let stopActiveDrag: (() => void) | null = null;
+  let recordTimerId: number | null = null;
   const recordTime = border.querySelector<HTMLElement>(".record-time");
   const recordButton = border.querySelector<HTMLButtonElement>(".record-region");
   const cancelButton = border.querySelector<HTMLButtonElement>(".cancel-recording");
@@ -2190,7 +2254,11 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
     const isFullRecording = currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode === RECORDING_MODE.full;
     const label = withShortcut(isRegionRecording ? "녹화 중지" : "녹화 시작", "regionRecord");
     recordButton.hidden = index !== activeRegionIndex;
-    recordButton.innerHTML = getRecordIconSvg(isRegionRecording);
+    const iconState = isRegionRecording ? "recording" : "idle";
+    if (recordButton.dataset.iconState !== iconState) {
+      recordButton.dataset.iconState = iconState;
+      recordButton.innerHTML = getRecordIconSvg(isRegionRecording);
+    }
     recordButton.setAttribute("aria-label", label);
     recordButton.title = label;
     recordButton.disabled = isFullRecording;
@@ -2231,6 +2299,17 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
     if (recordTime) {
       recordTime.hidden = !isRegionRecording || index !== activeRegionIndex;
       recordTime.textContent = isRegionRecording && currentRecordingState.startedAt ? formatElapsed(Date.now() - currentRecordingState.startedAt) : "00:00";
+    }
+    const needsTimer = isRegionRecording && index === activeRegionIndex;
+    if (needsTimer && recordTimerId === null) {
+      recordTimerId = window.setInterval(() => {
+        if (recordTime && currentRecordingState.startedAt) {
+          recordTime.textContent = formatElapsed(Date.now() - currentRecordingState.startedAt);
+        }
+      }, 1000);
+    } else if (!needsTimer && recordTimerId !== null) {
+      window.clearInterval(recordTimerId);
+      recordTimerId = null;
     }
   };
 
@@ -2312,8 +2391,11 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
     cleanupCallbacks.push(() => screenshotButton.removeEventListener("click", onScreenshot));
   }
 
-  const timerId = window.setInterval(updateRecordButton, 1000);
-  cleanupCallbacks.push(() => window.clearInterval(timerId));
+  cleanupCallbacks.push(() => {
+    if (recordTimerId !== null) {
+      window.clearInterval(recordTimerId);
+    }
+  });
 
   const onClear = (event: MouseEvent) => {
     event.preventDefault();
@@ -2357,10 +2439,11 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
 
     const startX = event.clientX;
     const startY = event.clientY;
-    const startRegion = resolveRegionToViewport(region);
+    const renderedRect = getVideoRenderedViewportRect();
+    const startRegion = resolveRegionToViewport(region, renderedRect);
     const startLeft = startRegion.x;
     const startTop = startRegion.y;
-    const bounds = getVideoSelectionRect();
+    const bounds = getVideoSelectionRect(renderedRect);
     if (!bounds) {
       return;
     }
@@ -2372,17 +2455,17 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
       const left = clamp(startLeft + moveEvent.clientX - startX, bounds.left, bounds.right - width);
       const top = clamp(startTop + moveEvent.clientY - startY, bounds.top, bounds.bottom - height);
 
-      const snapped = snapRegionMove(buildRegionSelection(left, top, width, height), index);
+      const snapped = snapRegionMove(buildRegionSelection(left, top, width, height, renderedRect), index, renderedRect);
       const nextLeft = clamp(snapped.region.x, bounds.left, bounds.right - width);
       const nextTop = clamp(snapped.region.y, bounds.top, bounds.bottom - height);
-      const nextRegion = buildRegionSelection(nextLeft, nextTop, width, height);
-      if (collidesWithOtherRegion(nextRegion, index)) {
+      const nextRegion = buildRegionSelection(nextLeft, nextTop, width, height, renderedRect);
+      if (collidesWithOtherRegion(nextRegion, index, renderedRect)) {
         return;
       }
       currentRegions[index] = nextRegion;
       currentRegion = getActiveRegion();
-      applyBorderGeometry(border, nextRegion);
-      syncBorderState(snapped.guides);
+      applyBorderGeometry(border, nextRegion, renderedRect);
+      syncBorderGuides(snapped.guides);
     };
 
     const onUp = () => {
@@ -2420,12 +2503,13 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
 
     const startX = event.clientX;
     const startY = event.clientY;
-    const startRegion = resolveRegionToViewport(region);
+    const renderedRect = getVideoRenderedViewportRect();
+    const startRegion = resolveRegionToViewport(region, renderedRect);
     const startLeft = startRegion.x;
     const startTop = startRegion.y;
     const startRight = startRegion.x + startRegion.width;
     const startBottom = startRegion.y + startRegion.height;
-    const bounds = getVideoSelectionRect();
+    const bounds = getVideoSelectionRect(renderedRect);
     if (!bounds) {
       return;
     }
@@ -2451,7 +2535,7 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
     const magnifierVideo = findPrimaryVideoElement();
     if (magnifierVideo) {
       const focus = getResizeFocusPoint(startRegion, edge, event.clientX, event.clientY);
-      updateResizeMagnifier(magnifierVideo, focus.x, focus.y);
+      updateResizeMagnifier(magnifierVideo, focus.x, focus.y, renderedRect ?? undefined);
     }
 
     const onMove = (moveEvent: PointerEvent) => {
@@ -2469,25 +2553,25 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
         moveEvent.shiftKey,
         moveEvent.altKey,
       );
-      let nextRegion = buildRegionSelection(resized.left, resized.top, resized.right - resized.left, resized.bottom - resized.top);
+      let nextRegion = buildRegionSelection(resized.left, resized.top, resized.right - resized.left, resized.bottom - resized.top, renderedRect);
       const snap = moveEvent.shiftKey || moveEvent.altKey
         ? { region: nextRegion, guides: new Map<number, Set<GuideSide>>() }
-        : snapRegionEdges(nextRegion, index, edge);
+        : snapRegionEdges(nextRegion, index, edge, renderedRect);
       nextRegion = snap.region;
-      if (collidesWithOtherRegion(nextRegion, index)) {
+      if (collidesWithOtherRegion(nextRegion, index, renderedRect)) {
         if (magnifierVideo) {
-          const focus = getResizeFocusPoint(resolveRegionToViewport(currentRegions[index]), edge, moveEvent.clientX, moveEvent.clientY);
-          updateResizeMagnifier(magnifierVideo, focus.x, focus.y);
+          const focus = getResizeFocusPoint(resolveRegionToViewport(currentRegions[index], renderedRect), edge, moveEvent.clientX, moveEvent.clientY);
+          updateResizeMagnifier(magnifierVideo, focus.x, focus.y, renderedRect ?? undefined);
         }
         return;
       }
       currentRegions[index] = nextRegion;
       currentRegion = getActiveRegion();
-      applyBorderGeometry(border, nextRegion);
-      syncBorderState(snap.guides);
+      applyBorderGeometry(border, nextRegion, renderedRect);
+      syncBorderGuides(snap.guides);
       if (magnifierVideo) {
         const focus = getResizeFocusPoint(nextRegion, edge, moveEvent.clientX, moveEvent.clientY);
-        updateResizeMagnifier(magnifierVideo, focus.x, focus.y);
+        updateResizeMagnifier(magnifierVideo, focus.x, focus.y, renderedRect ?? undefined);
       }
     };
 
@@ -2779,9 +2863,12 @@ function cancelSelection(message?: string): void {
 }
 
 async function commitSelection(region: RegionSelection): Promise<void> {
-  const bounds = getVideoSelectionRect();
-  const nextRegion = bounds ? clampRegionToRect(region, bounds) : buildRegionSelection(region.x, region.y, region.width, region.height);
-  if (multiRegionEnabled && currentRegions.some((item) => regionsOverlap(resolveRegionToViewport(item), nextRegion))) {
+  const renderedRect = getVideoRenderedViewportRect();
+  const bounds = getVideoSelectionRect(renderedRect);
+  const nextRegion = bounds
+    ? clampRegionToRect(region, bounds, renderedRect)
+    : buildRegionSelection(region.x, region.y, region.width, region.height, renderedRect);
+  if (multiRegionEnabled && currentRegions.some((item) => regionsOverlap(resolveRegionToViewport(item, renderedRect), nextRegion))) {
     setOverlayError("영역끼리는 겹칠 수 없습니다.");
     return;
   }
@@ -2800,8 +2887,9 @@ async function commitSelection(region: RegionSelection): Promise<void> {
 
 function getCurrentRegionGeometry(): RegionSelection | null {
   const activeRegion = getActiveRegion();
+  const renderedRect = getVideoRenderedViewportRect();
   if (activeRegion?.videoRelative) {
-    return resolveRegionToViewport(activeRegion);
+    return resolveRegionToViewport(activeRegion, renderedRect);
   }
 
   const sourceRect = currentBorder?.getBoundingClientRect();
@@ -2814,7 +2902,7 @@ function getCurrentRegionGeometry(): RegionSelection | null {
   const top = (sourceRect ? sourceRect.top : activeRegion?.y ?? 0) + inset;
   const right = (sourceRect ? sourceRect.right : (activeRegion?.x ?? 0) + (activeRegion?.width ?? 0)) - inset;
   const bottom = (sourceRect ? sourceRect.bottom : (activeRegion?.y ?? 0) + (activeRegion?.height ?? 0)) - inset;
-  const bounds = getVideoSelectionRect();
+  const bounds = getVideoSelectionRect(renderedRect);
   const limitLeft = bounds?.left ?? 0;
   const limitTop = bounds?.top ?? 0;
   const limitRight = bounds?.right ?? window.innerWidth;
@@ -2824,12 +2912,13 @@ function getCurrentRegionGeometry(): RegionSelection | null {
   const width = clamp(right, x + 1, limitRight) - x;
   const height = clamp(bottom, y + 1, limitBottom) - y;
 
-  return buildRegionSelection(x, y, width, height);
+  return buildRegionSelection(x, y, width, height, renderedRect);
 }
 
 function getCurrentRegionGeometries(): RegionSelection[] {
+  const renderedRect = getVideoRenderedViewportRect();
   return currentRegions
-    .map((region) => resolveRegionToViewport(region))
+    .map((region) => resolveRegionToViewport(region, renderedRect))
     .filter((region) => region.width > 0 && region.height > 0)
     .slice(0, getActiveRegionLimit());
 }
@@ -2840,7 +2929,7 @@ function getPlayerRegionGeometry(): RegionSelection | null {
     return null;
   }
 
-  return buildRegionSelection(rect.left, rect.top, rect.width, rect.height);
+  return buildRegionSelection(rect.left, rect.top, rect.width, rect.height, rect);
 }
 
 function startSelection(): void {
@@ -2878,25 +2967,29 @@ function startSelection(): void {
   let startX = 0;
   let startY = 0;
   let magnifierVideo: HTMLVideoElement | null = null;
+  let selectionBounds: DOMRect | null = null;
+  let selectionRenderedRect: DOMRect | null = null;
 
   const onPointerDown = (event: PointerEvent) => {
     if (event.button !== 0) {
       return;
     }
 
-    const bounds = getVideoSelectionRect();
+    magnifierVideo = findPrimaryVideoElement();
+    selectionRenderedRect = magnifierVideo ? getRenderedVideoRect(magnifierVideo).rect : null;
+    const bounds = getVideoSelectionRect(selectionRenderedRect);
     if (!bounds) {
       setOverlayError("재생 중인 영상 영역을 찾지 못했습니다.");
       return;
     }
 
     dragging = true;
-    magnifierVideo = findPrimaryVideoElement();
+    selectionBounds = bounds;
     startX = clamp(event.clientX, bounds.left, bounds.right);
     startY = clamp(event.clientY, bounds.top, bounds.bottom);
     updateSelectionBox(selectionBox, startX, startY, startX, startY);
     if (magnifierVideo) {
-      updateResizeMagnifier(magnifierVideo, startX, startY);
+      updateResizeMagnifier(magnifierVideo, startX, startY, selectionRenderedRect ?? undefined);
     }
     event.preventDefault();
   };
@@ -2906,7 +2999,7 @@ function startSelection(): void {
       return;
     }
 
-    const bounds = getVideoSelectionRect();
+    const bounds = selectionBounds;
     if (!bounds) {
       return;
     }
@@ -2915,7 +3008,7 @@ function startSelection(): void {
     const endY = clamp(event.clientY, bounds.top, bounds.bottom);
     updateSelectionBox(selectionBox, startX, startY, endX, endY);
     if (magnifierVideo) {
-      updateResizeMagnifier(magnifierVideo, endX, endY);
+      updateResizeMagnifier(magnifierVideo, endX, endY, selectionRenderedRect ?? undefined);
     }
     event.preventDefault();
   };
@@ -2928,7 +3021,10 @@ function startSelection(): void {
     dragging = false;
     magnifierVideo = null;
     hideResizeMagnifier();
-    const bounds = getVideoSelectionRect();
+    const bounds = selectionBounds;
+    const renderedRect = selectionRenderedRect;
+    selectionBounds = null;
+    selectionRenderedRect = null;
     if (!bounds) {
       setOverlayError("재생 중인 영상 영역을 찾지 못했습니다.");
       return;
@@ -2947,7 +3043,7 @@ function startSelection(): void {
       return;
     }
 
-    await commitSelection(buildRegionSelection(x, y, width, height));
+    await commitSelection(buildRegionSelection(x, y, width, height, renderedRect));
   };
 
   const onKeyDown = (event: KeyboardEvent) => {
@@ -2965,6 +3061,8 @@ function startSelection(): void {
   const onPointerCancel = () => {
     dragging = false;
     magnifierVideo = null;
+    selectionBounds = null;
+    selectionRenderedRect = null;
     hideResizeMagnifier();
     updateSelectionBox(selectionBox, 0, 0, 0, 0);
   };
@@ -2976,6 +3074,7 @@ function startSelection(): void {
   overlay.addEventListener("contextmenu", onContextMenu);
   window.addEventListener("keydown", onKeyDown, { once: false });
 
+  let overlayObserver: MutationObserver | null = null;
   const cleanup = () => {
     overlay.removeEventListener("pointerdown", onPointerDown);
     overlay.removeEventListener("pointermove", onPointerMove);
@@ -2983,17 +3082,24 @@ function startSelection(): void {
     overlay.removeEventListener("pointercancel", onPointerCancel);
     overlay.removeEventListener("contextmenu", onContextMenu);
     window.removeEventListener("keydown", onKeyDown);
+    overlayObserver?.disconnect();
+    overlayObserver = null;
   };
 
   removeSelectionHandlers = cleanup;
 
-  const observer = new MutationObserver(() => {
-    if (!document.body.contains(overlay)) {
+  overlayObserver = new MutationObserver(() => {
+    if (!overlay.isConnected) {
       cleanup();
-      observer.disconnect();
     }
   });
-  observer.observe(document.documentElement, { childList: true, subtree: true });
+  const overlayParent = overlay.parentElement;
+  if (overlayParent) {
+    overlayObserver.observe(overlayParent, { childList: true });
+    if (overlayParent.parentElement) {
+      overlayObserver.observe(overlayParent.parentElement, { childList: true });
+    }
+  }
 }
 
 function getCropIconSvg(): string {
@@ -3028,6 +3134,15 @@ function withShortcut(label: string, action: ShortcutAction): string {
   return shortcutsEnabled ? `${label} (${shortcutKeys[action]})` : label;
 }
 
+function setChzzkToolContent(button: HTMLElement, contentKey: string, html: string): void {
+  if (button.dataset.cropClipContent === contentKey) {
+    return;
+  }
+
+  button.dataset.cropClipContent = contentKey;
+  button.innerHTML = html;
+}
+
 function setChzzkRecordButtonContent(button: HTMLElement): void {
   const isFullRecording = currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode === RECORDING_MODE.full;
   const isRegionRecording = currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode !== RECORDING_MODE.full;
@@ -3039,10 +3154,10 @@ function setChzzkRecordButtonContent(button: HTMLElement): void {
   if (button instanceof HTMLButtonElement) {
     button.disabled = isRegionRecording;
   }
-  button.innerHTML = `
+  setChzzkToolContent(button, `record:${label}:${isFullRecording}`, `
     <span class="pzp-button__tooltip pzp-button__tooltip--top">${label}</span>
     <span class="pzp-ui-icon pzp-pc-setting-button__icon">${getRecordIconSvg(isFullRecording)}</span>
-  `;
+  `);
 }
 
 function setChzzkCancelButtonContent(button: HTMLElement): void {
@@ -3050,10 +3165,10 @@ function setChzzkCancelButtonContent(button: HTMLElement): void {
   button.setAttribute("aria-label", label);
   button.setAttribute("type", "button");
   button.removeAttribute("title");
-  button.innerHTML = `
+  setChzzkToolContent(button, `cancel:${label}`, `
     <span class="pzp-button__tooltip pzp-button__tooltip--top">${label}</span>
     <span class="pzp-ui-icon pzp-pc-setting-button__icon">${getTrashIconSvg()}</span>
-  `;
+  `);
 }
 
 function setChzzkScreenshotButtonContent(button: HTMLElement): void {
@@ -3061,10 +3176,10 @@ function setChzzkScreenshotButtonContent(button: HTMLElement): void {
   button.setAttribute("aria-label", label);
   button.setAttribute("type", "button");
   button.removeAttribute("title");
-  button.innerHTML = `
+  setChzzkToolContent(button, `screenshot:${label}`, `
     <span class="pzp-button__tooltip pzp-button__tooltip--top">${label}</span>
     <span class="pzp-ui-icon pzp-pc-setting-button__icon">${getCameraIconSvg()}</span>
-  `;
+  `);
 }
 
 function setChzzkButtonContent(button: HTMLElement): void {
@@ -3072,10 +3187,10 @@ function setChzzkButtonContent(button: HTMLElement): void {
   button.setAttribute("aria-label", label);
   button.setAttribute("type", "button");
   button.removeAttribute("title");
-  button.innerHTML = `
+  setChzzkToolContent(button, `select:${label}`, `
     <span class="pzp-button__tooltip pzp-button__tooltip--top">${label}</span>
     <span class="pzp-ui-icon pzp-pc-setting-button__icon">${getCropIconSvg()}</span>
-  `;
+  `);
 }
 
 function showSeekFeedback(deltaSeconds: number): void {
@@ -3245,44 +3360,14 @@ function handlePlayerCancelActivation(event: MouseEvent): void {
     });
 }
 
-function bindDirectPlayerScreenshotActivation(button: HTMLElement): void {
+function bindDirectPlayerActivation(button: HTMLElement, handler: (event: MouseEvent) => void): void {
   if (button.dataset.cropClipBound === "true") {
     return;
   }
 
   button.dataset.cropClipBound = "true";
-  button.addEventListener("pointerdown", handlePlayerScreenshotActivation);
-  button.addEventListener("click", handlePlayerScreenshotActivation);
-}
-
-function bindDirectPlayerToolActivation(button: HTMLElement): void {
-  if (button.dataset.cropClipBound === "true") {
-    return;
-  }
-
-  button.dataset.cropClipBound = "true";
-  button.addEventListener("pointerdown", handlePlayerToolActivation);
-  button.addEventListener("click", handlePlayerToolActivation);
-}
-
-function bindDirectPlayerRecordActivation(button: HTMLElement): void {
-  if (button.dataset.cropClipBound === "true") {
-    return;
-  }
-
-  button.dataset.cropClipBound = "true";
-  button.addEventListener("pointerdown", handlePlayerRecordActivation);
-  button.addEventListener("click", handlePlayerRecordActivation);
-}
-
-function bindDirectPlayerCancelActivation(button: HTMLElement): void {
-  if (button.dataset.cropClipBound === "true") {
-    return;
-  }
-
-  button.dataset.cropClipBound = "true";
-  button.addEventListener("pointerdown", handlePlayerCancelActivation);
-  button.addEventListener("click", handlePlayerCancelActivation);
+  button.addEventListener("pointerdown", handler);
+  button.addEventListener("click", handler);
 }
 
 function isVisibleElement(element: HTMLElement): boolean {
@@ -3378,6 +3463,15 @@ function syncChzzkToolButton(): void {
   const existingTime = document.getElementById(CHZZK_RECORD_TIME_ID) as HTMLSpanElement | null;
   const existingCancel = document.getElementById(CHZZK_CANCEL_BUTTON_ID) as HTMLButtonElement | null;
   const existingScreenshot = document.getElementById(CHZZK_SCREENSHOT_BUTTON_ID) as HTMLButtonElement | null;
+  if (isChzzkClipEditorPage()) {
+    existing?.remove();
+    existingRecord?.remove();
+    existingTime?.remove();
+    existingCancel?.remove();
+    existingScreenshot?.remove();
+    return;
+  }
+
   const target = findChzzkButtonHost();
   if (!target) {
     existing?.remove();
@@ -3415,7 +3509,7 @@ function syncChzzkToolButton(): void {
     recordButton.className = CHZZK_TOOL_BUTTON_CLASS;
     recordButton.type = "button";
     setChzzkRecordButtonContent(recordButton);
-    bindDirectPlayerRecordActivation(recordButton);
+    bindDirectPlayerActivation(recordButton, handlePlayerRecordActivation);
   }
 
   const cancelButton = fullRecordButtonEnabled && isFullRecording ? existingCancel ?? document.createElement("button") : null;
@@ -3424,7 +3518,7 @@ function syncChzzkToolButton(): void {
     cancelButton.className = CHZZK_TOOL_BUTTON_CLASS;
     cancelButton.type = "button";
     setChzzkCancelButtonContent(cancelButton);
-    bindDirectPlayerCancelActivation(cancelButton);
+    bindDirectPlayerActivation(cancelButton, handlePlayerCancelActivation);
   } else {
     existingCancel?.remove();
   }
@@ -3435,7 +3529,7 @@ function syncChzzkToolButton(): void {
     screenshotButton.className = CHZZK_TOOL_BUTTON_CLASS;
     screenshotButton.type = "button";
     setChzzkScreenshotButtonContent(screenshotButton);
-    bindDirectPlayerScreenshotActivation(screenshotButton);
+    bindDirectPlayerActivation(screenshotButton, handlePlayerScreenshotActivation);
   }
 
   const selectButton = existing ?? document.createElement("button");
@@ -3444,7 +3538,7 @@ function syncChzzkToolButton(): void {
   selectButton.type = "button";
   selectButton.disabled = isRegionRecordingActive();
   setChzzkButtonContent(selectButton);
-  bindDirectPlayerToolActivation(selectButton);
+  bindDirectPlayerActivation(selectButton, handlePlayerToolActivation);
 
   const needsReinsert = (recordButton ? recordButton.parentElement !== host : false)
     || (cancelButton ? cancelButton.parentElement !== host : false)
@@ -3511,11 +3605,23 @@ function syncChzzkRecordTimer(): void {
     return;
   }
 
-  chzzkRecordTimerId = window.setInterval(() => requestChzzkToolSync(), 1000);
+  chzzkRecordTimerId = window.setInterval(() => {
+    const timeBadge = document.getElementById(CHZZK_RECORD_TIME_ID);
+    if (timeBadge && currentRecordingState.startedAt) {
+      timeBadge.textContent = formatElapsed(Date.now() - currentRecordingState.startedAt);
+    }
+  }, 1000);
+}
+
+function mutationAddsChzzkPlayer(records: MutationRecord[]): boolean {
+  const selector = ".pzp, .chzzk_player, .pzp-pc__bottom-buttons-right, .pzp-pc-ui-bottom__right";
+  return records.some((record) => Array.from(record.addedNodes).some((node) =>
+    node instanceof Element && (node.matches(selector) || Boolean(node.querySelector(selector)))
+  ));
 }
 
 function installChzzkToolButton(): void {
-  if (!location.hostname.includes("chzzk.naver.com")) {
+  if (!location.hostname.includes("chzzk.naver.com") || isChzzkClipEditorPage()) {
     return;
   }
 
@@ -3523,12 +3629,82 @@ function installChzzkToolButton(): void {
   syncChzzkToolButton();
   syncChzzkRecordTimer();
   chzzkToolObserver?.disconnect();
-  chzzkToolObserver = new MutationObserver(() => requestChzzkToolSync());
-  chzzkToolObserver.observe(document.documentElement, { childList: true, subtree: true });
+  const toolHost = findChzzkButtonHost();
+  const playerRoot = toolHost?.closest(".chzzk_player, .pzp");
+  const controlsRoot = toolHost?.closest(".pzp-pc__bottom, .pzp-pc-ui-bottom") ?? toolHost?.parentElement;
+  const controlsParent = controlsRoot?.parentElement;
+  const playerParent = playerRoot?.parentElement;
+  chzzkToolObserver = new MutationObserver((records) => {
+    if (isChzzkClipEditorPage()) {
+      suspendPlayerTools();
+      return;
+    }
+    const selectButton = document.getElementById(CHZZK_TOOL_BUTTON_ID);
+    const recordButton = document.getElementById(CHZZK_RECORD_BUTTON_ID);
+    const timeBadge = document.getElementById(CHZZK_RECORD_TIME_ID);
+    const cancelButton = document.getElementById(CHZZK_CANCEL_BUTTON_ID);
+    const screenshotButton = document.getElementById(CHZZK_SCREENSHOT_BUTTON_ID);
+    const expectsFullRecordingControls = fullRecordButtonEnabled
+      && currentRecordingState.status === RECORDING_STATUS.recording
+      && currentRecordingState.mode === RECORDING_MODE.full;
+    const missingExpectedButton = selectButton?.parentElement !== toolHost
+      || (fullRecordButtonEnabled && recordButton?.parentElement !== toolHost)
+      || (expectsFullRecordingControls && timeBadge?.parentElement !== toolHost)
+      || (expectsFullRecordingControls && cancelButton?.parentElement !== toolHost)
+      || (fullScreenshotButtonEnabled && screenshotButton?.parentElement !== toolHost);
+    if (toolHost && (!toolHost.isConnected || missingExpectedButton)) {
+      installChzzkToolButton();
+      return;
+    }
+    if (!toolHost && mutationAddsChzzkPlayer(records)) {
+      installChzzkToolButton();
+    }
+  });
+  if (toolHost) {
+    if (controlsRoot) {
+      chzzkToolObserver.observe(controlsRoot, { childList: true, subtree: true });
+    }
+    if (controlsParent) {
+      chzzkToolObserver.observe(controlsParent, { childList: true });
+    }
+    if (playerParent && playerParent !== controlsParent) {
+      chzzkToolObserver.observe(playerParent, { childList: true });
+    }
+  } else {
+    chzzkToolObserver.observe(document.body, { childList: true, subtree: true });
+  }
 }
 
-function installPlayerToolButtons(): void {
-  installChzzkToolButton();
+function suspendPlayerTools(): void {
+  chzzkToolObserver?.disconnect();
+  chzzkToolObserver = null;
+  if (chzzkToolSyncFrame !== null) {
+    window.cancelAnimationFrame(chzzkToolSyncFrame);
+    chzzkToolSyncFrame = null;
+  }
+  if (chzzkRecordTimerId !== null) {
+    window.clearInterval(chzzkRecordTimerId);
+    chzzkRecordTimerId = null;
+  }
+  stopRegionLayoutWatch();
+  teardownOverlay();
+  removeSelectionBorders();
+  currentRegion = null;
+  currentRegions = [];
+  for (const id of [CHZZK_TOOL_BUTTON_ID, CHZZK_RECORD_BUTTON_ID, CHZZK_CANCEL_BUTTON_ID, CHZZK_SCREENSHOT_BUTTON_ID, CHZZK_RECORD_TIME_ID]) {
+    document.getElementById(id)?.remove();
+  }
+}
+
+function syncPlayerToolsForLocation(): void {
+  if (isChzzkClipEditorPage()) {
+    suspendPlayerTools();
+    return;
+  }
+
+  void refreshBorder()
+    .then(installChzzkToolButton)
+    .catch(() => {});
 }
 
 function isRegionRecordingActive(): boolean {
@@ -3544,8 +3720,9 @@ function activateRegionAtPoint(x: number, y: number): void {
     return;
   }
 
+  const renderedRect = getVideoRenderedViewportRect();
   const nextIndex = currentRegions.findIndex((region) => {
-    const displayRegion = resolveRegionToViewport(region);
+    const displayRegion = resolveRegionToViewport(region, renderedRect);
     return x >= displayRegion.x && x <= displayRegion.x + displayRegion.width
       && y >= displayRegion.y && y <= displayRegion.y + displayRegion.height;
   });
@@ -3562,6 +3739,10 @@ function isEditableShortcutTarget(target: EventTarget | null): boolean {
 }
 
 function handleShortcut(event: KeyboardEvent): void {
+  if (isChzzkClipEditorPage()) {
+    return;
+  }
+
   if (event.repeat || event.ctrlKey || event.metaKey || event.altKey || isEditableShortcutTarget(event.target)) {
     return;
   }
@@ -3636,19 +3817,32 @@ function handleShortcut(event: KeyboardEvent): void {
 }
 
 function findPrimaryVideoElement(): HTMLVideoElement | null {
-  const videos = Array.from(document.querySelectorAll("video"));
-  if (videos.length === 0) {
-    return null;
+  const pictureInPictureVideo = document.pictureInPictureElement;
+  if (pictureInPictureVideo instanceof HTMLVideoElement) {
+    return pictureInPictureVideo;
   }
 
-  let best = videos[0];
-  let bestArea = 0;
+  const videos = Array.from(document.querySelectorAll("video"));
+  let best: HTMLVideoElement | null = null;
+  let bestScore = -1;
   for (const video of videos) {
     const rect = video.getBoundingClientRect();
     const area = Math.max(0, rect.width) * Math.max(0, rect.height);
-    if (area > bestArea) {
+    const visibleWidth = Math.max(0, Math.min(rect.right, window.innerWidth) - Math.max(rect.left, 0));
+    const visibleHeight = Math.max(0, Math.min(rect.bottom, window.innerHeight) - Math.max(rect.top, 0));
+    const visibleArea = visibleWidth * visibleHeight;
+    const style = window.getComputedStyle(video);
+    if (area === 0 || style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) {
+      continue;
+    }
+
+    const hasSource = Boolean(video.currentSrc || video.srcObject || video.getAttribute("src"));
+    const hasFrame = video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0 && video.videoHeight > 0;
+    const isPlaying = hasFrame && !video.paused && !video.ended;
+    const score = visibleArea * 4 + area + (hasSource ? area : 0) + (hasFrame ? area * 2 : 0) + (isPlaying ? area * 4 : 0);
+    if (score >= bestScore) {
       best = video;
-      bestArea = area;
+      bestScore = score;
     }
   }
 
@@ -3695,8 +3889,8 @@ if (isExtensionContextAvailable()) {
     }
 
     if (message.type === "CAPTURE_FULL_SCREENSHOT") {
-      void captureFullScreenshot()
-        .then(() => sendResponse({ ok: true }))
+      void captureFullScreenshot(false)
+        .then((response) => sendResponse(response))
         .catch((error: Error) => sendResponse({ ok: false, error: error.message }));
       return true;
     }
@@ -3753,6 +3947,11 @@ if (isExtensionContextAvailable()) {
       return;
     }
 
+    if (isChzzkClipEditorPage()) {
+      suspendPlayerTools();
+      return;
+    }
+
     if (changes.region) {
       currentRegion = normalizeRegion(changes.region.newValue);
     }
@@ -3799,23 +3998,12 @@ if (isExtensionContextAvailable()) {
   });
 }
 
-window.addEventListener("resize", () => {
-  void refreshBorder();
-});
+window.addEventListener("resize", requestRegionLayoutSync);
 
-window.addEventListener("scroll", () => {
-  if (currentRegions.length > 0) {
-    currentRegions.forEach((region, index) => {
-      const border = currentBorders.get(index);
-      if (border) {
-        applyBorderGeometry(border, region);
-      }
-    });
-  }
-}, true);
+window.addEventListener("scroll", requestRegionLayoutSync, { capture: true, passive: true });
 
 window.addEventListener("pointerdown", (event) => {
-  if (event.button !== 0 || selectionActive || currentRegions.length === 0) {
+  if (isChzzkClipEditorPage() || event.button !== 0 || selectionActive || currentRegions.length === 0) {
     return;
   }
   activateRegionAtPoint(event.clientX, event.clientY);
@@ -3854,7 +4042,15 @@ window.addEventListener("keydown", (event) => {
   });
 }, true);
 
-  void initializePageState()
-    .catch(() => {})
-    .then(installPlayerToolButtons);
+  const navigationApi = (window as Window & { navigation?: EventTarget }).navigation;
+  navigationApi?.addEventListener("currententrychange", syncPlayerToolsForLocation);
+  window.addEventListener("popstate", syncPlayerToolsForLocation);
+
+  if (isChzzkClipEditorPage()) {
+    suspendPlayerTools();
+  } else {
+    void initializePageState()
+      .catch(() => {})
+      .then(installChzzkToolButton);
+  }
 })();

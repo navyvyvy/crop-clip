@@ -1,12 +1,15 @@
-import { deleteRecording, putPart, putRecording } from "../shared/idb.js";
-import { fail, ok, type ContentCommand, type DeletionCancelRequest, type DeletionScheduleRequest, type MessageResponse, type PopupCommand, type RecordingErrorMessage, type RecordingFinishedMessage, type StoreRecordingPartMessage } from "../shared/messages.js";
+import { deleteRecording, deleteRecordingChunks, getChunksByRecordingId, putChunk, putPart, putRecording } from "../shared/idb.js";
+import { fail, ok, type ContentCommand, type DeletionScheduleRequest, type FinalizeRecordingMessage, type MessageResponse, type PopupCommand, type RecordingErrorMessage, type StoreRecordingChunkMessage } from "../shared/messages.js";
 import { loadAppState, loadRecordingState, saveRecordingState } from "../shared/storage.js";
-import { RECORDING_MODE, RECORDING_STATUS, type RegionSelection, type Settings } from "../shared/types.js";
+import { RECORDING_MODE, RECORDING_STATUS, type RecordingRecord, type RegionSelection, type Settings } from "../shared/types.js";
 const DELETE_AFTER_MINUTES = 10;
 const DELETE_RETRY_MINUTES = 1;
 const DELETE_ALARM_PREFIX = "delete-recording:";
 const TAB_MESSAGE_RETRY_DELAY_MS = 80;
+const CHECKPOINT_FINALIZE_DELAY_MS = 300;
 let recordingStartInFlight = false;
+const checkpointStores = new Map<string, Promise<void>>();
+const checkpointFinalizations = new Map<string, Promise<MessageResponse>>();
 
 function sendToTab<T = undefined>(tabId: number, message: unknown): Promise<T | undefined> {
   return new Promise<T | undefined>((resolve, reject) => {
@@ -37,13 +40,31 @@ function getContentScriptErrorMessage(error: unknown): string {
     : message || "현재 탭에서 명령을 실행할 수 없습니다.";
 }
 
-async function markRecordingErrorIfCurrent(recordingId?: string): Promise<void> {
+async function markRecordingErrorIfCurrent(recordingId?: string): Promise<boolean> {
   const state = await loadRecordingState();
   if (state.status !== RECORDING_STATUS.recording || (recordingId && state.recordingId !== recordingId)) {
-    return;
+    return false;
   }
 
   await saveRecordingState({ ...state, status: RECORDING_STATUS.error });
+  return true;
+}
+
+async function discardRecordingIfCurrent(recordingId?: string): Promise<void> {
+  if (!recordingId) {
+    return;
+  }
+
+  const state = await loadRecordingState();
+  if (state.recordingId !== recordingId || state.status === RECORDING_STATUS.completed) {
+    return;
+  }
+  if (state.status === RECORDING_STATUS.recording) {
+    await saveRecordingState({ ...state, status: RECORDING_STATUS.error });
+  }
+
+  await checkpointStores.get(recordingId)?.catch(() => {});
+  await deleteRecordingEventually(recordingId);
 }
 
 async function scheduleRecordingDeletion(recordingId: string): Promise<MessageResponse> {
@@ -53,14 +74,17 @@ async function scheduleRecordingDeletion(recordingId: string): Promise<MessageRe
   return ok();
 }
 
-async function cancelRecordingDeletion(recordingId: string): Promise<MessageResponse> {
-  await chrome.alarms.clear(getDeleteAlarmName(recordingId));
-  return ok();
-}
-
 async function deleteRecordingNow(recordingId: string): Promise<void> {
   await deleteRecording(recordingId);
   await chrome.alarms.clear(getDeleteAlarmName(recordingId));
+}
+
+async function deleteRecordingEventually(recordingId: string): Promise<void> {
+  try {
+    await deleteRecordingNow(recordingId);
+  } catch {
+    await scheduleRecordingDeletion(recordingId).catch(() => {});
+  }
 }
 
 async function getActiveRecordableTab(): Promise<chrome.tabs.Tab> {
@@ -99,6 +123,39 @@ async function sendCommandToContentScript<T = undefined>(tabId: number, message:
       return fail(getContentScriptErrorMessage(fallbackError instanceof Error ? fallbackError : error));
     }
   }
+}
+
+function buildDirectFilename(baseName: string, extension: string, createdAt: number, endedAt: number): string {
+  const totalSeconds = Math.max(1, Math.round((endedAt - createdAt) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor(totalSeconds % 3600 / 60);
+  const seconds = totalSeconds % 60;
+  const duration = hours > 0
+    ? `${hours}h${String(minutes).padStart(2, "0")}m${String(seconds).padStart(2, "0")}s`
+    : minutes > 0 ? `${minutes}m${String(seconds).padStart(2, "0")}s` : `${seconds}s`;
+  return `${baseName}_${duration}.${extension}`;
+}
+
+function getFinalRecordingEndedAt(createdAt: number, requestedEndedAt: number, lastCapturedAt?: number): number {
+  const endedAt = typeof lastCapturedAt === "number" && Number.isFinite(lastCapturedAt)
+    ? Math.min(requestedEndedAt, lastCapturedAt)
+    : requestedEndedAt;
+  return Math.max(createdAt, endedAt);
+}
+
+function decodeRecordingDataUrl(dataUrl: string, mimeType: string): Blob {
+  const marker = ";base64,";
+  const markerIndex = dataUrl.lastIndexOf(marker);
+  if (!dataUrl.startsWith("data:") || markerIndex < 0) {
+    throw new Error("녹화 체크포인트 형식이 올바르지 않습니다.");
+  }
+
+  const binary = atob(dataUrl.slice(markerIndex + marker.length));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return new Blob([bytes], { type: mimeType });
 }
 
 async function startSelection(): Promise<MessageResponse> {
@@ -233,7 +290,8 @@ async function startRecordingSession(fullPlayer: boolean): Promise<MessageRespon
 
     const response = await startDirectRecording(tabId, recordingId, regions[0], settings, settings.enableMultiRegion ? regions : undefined);
     if (!response.ok) {
-      await markRecordingErrorIfCurrent(recordingId);
+      await cancelDirectRecording(tabId, recordingId);
+      await discardRecordingIfCurrent(recordingId);
       return response;
     }
 
@@ -246,7 +304,8 @@ async function startRecordingSession(fullPlayer: boolean): Promise<MessageRespon
     return ok({ recordingId });
   } catch (error) {
     const message = error instanceof Error ? error.message : "녹화를 시작할 수 없습니다.";
-    await markRecordingErrorIfCurrent(recordingId);
+    await cancelDirectRecording(tabId, recordingId).catch(() => undefined);
+    await discardRecordingIfCurrent(recordingId);
     return fail(message);
   }
 }
@@ -272,13 +331,18 @@ async function stopRecording(): Promise<MessageResponse> {
 
   if (typeof state.tabId !== "number") {
     const error = "녹화 중인 탭을 찾지 못했습니다.";
-    await markRecordingErrorIfCurrent(state.recordingId);
+    if (state.recordingId && await recoverRecording(state.recordingId, Date.now())) {
+      return ok();
+    }
     return fail(error);
   }
 
   const response = await stopDirectRecording(state.tabId);
-  if (!response.ok) {
-    await markRecordingErrorIfCurrent(state.recordingId);
+  if (!response.ok && state.recordingId) {
+    await delay(CHECKPOINT_FINALIZE_DELAY_MS);
+    if (await recoverRecording(state.recordingId, Date.now())) {
+      return ok();
+    }
   }
   return response;
 }
@@ -294,34 +358,36 @@ async function cancelRecording(): Promise<MessageResponse> {
     await cancelDirectRecording(state.tabId, state.recordingId);
   }
   if (state.recordingId) {
-    try {
-      await deleteRecordingNow(state.recordingId);
-    } catch {
-      // Cancellation must release the recording lock even if cleanup fails.
-    }
+    await checkpointStores.get(state.recordingId)?.catch(() => {});
+    await deleteRecordingEventually(state.recordingId);
   }
   return ok();
 }
 
-async function handleRecordingFinished(message: RecordingFinishedMessage): Promise<MessageResponse> {
+async function completeRecording(recording: RecordingRecord): Promise<MessageResponse> {
   const previousState = await loadRecordingState();
-  if (previousState.status !== RECORDING_STATUS.recording || previousState.recordingId !== message.recording.id) {
-    await deleteRecordingNow(message.recording.id).catch(() => {});
+  if (previousState.status === RECORDING_STATUS.completed && previousState.recordingId === recording.id) {
+    return ok();
+  }
+  if (previousState.status !== RECORDING_STATUS.recording || previousState.recordingId !== recording.id) {
+    await deleteRecordingEventually(recording.id);
     return ok();
   }
 
-  await putRecording(message.recording);
+  await putRecording(recording);
   await saveRecordingState({
     status: RECORDING_STATUS.completed,
-    recordingId: message.recording.id,
+    recordingId: recording.id,
     tabId: undefined,
-    startedAt: message.recording.createdAt,
+    startedAt: recording.createdAt,
   });
+  await scheduleRecordingDeletion(recording.id).catch(() => {});
+  await deleteRecordingChunks(recording.id).catch(() => {});
 
   if (previousState.status === RECORDING_STATUS.recording) {
     const source = typeof previousState.tabId === "number" ? `&sourceTabId=${previousState.tabId}` : "";
     await chrome.tabs.create({
-      url: chrome.runtime.getURL(`result/result.html?id=${encodeURIComponent(message.recording.id)}${source}`),
+      url: chrome.runtime.getURL(`result/result.html?id=${encodeURIComponent(recording.id)}${source}`),
     });
   }
 
@@ -329,22 +395,145 @@ async function handleRecordingFinished(message: RecordingFinishedMessage): Promi
 }
 
 async function handleRecordingError(message: RecordingErrorMessage): Promise<MessageResponse> {
-  await markRecordingErrorIfCurrent(message.recordingId);
+  await discardRecordingIfCurrent(message.recordingId);
   return ok();
 }
 
-async function storeRecordingPart(message: StoreRecordingPartMessage): Promise<MessageResponse> {
-  const state = await loadRecordingState();
-  if (state.status !== RECORDING_STATUS.recording || state.recordingId !== message.part.recordingId) {
-    return ok();
+function storeRecordingChunk(message: StoreRecordingChunkMessage): Promise<MessageResponse> {
+  const recordingId = message.chunk.recordingId;
+  const previousStore = checkpointStores.get(recordingId) ?? Promise.resolve();
+  const store = previousStore.catch(() => {}).then(async () => {
+    const state = await loadRecordingState();
+    if (state.status !== RECORDING_STATUS.recording || state.recordingId !== recordingId) {
+      return;
+    }
+
+    const blob = decodeRecordingDataUrl(message.chunk.dataUrl, message.chunk.mimeType);
+    if (blob.size <= 0) {
+      throw new Error("녹화 체크포인트가 비어 있습니다.");
+    }
+
+    const latestState = await loadRecordingState();
+    if (latestState.status !== RECORDING_STATUS.recording || latestState.recordingId !== recordingId) {
+      return;
+    }
+
+    const { dataUrl: _dataUrl, ...chunk } = message.chunk;
+    await putChunk({ ...chunk, blob });
+  });
+  checkpointStores.set(recordingId, store);
+
+  return store
+    .then(() => ok())
+    .catch((error: unknown) => fail(error instanceof Error ? error.message : "녹화 체크포인트를 저장하지 못했습니다."))
+    .finally(() => {
+      if (checkpointStores.get(recordingId) === store) {
+        checkpointStores.delete(recordingId);
+      }
+    });
+}
+
+function finalizeRecordingFromChunks(recordingId: string, endedAt: number): Promise<MessageResponse> {
+  const currentFinalization = checkpointFinalizations.get(recordingId);
+  if (currentFinalization) {
+    return currentFinalization;
   }
 
-  await putPart(message.part);
-  return ok();
+  const finalization = (async () => {
+    const state = await loadRecordingState();
+    if (state.status !== RECORDING_STATUS.recording || state.recordingId !== recordingId) {
+      return ok();
+    }
+
+    await checkpointStores.get(recordingId);
+    const chunks = await getChunksByRecordingId(recordingId);
+    const first = chunks[0];
+    if (!first) {
+      return fail("저장된 녹화 데이터가 없습니다.");
+    }
+    if (chunks.some((chunk, index) => chunk.index !== index + 1 || chunk.mimeType !== first.mimeType)) {
+      return fail("저장된 녹화 데이터의 일부가 누락되었습니다.");
+    }
+
+    const blob = new Blob(chunks.map((chunk) => chunk.blob), { type: first.mimeType });
+    if (blob.size <= 0) {
+      return fail("녹화 데이터가 비어 있습니다.");
+    }
+
+    const lastCapturedAt = chunks.at(-1)?.capturedAt;
+    const actualEndedAt = getFinalRecordingEndedAt(first.createdAt, endedAt, lastCapturedAt);
+    await putPart({
+      id: `${recordingId}:part:001`,
+      recordingId,
+      index: 1,
+      filename: buildDirectFilename(first.baseName, first.extension, first.createdAt, actualEndedAt),
+      mimeType: first.mimeType,
+      extension: first.extension,
+      outputFormat: first.outputFormat,
+      size: blob.size,
+      blob,
+      createdAt: actualEndedAt,
+    });
+
+    return await completeRecording({
+      id: recordingId,
+      createdAt: first.createdAt,
+      endedAt: actualEndedAt,
+      totalSize: blob.size,
+      actualExtension: first.extension,
+    });
+  })();
+  checkpointFinalizations.set(recordingId, finalization);
+  const clearFinalization = () => {
+    if (checkpointFinalizations.get(recordingId) === finalization) {
+      checkpointFinalizations.delete(recordingId);
+    }
+  };
+  void finalization.then(clearFinalization, clearFinalization);
+  return finalization;
+}
+
+async function recoverRecording(recordingId: string, endedAt: number): Promise<boolean> {
+  try {
+    await finalizeRecordingFromChunks(recordingId, endedAt);
+  } catch {
+    // The state check below decides whether completion succeeded before cleanup.
+  }
+
+  const state = await loadRecordingState();
+  if (state.status === RECORDING_STATUS.completed && state.recordingId === recordingId) {
+    return true;
+  }
+
+  await discardRecordingIfCurrent(recordingId);
+  return false;
+}
+
+async function recoverRecordingAfterTabExit(tabId: number): Promise<void> {
+  const state = await loadRecordingState();
+  if (state.status !== RECORDING_STATUS.recording || state.tabId !== tabId || !state.recordingId) {
+    return;
+  }
+
+  await delay(CHECKPOINT_FINALIZE_DELAY_MS);
+  await recoverRecording(state.recordingId, Date.now());
+}
+
+async function recoverInterruptedRecording(): Promise<void> {
+  const state = await loadRecordingState();
+  if (state.status !== RECORDING_STATUS.recording || !state.recordingId) {
+    return;
+  }
+
+  await recoverRecording(state.recordingId, Date.now());
 }
 
 chrome.runtime.onInstalled.addListener(() => {
-  void loadAppState().catch(() => {});
+  void recoverInterruptedRecording().catch(() => {});
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  void recoverInterruptedRecording().catch(() => {});
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
@@ -359,15 +548,16 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  void (async () => {
-    const state = await loadRecordingState();
-    if (state.status === RECORDING_STATUS.recording && state.tabId === tabId) {
-      await markRecordingErrorIfCurrent(state.recordingId);
-    }
-  })().catch(() => {});
+  void recoverRecordingAfterTabExit(tabId).catch(() => {});
 });
 
-chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingFinishedMessage | RecordingErrorMessage | StoreRecordingPartMessage | DeletionScheduleRequest | DeletionCancelRequest, _sender, sendResponse: (response: MessageResponse<unknown>) => void) => {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status === "loading") {
+    void recoverRecordingAfterTabExit(tabId).catch(() => {});
+  }
+});
+
+chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingErrorMessage | StoreRecordingChunkMessage | FinalizeRecordingMessage | DeletionScheduleRequest, _sender, sendResponse: (response: MessageResponse<unknown>) => void) => {
   void (async () => {
     if (message.type === "SELECT_REGION") {
       sendResponse(await startSelection());
@@ -404,28 +594,23 @@ chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingFinishedM
       return;
     }
 
-    if (message.type === "RECORDING_FINISHED") {
-      sendResponse(await handleRecordingFinished(message));
-      return;
-    }
-
     if (message.type === "RECORDING_ERROR") {
       sendResponse(await handleRecordingError(message));
       return;
     }
 
-    if (message.type === "STORE_RECORDING_PART") {
-      sendResponse(await storeRecordingPart(message));
+    if (message.type === "STORE_RECORDING_CHUNK") {
+      sendResponse(await storeRecordingChunk(message));
+      return;
+    }
+
+    if (message.type === "FINALIZE_RECORDING") {
+      sendResponse(await finalizeRecordingFromChunks(message.recordingId, message.endedAt));
       return;
     }
 
     if (message.type === "SCHEDULE_RECORDING_DELETION") {
       sendResponse(await scheduleRecordingDeletion(message.recordingId));
-      return;
-    }
-
-    if (message.type === "CANCEL_RECORDING_DELETION") {
-      sendResponse(await cancelRecordingDeletion(message.recordingId));
       return;
     }
 
