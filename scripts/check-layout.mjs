@@ -7,6 +7,8 @@ const sourceFile = ts.createSourceFile("region_selector.ts", sourceText, ts.Scri
 const serviceWorkerText = fs.readFileSync(new URL("../src/background/service_worker.ts", import.meta.url), "utf8");
 const serviceWorkerFile = ts.createSourceFile("service_worker.ts", serviceWorkerText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 const resultText = fs.readFileSync(new URL("../src/result/result.ts", import.meta.url), "utf8");
+const settingsText = fs.readFileSync(new URL("../src/shared/types.ts", import.meta.url), "utf8");
+const storageText = fs.readFileSync(new URL("../src/shared/storage.ts", import.meta.url), "utf8");
 const messagesText = fs.readFileSync(new URL("../src/shared/messages.ts", import.meta.url), "utf8");
 const idbText = fs.readFileSync(new URL("../src/shared/idb.ts", import.meta.url), "utf8");
 const manifest = JSON.parse(fs.readFileSync(new URL("../manifest.json", import.meta.url), "utf8"));
@@ -35,7 +37,8 @@ assert.match(sourceText, /function bindDirectPlayerActivation\(/);
 assert.doesNotMatch(sourceText, /function bindDirectPlayer(?:Screenshot|Tool|Record|Cancel)Activation\(/);
 assert.match(sourceText, /video\.readyState >= HTMLMediaElement\.HAVE_CURRENT_DATA/);
 assert.doesNotMatch(sourceText, /visibleArea === 0/);
-assert.match(serviceWorkerText, /await scheduleRecordingDeletion\(recording\.id\)\.catch\(\(\) => \{\}\);/);
+assert.match(serviceWorkerText, /RESULT_TAB_RETRY_ALARM = "open-recording-result"/);
+assert.match(serviceWorkerText, /if \(state\.recordingState\.status === RECORDING_STATUS\.completed\)[\s\S]*?ensureCompletedRecordingResult/);
 assert.match(serviceWorkerText, /checkpointStores = new Map<string, Promise<void>>\(\)/);
 assert.match(serviceWorkerText, /recordingTerminalOperations = new Map<string, Promise<void>>\(\)/);
 assert.match(serviceWorkerText, /RECOVERY_FINALIZE_ATTEMPTS = 3/);
@@ -44,6 +47,9 @@ assert.match(serviceWorkerText, /await checkpointStores\.get\(recordingId\)/);
 assert.match(serviceWorkerText, /async function recoverRecording\(recordingId: string, endedAt: number\): Promise<boolean>/);
 assert.match(serviceWorkerText, /state\.status === RECORDING_STATUS\.completed && state\.recordingId === recordingId/);
 assert.match(serviceWorkerText, /previousState\.status === RECORDING_STATUS\.completed && previousState\.recordingId === recording\.id/);
+assert.match(serviceWorkerText, /recordingState\.resultTabId/);
+assert.match(serviceWorkerText, /recoverResultAfterTabExit\(tabId, removeInfo\.isWindowClosing\)/);
+assert.match(serviceWorkerText, /state\.status === RECORDING_STATUS\.completed\) \{\s*await ensureCompletedRecordingResult/);
 assert.match(serviceWorkerText, /chunk\.index !== index \+ 1/);
 assert.match(sourceText, /function readBlobAsDataUrl\(/);
 assert.match(messagesText, /dataUrl: string/);
@@ -56,6 +62,23 @@ assert.match(resultText, /function getSplitPresetValue\(/);
 assert.match(resultText, /Math\.ceil\(roundTrimTime\(range\.end - range\.start\) \* ratio\)/);
 assert.match(resultText, /querySelectorAll<HTMLButtonElement>\("\[data-split-mode\]"\)/);
 assert.match(resultText, /빠른 변환을 지원하지 않아 실시간으로 처리 중입니다/);
+assert.match(settingsText, /enableAutoDownloadRecording: false/);
+assert.match(settingsText, /enableAutoDownloadSplit: false/);
+assert.match(storageText, /enableAutoDownloadRecording: Boolean\(raw\?\.enableAutoDownloadRecording\)/);
+assert.match(storageText, /enableAutoDownloadSplit: Boolean\(raw\?\.enableAutoDownloadSplit\)/);
+assert.match(storageText, /resultTabId: Number\.isFinite\(raw\?\.resultTabId as number\)/);
+assert.match(serviceWorkerText, /autoDownload=1/);
+assert.match(serviceWorkerText, /active: !settings\.enableAutoDownloadRecording/);
+assert.match(messagesText, /AUTO_DOWNLOAD_HANDLED/);
+assert.match(resultText, /if \(autoDownloadRecording\) \{\s*await downloadSourcesSequentially/);
+assert.match(resultText, /await downloadSourcesSequentially\([\s\S]*?await delay\(DOWNLOAD_URL_REVOKE_DELAY_MS\);\s*await markAutoDownloadHandled\(\);\s*allowRecordingDeletion = true;\s*window\.close\(\)/);
+assert.match(resultText, /let restoreSourceTabOnClose = !autoDownloadRecording/);
+assert.match(resultText, /function restoreSourceTab\(\): void \{\s*if \(!restoreSourceTabOnClose\) \{\s*return;/);
+assert.match(resultText, /if \(autoDownloadRecording && parts\.length === 0\) \{\s*throw new Error/);
+assert.match(resultText, /async function revealAutoDownloadFailure\(\): Promise<void>/);
+assert.match(resultText, /restoreSourceTabOnClose = true/);
+assert.match(resultText, /if \(allowRecordingDeletion\) \{\s*void scheduleRecordingDeletion\(\)/);
+assert.match(resultText, /if \(autoDownloadSplit\) \{\s*await downloadSourcesSequentially/);
 assert.doesNotMatch(messagesText, /CANCEL_RECORDING_DELETION/);
 assert.doesNotMatch(idbText, /openKeyCursor/);
 assert.match(idbText, /\.openCursor\(IDBKeyRange\.only\(recordingId\)\)/);
@@ -74,6 +97,7 @@ const functionNames = new Set([
   "getFinalRecordingEndedAt",
   "decodeRecordingDataUrl",
   "runRecordingTerminalOperation",
+  "normalizeRecordingState",
   "regionEdges",
   "clamp",
 ]);
@@ -88,10 +112,10 @@ function collectStatements(node, file) {
 collectStatements(sourceFile, sourceFile);
 collectStatements(serviceWorkerFile, serviceWorkerFile);
 const statements = selectedStatements.join("\n");
-const runtime = ts.transpileModule(`const recordingTerminalOperations = new Map();\n${statements}\nreturn { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, runRecordingTerminalOperation };`, {
+const runtime = ts.transpileModule(`const recordingTerminalOperations = new Map();\nconst RECORDING_STATUS = { idle: "idle", recording: "recording", completed: "completed", error: "error" };\nconst RECORDING_MODE = { region: "region", full: "full" };\n${statements}\nreturn { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, runRecordingTerminalOperation, normalizeRecordingState };`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
 }).outputText;
-const { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, runRecordingTerminalOperation } = new Function(runtime)();
+const { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, runRecordingTerminalOperation, normalizeRecordingState } = new Function(runtime)();
 
 assert.equal(getStreamerNameFromTitle("치지직 게임 - CHZZK"), "치지직 게임");
 assert.equal(getStreamerNameFromTitle("치지직 스포츠 - CHZZK"), "치지직 스포츠");
@@ -126,6 +150,8 @@ assert.deepEqual(terminalOrder, ["first-start"]);
 releaseFirstTerminalOperation();
 assert.deepEqual(await Promise.all([firstTerminalOperation, secondTerminalOperation]), [1, 2]);
 assert.deepEqual(terminalOrder, ["first-start", "first-end", "second"]);
+assert.deepEqual(normalizeRecordingState({ status: "recording", recordingId: "recording-tab", startedAt: 1_000, mode: "full" }, "other-tab"), { status: "idle" });
+assert.deepEqual(normalizeRecordingState({ status: "recording", recordingId: "recording-tab", startedAt: 1_000, mode: "full" }, "recording-tab"), { status: "recording", startedAt: 1_000, mode: "full" });
 const resizeStart = { left: 100, top: 100, right: 300, bottom: 200 };
 const resizeBounds = { left: 0, top: 0, right: 500, bottom: 500 };
 assert.deepEqual(computeResizedEdges(resizeStart, "e", 50, 0, resizeBounds, 50, 50, true, false), {

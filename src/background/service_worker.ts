@@ -1,5 +1,5 @@
 import { deleteRecording, deleteRecordingChunks, getChunksByRecordingId, putChunk, putPart, putRecording } from "../shared/idb.js";
-import { fail, ok, type ContentCommand, type DeletionScheduleRequest, type FinalizeRecordingMessage, type MessageResponse, type PopupCommand, type RecordingErrorMessage, type StoreRecordingChunkMessage } from "../shared/messages.js";
+import { fail, ok, type AutoDownloadHandledMessage, type ContentCommand, type DeletionScheduleRequest, type FinalizeRecordingMessage, type MessageResponse, type PopupCommand, type RecordingErrorMessage, type StoreRecordingChunkMessage } from "../shared/messages.js";
 import { loadAppState, loadRecordingState, saveRecordingState } from "../shared/storage.js";
 import { RECORDING_MODE, RECORDING_STATUS, type RecordingRecord, type RegionSelection, type Settings } from "../shared/types.js";
 const DELETE_AFTER_MINUTES = 10;
@@ -8,7 +8,11 @@ const DELETE_ALARM_PREFIX = "delete-recording:";
 const TAB_MESSAGE_RETRY_DELAY_MS = 80;
 const CHECKPOINT_FINALIZE_DELAY_MS = 300;
 const RECOVERY_FINALIZE_ATTEMPTS = 3;
+const RESULT_TAB_CREATE_ATTEMPTS = 3;
+const RESULT_TAB_RETRY_DELAY_MS = 200;
+const RESULT_TAB_RETRY_ALARM = "open-recording-result";
 let recordingStartInFlight = false;
+let resultTabLaunchPromise: Promise<boolean> | null = null;
 const checkpointStores = new Map<string, Promise<void>>();
 const recordingTerminalOperations = new Map<string, Promise<void>>();
 
@@ -268,6 +272,13 @@ async function startRecordingSession(fullPlayer: boolean): Promise<MessageRespon
   if (state.recordingState.status === RECORDING_STATUS.recording) {
     return fail("이미 녹화가 진행 중입니다.");
   }
+  if (state.recordingState.status === RECORDING_STATUS.completed) {
+    const delivered = await ensureCompletedRecordingResult();
+    const latestState = await loadRecordingState();
+    if (!delivered || latestState.status === RECORDING_STATUS.completed) {
+      return fail("이전 녹화 결과를 준비 중입니다. 잠시 후 다시 시도하세요.");
+    }
+  }
 
   const settings = state.settings;
   const recordingId = crypto.randomUUID();
@@ -395,8 +406,9 @@ async function cancelRecording(): Promise<MessageResponse> {
 }
 
 async function completeRecording(recording: RecordingRecord): Promise<MessageResponse> {
-  const previousState = await loadRecordingState();
+  const { recordingState: previousState } = await loadAppState();
   if (previousState.status === RECORDING_STATUS.completed && previousState.recordingId === recording.id) {
+    await ensureCompletedRecordingResult();
     return ok();
   }
   if (previousState.status !== RECORDING_STATUS.recording || previousState.recordingId !== recording.id) {
@@ -408,19 +420,80 @@ async function completeRecording(recording: RecordingRecord): Promise<MessageRes
   await saveRecordingState({
     status: RECORDING_STATUS.completed,
     recordingId: recording.id,
-    tabId: undefined,
+    tabId: previousState.tabId,
     startedAt: recording.createdAt,
   });
-  await scheduleRecordingDeletion(recording.id).catch(() => {});
   await deleteRecordingChunks(recording.id).catch(() => {});
 
-  if (previousState.status === RECORDING_STATUS.recording) {
-    const source = typeof previousState.tabId === "number" ? `&sourceTabId=${previousState.tabId}` : "";
-    await chrome.tabs.create({
-      url: chrome.runtime.getURL(`result/result.html?id=${encodeURIComponent(recording.id)}${source}`),
-    });
+  await ensureCompletedRecordingResult();
+
+  return ok();
+}
+
+async function openCompletedRecordingResult(): Promise<boolean> {
+  const { recordingState, settings } = await loadAppState();
+  if (recordingState.status !== RECORDING_STATUS.completed || !recordingState.recordingId) {
+    await chrome.alarms.clear(RESULT_TAB_RETRY_ALARM);
+    return true;
   }
 
+  if (typeof recordingState.resultTabId === "number") {
+    try {
+      await chrome.tabs.get(recordingState.resultTabId);
+      await chrome.alarms.clear(RESULT_TAB_RETRY_ALARM);
+      return true;
+    } catch {
+      await saveRecordingState({ ...recordingState, resultTabId: undefined });
+    }
+  }
+
+  const source = typeof recordingState.tabId === "number" ? `&sourceTabId=${recordingState.tabId}` : "";
+  const autoDownload = settings.enableAutoDownloadRecording ? "&autoDownload=1" : "";
+  const url = chrome.runtime.getURL(`result/result.html?id=${encodeURIComponent(recordingState.recordingId)}${source}${autoDownload}`);
+
+  for (let attempt = 0; attempt < RESULT_TAB_CREATE_ATTEMPTS; attempt += 1) {
+    try {
+      const resultTab = await chrome.tabs.create({ url, active: !settings.enableAutoDownloadRecording });
+      await chrome.alarms.clear(RESULT_TAB_RETRY_ALARM);
+      if (settings.enableAutoDownloadRecording) {
+        const latestState = await loadRecordingState();
+        if (latestState.status === RECORDING_STATUS.completed && latestState.recordingId === recordingState.recordingId) {
+          await saveRecordingState({ ...latestState, resultTabId: resultTab.id });
+        }
+      } else {
+        await saveRecordingState({ status: RECORDING_STATUS.idle });
+        await scheduleRecordingDeletion(recordingState.recordingId).catch(() => {});
+      }
+      return true;
+    } catch {
+      if (attempt + 1 < RESULT_TAB_CREATE_ATTEMPTS) {
+        await delay(RESULT_TAB_RETRY_DELAY_MS * (attempt + 1));
+      }
+    }
+  }
+
+  await chrome.alarms.create(RESULT_TAB_RETRY_ALARM, { delayInMinutes: 0.5 });
+  return false;
+}
+
+function ensureCompletedRecordingResult(): Promise<boolean> {
+  if (resultTabLaunchPromise) {
+    return resultTabLaunchPromise;
+  }
+
+  resultTabLaunchPromise = openCompletedRecordingResult().finally(() => {
+    resultTabLaunchPromise = null;
+  });
+  return resultTabLaunchPromise;
+}
+
+async function handleAutoDownloadHandled(message: AutoDownloadHandledMessage): Promise<MessageResponse> {
+  const state = await loadRecordingState();
+  if (state.status === RECORDING_STATUS.completed && state.recordingId === message.recordingId) {
+    await saveRecordingState({ status: RECORDING_STATUS.idle });
+    await scheduleRecordingDeletion(message.recordingId).catch(() => {});
+    await chrome.alarms.clear(RESULT_TAB_RETRY_ALARM);
+  }
   return ok();
 }
 
@@ -548,8 +621,24 @@ async function recoverRecordingAfterTabExit(tabId: number): Promise<void> {
   await recoverRecording(state.recordingId, Date.now());
 }
 
+async function recoverResultAfterTabExit(tabId: number, isWindowClosing: boolean): Promise<void> {
+  const state = await loadRecordingState();
+  if (state.status !== RECORDING_STATUS.completed || state.resultTabId !== tabId) {
+    return;
+  }
+
+  await saveRecordingState({ ...state, resultTabId: undefined });
+  if (!isWindowClosing) {
+    await ensureCompletedRecordingResult();
+  }
+}
+
 async function recoverInterruptedRecording(): Promise<void> {
   const state = await loadRecordingState();
+  if (state.status === RECORDING_STATUS.completed) {
+    await ensureCompletedRecordingResult();
+    return;
+  }
   if (state.status !== RECORDING_STATUS.recording || !state.recordingId) {
     return;
   }
@@ -566,6 +655,10 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === RESULT_TAB_RETRY_ALARM) {
+    void ensureCompletedRecordingResult().catch(() => {});
+    return;
+  }
   if (!alarm.name.startsWith(DELETE_ALARM_PREFIX)) {
     return;
   }
@@ -576,8 +669,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   });
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => {
+chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
   void recoverRecordingAfterTabExit(tabId).catch(() => {});
+  void recoverResultAfterTabExit(tabId, removeInfo.isWindowClosing).catch(() => {});
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
@@ -586,7 +680,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingErrorMessage | StoreRecordingChunkMessage | FinalizeRecordingMessage | DeletionScheduleRequest, _sender, sendResponse: (response: MessageResponse<unknown>) => void) => {
+chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingErrorMessage | StoreRecordingChunkMessage | FinalizeRecordingMessage | DeletionScheduleRequest | AutoDownloadHandledMessage, _sender, sendResponse: (response: MessageResponse<unknown>) => void) => {
   void (async () => {
     if (message.type === "SELECT_REGION") {
       sendResponse(await startSelection());
@@ -640,6 +734,11 @@ chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingErrorMess
 
     if (message.type === "SCHEDULE_RECORDING_DELETION") {
       sendResponse(await scheduleRecordingDeletion(message.recordingId));
+      return;
+    }
+
+    if (message.type === "AUTO_DOWNLOAD_HANDLED") {
+      sendResponse(await handleAutoDownloadHandled(message));
       return;
     }
 

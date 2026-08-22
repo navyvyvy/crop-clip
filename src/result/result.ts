@@ -1,5 +1,5 @@
 import { getPartsByRecordingId, getRecording, putPart, putRecording } from "../shared/idb.js";
-import type { DeletionScheduleRequest } from "../shared/messages.js";
+import type { AutoDownloadHandledMessage, DeletionScheduleRequest, MessageResponse } from "../shared/messages.js";
 import { loadAppState } from "../shared/storage.js";
 import {
   bytesToMegabytes,
@@ -21,8 +21,13 @@ import { RECORDING_FORMAT, type RecordingFormat, type RecordingPartRecord, type 
 const params = new URLSearchParams(location.search);
 const recordingId = params.get("id") ?? "";
 const sourceTabId = Number(params.get("sourceTabId") ?? "");
+const autoDownloadRecording = params.get("autoDownload") === "1";
 type OutputFormat = RecordingFormat;
 type ConvertFormat = OutputFormat | "gif";
+
+let autoDownloadSplit = false;
+let restoreSourceTabOnClose = !autoDownloadRecording;
+let allowRecordingDeletion = !autoDownloadRecording;
 
 const elements = {
   resultLoading: document.getElementById("result-loading") as HTMLDivElement,
@@ -1397,6 +1402,17 @@ async function scheduleRecordingDeletion(): Promise<void> {
   }
 }
 
+async function markAutoDownloadHandled(): Promise<void> {
+  const message: AutoDownloadHandledMessage = {
+    type: "AUTO_DOWNLOAD_HANDLED",
+    recordingId,
+  };
+  const response = await chrome.runtime.sendMessage<AutoDownloadHandledMessage, MessageResponse>(message);
+  if (!response.ok) {
+    throw new Error(response.error);
+  }
+}
+
 function stopDeletionKeepalive(): void {
   if (deletionKeepaliveId !== null) {
     window.clearInterval(deletionKeepaliveId);
@@ -1411,8 +1427,33 @@ function startDeletionKeepalive(): void {
 }
 
 function restoreSourceTab(): void {
+  if (!restoreSourceTabOnClose) {
+    return;
+  }
   if (Number.isFinite(sourceTabId) && sourceTabId > 0) {
     void chrome.tabs.update(sourceTabId, { active: true }).catch(() => {});
+  }
+}
+
+async function revealAutoDownloadFailure(): Promise<void> {
+  if (!autoDownloadRecording) {
+    return;
+  }
+  try {
+    const tab = await chrome.tabs.getCurrent();
+    if (typeof tab?.id === "number") {
+      restoreSourceTabOnClose = true;
+      await chrome.tabs.update(tab.id, { active: true });
+    }
+  } catch {
+    // The tab may already have been closed while reporting the failure.
+  }
+  try {
+    await markAutoDownloadHandled();
+    allowRecordingDeletion = true;
+    startDeletionKeepalive();
+  } catch {
+    // Keep the completed state so the result can be recovered after an extension restart.
   }
 }
 
@@ -1420,6 +1461,7 @@ async function boot(): Promise<void> {
   // ponytail: recordings do not persist FPS yet; use the current recording setting until per-record metadata is needed.
   const appState = await loadAppState().catch(() => null);
   frameStepSeconds = appState?.settings.enable60fps ? 1 / 60 : 1 / 30;
+  autoDownloadSplit = Boolean(appState?.settings.enableAutoDownloadSplit);
   if (!recordingId) {
     elements.emptyMessage.textContent = "녹화 ID가 없습니다.";
     elements.downloadCurrentButton.disabled = true;
@@ -1454,7 +1496,18 @@ async function boot(): Promise<void> {
     elements.downloadAllButton.disabled = true;
     return;
   }
+  if (autoDownloadRecording && parts.length === 0) {
+    throw new Error("자동 다운로드할 녹화 파일을 찾지 못했습니다.");
+  }
 
+  if (autoDownloadRecording) {
+    await downloadSourcesSequentially(parts.map((part) => ({ source: getPartSource(part), filename: part.filename })));
+    await delay(DOWNLOAD_URL_REVOKE_DELAY_MS);
+    await markAutoDownloadHandled();
+    allowRecordingDeletion = true;
+    window.close();
+    return;
+  }
   startDeletionKeepalive();
   renderHeader();
   elements.resultLoadingMessage.textContent = "미리보기를 준비하는 중입니다.";
@@ -1855,6 +1908,9 @@ elements.splitButton.addEventListener("click", () => {
 
       splitSegments = segments;
       renderSplitDownloads();
+      if (autoDownloadSplit) {
+        await downloadSourcesSequentially(segments.map((segment) => ({ source: segment.blob, filename: segment.filename })));
+      }
       setWorkStatus("파일 나누기가 완료되었습니다.");
     } catch (error) {
       const message = error instanceof Error ? error.message : "파일을 나누지 못했습니다.";
@@ -1870,11 +1926,13 @@ elements.splitButton.addEventListener("click", () => {
 window.addEventListener("pagehide", () => {
   restoreSourceTab();
   stopDeletionKeepalive();
-  void scheduleRecordingDeletion();
+  if (allowRecordingDeletion) {
+    void scheduleRecordingDeletion();
+  }
 });
 
 window.addEventListener("pageshow", () => {
-  if (recording) {
+  if (recording && allowRecordingDeletion) {
     startDeletionKeepalive();
   }
 });
@@ -1885,8 +1943,9 @@ window.addEventListener("unload", () => {
   revokePreviewUrl();
 });
 
-void boot().catch((error: Error) => {
+void boot().catch(async (error: Error) => {
   elements.emptyMessage.textContent = error.message;
+  await revealAutoDownloadFailure();
 }).finally(() => {
   elements.resultLoading.hidden = true;
 });

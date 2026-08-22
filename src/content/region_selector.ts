@@ -1869,6 +1869,10 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
   try {
     await startDirectPart(session);
     watchDirectRecordingSource(session);
+    currentRecordingState = (await loadState()).recordingState;
+    showSelectionBorders(currentRegions);
+    requestChzzkToolSync();
+    syncChzzkRecordTimer();
     return { ok: true };
   } catch (error) {
     cleanupDirectRecordingSession(session);
@@ -2657,7 +2661,7 @@ async function loadState(): Promise<{ region: RegionSelection | null; regions: R
   return {
     region,
     regions: normalizeRegions(result.regions, region),
-    recordingState: normalizeRecordingState(result.recordingState),
+    recordingState: normalizeRecordingState(result.recordingState, directSession?.recordingId),
     multiRegionEnabled: Boolean(result.settings?.enableMultiRegion),
     multiRegionMaxCount: getMultiRegionLimit(result.settings),
     fullRecordButtonEnabled: Boolean(result.settings?.enableFullRecordButton),
@@ -2707,8 +2711,11 @@ function normalizeRegion(raw: unknown): RegionSelection | null {
   };
 }
 
-function normalizeRecordingState(raw: unknown): LocalRecordingState {
-  const value = raw as Partial<LocalRecordingState> | null | undefined;
+function normalizeRecordingState(raw: unknown, activeRecordingId?: string): LocalRecordingState {
+  const value = raw as Partial<RecordingState> | null | undefined;
+  if (value?.status === RECORDING_STATUS.recording && value.recordingId !== activeRecordingId) {
+    return { status: RECORDING_STATUS.idle };
+  }
   if (value?.status === RECORDING_STATUS.recording || value?.status === RECORDING_STATUS.completed || value?.status === RECORDING_STATUS.error) {
     return {
       status: value.status,
@@ -3965,7 +3972,7 @@ if (isExtensionContextAvailable()) {
     }
 
     if (changes.recordingState) {
-      const nextState = normalizeRecordingState(changes.recordingState.newValue);
+      const nextState = normalizeRecordingState(changes.recordingState.newValue, directSession?.recordingId);
       currentRecordingState = nextState;
       if (nextState.status === RECORDING_STATUS.recording && nextState.mode !== RECORDING_MODE.full && selectionActive) {
         cancelSelection("녹화 중에는 영역을 다시 선택할 수 없습니다.");

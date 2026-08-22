@@ -32,6 +32,8 @@ export interface Settings {
   enableSeek: boolean;
   seekSeconds: number;
   enableStreamerFilename: boolean;
+  enableAutoDownloadRecording: boolean;
+  enableAutoDownloadSplit: boolean;
   enableShortcuts: boolean;
   shortcutKeys: ShortcutKeys;
 }
@@ -57,6 +59,7 @@ export interface RecordingState {
   status: RecordingStatus;
   recordingId?: string;
   tabId?: number;
+  resultTabId?: number;
   startedAt?: number;
   mode?: RecordingMode;
 }
@@ -137,6 +140,8 @@ export const DEFAULT_SETTINGS: Settings = {
   enableSeek: false,
   seekSeconds: DEFAULT_SEEK_SECONDS,
   enableStreamerFilename: false,
+  enableAutoDownloadRecording: false,
+  enableAutoDownloadSplit: false,
   enableShortcuts: false,
   shortcutKeys: DEFAULT_SHORTCUT_KEYS,
 };

@@ -62,6 +62,8 @@ export function normalizeSettings(raw: Partial<Settings> | undefined): Settings 
     enableSeek: Boolean(raw?.enableSeek ?? (raw as Partial<Settings> & { enableSeekButtons?: boolean } | undefined)?.enableSeekButtons),
     seekSeconds: clamp(Math.round(coerceNumber(raw?.seekSeconds, DEFAULT_SEEK_SECONDS)), MIN_SEEK_SECONDS, MAX_SEEK_SECONDS),
     enableStreamerFilename: Boolean(raw?.enableStreamerFilename),
+    enableAutoDownloadRecording: Boolean(raw?.enableAutoDownloadRecording),
+    enableAutoDownloadSplit: Boolean(raw?.enableAutoDownloadSplit),
     enableShortcuts: Boolean(raw?.enableShortcuts),
     shortcutKeys: normalizeShortcutKeys(raw?.shortcutKeys),
   };
@@ -119,6 +121,7 @@ export function normalizeRecordingState(raw: Partial<RecordingState> | undefined
     status,
     recordingId: typeof raw?.recordingId === "string" ? raw.recordingId : undefined,
     tabId: Number.isFinite(raw?.tabId as number) ? Number(raw?.tabId) : undefined,
+    resultTabId: Number.isFinite(raw?.resultTabId as number) ? Number(raw?.resultTabId) : undefined,
     startedAt: Number.isFinite(raw?.startedAt as number) ? Number(raw?.startedAt) : undefined,
     mode: raw?.mode === RECORDING_MODE.region || raw?.mode === RECORDING_MODE.full ? raw.mode : undefined,
   };

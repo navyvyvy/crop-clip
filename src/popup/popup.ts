@@ -26,6 +26,8 @@ const elements = {
   seekIncreaseButton: document.getElementById("seek-increase-button") as HTMLButtonElement,
   seekSecondsInput: document.getElementById("seek-seconds-input") as HTMLInputElement,
   streamerFilenameModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='streamer-filename-mode']")),
+  autoDownloadRecordingModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='auto-download-recording-mode']")),
+  autoDownloadSplitModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='auto-download-split-mode']")),
   shortcutModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='shortcut-mode']")),
   bitrateDecreaseButton: document.getElementById("bitrate-decrease-button") as HTMLButtonElement,
   bitrateIncreaseButton: document.getElementById("bitrate-increase-button") as HTMLButtonElement,
@@ -154,6 +156,12 @@ function syncPresetUi(settings: Settings): void {
   for (const input of elements.streamerFilenameModeInputs) {
     input.checked = input.value === (settings.enableStreamerFilename ? "on" : "off");
   }
+  for (const input of elements.autoDownloadRecordingModeInputs) {
+    input.checked = input.value === (settings.enableAutoDownloadRecording ? "on" : "off");
+  }
+  for (const input of elements.autoDownloadSplitModeInputs) {
+    input.checked = input.value === (settings.enableAutoDownloadSplit ? "on" : "off");
+  }
   for (const input of elements.shortcutModeInputs) {
     input.checked = input.value === (settings.enableShortcuts ? "on" : "off");
   }
@@ -169,7 +177,7 @@ function renderState(): void {
   elements.selectRegionButton.disabled = isRegionRecording || sendingCommand;
   elements.clearRegionButton.disabled = isRegionRecording || sendingCommand || !appState.region;
   elements.recordToggleButton.disabled = sendingCommand || isFullRecording;
-  elements.recordToggleButton.textContent = isRegionRecording ? "녹화 정지" : "영역 녹화";
+  elements.recordToggleButton.textContent = isRegionRecording ? "영역 정지" : "영역 녹화";
   elements.recordToggleButton.classList.toggle("primary", false);
   elements.recordToggleButton.classList.toggle("secondary", true);
   elements.recordToggleButton.classList.toggle("recording", isRegionRecording);
@@ -178,7 +186,7 @@ function renderState(): void {
   elements.fullActionRow.hidden = !appState.settings.enableFullRecordButton && !appState.settings.enableFullScreenshotButton;
   elements.fullRecordToggleButton.disabled = sendingCommand || (isRecording && !isFullRecording);
   elements.fullScreenshotButton.disabled = sendingCommand;
-  elements.fullRecordToggleButton.textContent = isFullRecording ? "전체 녹화 정지" : "전체 녹화";
+  elements.fullRecordToggleButton.textContent = isFullRecording ? "전체 정지" : "전체 녹화";
   elements.shortcutSettingsButton.disabled = isRecording || sendingCommand;
   elements.resetSettingsButton.disabled = isRecording || sendingCommand;
 
@@ -197,6 +205,8 @@ function renderState(): void {
     elements.seekIncreaseButton,
     elements.seekSecondsInput,
     ...elements.streamerFilenameModeInputs,
+    ...elements.autoDownloadRecordingModeInputs,
+    ...elements.autoDownloadSplitModeInputs,
     ...elements.shortcutModeInputs,
     elements.bitrateDecreaseButton,
     elements.bitrateIncreaseButton,
@@ -258,6 +268,8 @@ function readSettingsFromUi(): Settings {
   const enableSeek = elements.seekButtonModeInputs.find((input) => input.checked)?.value !== "off";
   const seekSeconds = Number(elements.seekSecondsInput.value || DEFAULT_SEEK_SECONDS);
   const enableStreamerFilename = elements.streamerFilenameModeInputs.find((input) => input.checked)?.value !== "off";
+  const enableAutoDownloadRecording = elements.autoDownloadRecordingModeInputs.find((input) => input.checked)?.value !== "off";
+  const enableAutoDownloadSplit = elements.autoDownloadSplitModeInputs.find((input) => input.checked)?.value !== "off";
   const enableShortcuts = elements.shortcutModeInputs.find((input) => input.checked)?.value !== "off";
   const fallbackBitrateMbps = (appState.settings.videoBitsPerSecond ?? DEFAULT_SETTINGS.videoBitsPerSecond) / BITS_PER_MEGABIT;
   const videoBitsPerSecond = Math.round(Number(elements.customVideoBitrateInput.value || fallbackBitrateMbps) * BITS_PER_MEGABIT);
@@ -273,6 +285,8 @@ function readSettingsFromUi(): Settings {
     enableSeek,
     seekSeconds,
     enableStreamerFilename,
+    enableAutoDownloadRecording,
+    enableAutoDownloadSplit,
     enableShortcuts,
     shortcutKeys: appState.settings.shortcutKeys,
   });
@@ -446,7 +460,7 @@ elements.fullScreenshotButton.addEventListener("click", () => {
   });
 });
 
-for (const element of [...elements.outputFormatInputs, ...elements.fpsModeInputs, ...elements.multiRegionModeInputs, ...elements.fullRecordModeInputs, ...elements.fullScreenshotModeInputs, ...elements.seekButtonModeInputs, ...elements.streamerFilenameModeInputs, ...elements.shortcutModeInputs]) {
+for (const element of [...elements.outputFormatInputs, ...elements.fpsModeInputs, ...elements.multiRegionModeInputs, ...elements.fullRecordModeInputs, ...elements.fullScreenshotModeInputs, ...elements.seekButtonModeInputs, ...elements.streamerFilenameModeInputs, ...elements.autoDownloadRecordingModeInputs, ...elements.autoDownloadSplitModeInputs, ...elements.shortcutModeInputs]) {
   element.addEventListener("change", () => {
     void persistUiSettings();
   });

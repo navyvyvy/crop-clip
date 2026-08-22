@@ -26,6 +26,7 @@ export type ContentCommand =
   | { type: "STOP_DIRECT_RECORDING" }
   | { type: "CANCEL_DIRECT_RECORDING"; recordingId?: string };
 export type DeletionScheduleRequest = { type: "SCHEDULE_RECORDING_DELETION"; recordingId: string };
+export type AutoDownloadHandledMessage = { type: "AUTO_DOWNLOAD_HANDLED"; recordingId: string };
 
 export type RecordingErrorMessage = {
   type: "RECORDING_ERROR";
