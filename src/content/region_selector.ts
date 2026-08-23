@@ -54,6 +54,7 @@ const CROP_REGION_COLORS = [CROP_ACCENT, CROP_SECONDARY, "#49c7e6", "#7be0b2"];
 const CROP_GUIDE = "#ffd166";
 const MAX_SCREENSHOT_PREVIEWS = 8;
 const AUDIO_BITS_PER_SECOND = 128_000;
+const MAX_RECORDING_MESSAGE_BLOB_BYTES = 8 * 1024 * 1024;
 const CHZZK_RECORD_BUTTON_ID = "crop-clip-chzzk-record-button";
 const CHZZK_RECORD_TIME_ID = "crop-clip-chzzk-record-time";
 const CHZZK_CANCEL_BUTTON_ID = "crop-clip-chzzk-cancel-button";
@@ -1572,29 +1573,45 @@ function readBlobAsDataUrl(blob: Blob): Promise<string> {
   });
 }
 
+function getRecordingChunkSliceRanges(size: number, maxBytes: number): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  for (let start = 0; start < size; start += maxBytes) {
+    ranges.push({ start, end: Math.min(size, start + maxBytes) });
+  }
+  return ranges;
+}
+
 function queueDirectChunkCheckpoint(session: DirectRecordingSession, blob: Blob): void {
-  const index = ++session.checkpointIndex;
   const capturedAt = Date.now();
+  const ranges = getRecordingChunkSliceRanges(blob.size, MAX_RECORDING_MESSAGE_BLOB_BYTES);
+  const slices = ranges.map(({ start, end }, rangeIndex) => ({
+    blob: blob.slice(start, end, blob.type),
+    completesBlob: rangeIndex === ranges.length - 1,
+    index: ++session.checkpointIndex,
+  }));
   session.checkpointSaveChain = session.checkpointSaveChain.then(async () => {
     try {
-      const dataUrl = await readBlobAsDataUrl(blob);
-      const response = await sendRuntimeMessage({
-        type: "STORE_RECORDING_CHUNK",
-        chunk: {
-          id: `${session.recordingId}:chunk:${String(index).padStart(6, "0")}`,
-          recordingId: session.recordingId,
-          index,
-          mimeType: session.mimeType,
-          extension: session.extension,
-          outputFormat: session.outputFormat,
-          baseName: session.baseName,
-          createdAt: session.createdAt,
-          capturedAt,
-          dataUrl,
-        },
-      });
-      if (!response.ok) {
-        throw new Error(response.error);
+      for (const slice of slices) {
+        const dataUrl = await readBlobAsDataUrl(slice.blob);
+        const response = await sendRuntimeMessage({
+          type: "STORE_RECORDING_CHUNK",
+          chunk: {
+            id: `${session.recordingId}:chunk:${String(slice.index).padStart(6, "0")}`,
+            recordingId: session.recordingId,
+            index: slice.index,
+            mimeType: session.mimeType,
+            extension: session.extension,
+            outputFormat: session.outputFormat,
+            baseName: session.baseName,
+            createdAt: session.createdAt,
+            capturedAt,
+            completesBlob: slice.completesBlob,
+            dataUrl,
+          },
+        });
+        if (!response.ok) {
+          throw new Error(response.error);
+        }
       }
     } catch (error) {
       session.checkpointError ??= error instanceof Error ? error : new Error("녹화 체크포인트를 저장하지 못했습니다.");

@@ -551,6 +551,9 @@ async function finalizeRecordingFromChunksUnlocked(recordingId: string, endedAt:
   if (chunks.some((chunk, index) => chunk.index !== index + 1 || chunk.mimeType !== first.mimeType)) {
     return fail("저장된 녹화 데이터의 일부가 누락되었습니다.");
   }
+  if (chunks.at(-1)?.completesBlob === false) {
+    return fail("저장 중이던 녹화 데이터의 일부가 누락되었습니다.");
+  }
 
   const blob = new Blob(chunks.map((chunk) => chunk.blob), { type: first.mimeType });
   if (blob.size <= 0) {

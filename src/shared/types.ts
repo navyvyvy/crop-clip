@@ -98,6 +98,7 @@ export interface RecordingChunkRecord {
   baseName: string;
   createdAt: number;
   capturedAt: number;
+  completesBlob?: boolean;
   blob: Blob;
 }
 

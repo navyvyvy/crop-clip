@@ -51,6 +51,7 @@ assert.match(serviceWorkerText, /recordingState\.resultTabId/);
 assert.match(serviceWorkerText, /recoverResultAfterTabExit\(tabId, removeInfo\.isWindowClosing\)/);
 assert.match(serviceWorkerText, /state\.status === RECORDING_STATUS\.completed\) \{\s*await ensureCompletedRecordingResult/);
 assert.match(serviceWorkerText, /chunk\.index !== index \+ 1/);
+assert.match(serviceWorkerText, /chunks\.at\(-1\)\?\.completesBlob === false/);
 assert.match(sourceText, /function readBlobAsDataUrl\(/);
 assert.match(messagesText, /dataUrl: string/);
 assert.doesNotMatch(serviceWorkerText, /message\.chunk\.objectUrl/);
@@ -96,6 +97,7 @@ const functionNames = new Set([
   "buildDirectFilename",
   "getFinalRecordingEndedAt",
   "decodeRecordingDataUrl",
+  "getRecordingChunkSliceRanges",
   "runRecordingTerminalOperation",
   "normalizeRecordingState",
   "regionEdges",
@@ -112,10 +114,10 @@ function collectStatements(node, file) {
 collectStatements(sourceFile, sourceFile);
 collectStatements(serviceWorkerFile, serviceWorkerFile);
 const statements = selectedStatements.join("\n");
-const runtime = ts.transpileModule(`const recordingTerminalOperations = new Map();\nconst RECORDING_STATUS = { idle: "idle", recording: "recording", completed: "completed", error: "error" };\nconst RECORDING_MODE = { region: "region", full: "full" };\n${statements}\nreturn { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, runRecordingTerminalOperation, normalizeRecordingState };`, {
+const runtime = ts.transpileModule(`const recordingTerminalOperations = new Map();\nconst RECORDING_STATUS = { idle: "idle", recording: "recording", completed: "completed", error: "error" };\nconst RECORDING_MODE = { region: "region", full: "full" };\n${statements}\nreturn { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, getRecordingChunkSliceRanges, runRecordingTerminalOperation, normalizeRecordingState };`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
 }).outputText;
-const { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, runRecordingTerminalOperation, normalizeRecordingState } = new Function(runtime)();
+const { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, getRecordingChunkSliceRanges, runRecordingTerminalOperation, normalizeRecordingState } = new Function(runtime)();
 
 assert.equal(getStreamerNameFromTitle("치지직 게임 - CHZZK"), "치지직 게임");
 assert.equal(getStreamerNameFromTitle("치지직 스포츠 - CHZZK"), "치지직 스포츠");
@@ -131,6 +133,14 @@ assert.equal(getFinalRecordingEndedAt(1_000, 10_000), 10_000);
 const decodedCheckpoint = decodeRecordingDataUrl("data:video/webm;codecs=vp8,opus;base64,AQID", "video/webm;codecs=vp8,opus");
 assert.equal(decodedCheckpoint.type, "video/webm;codecs=vp8,opus");
 assert.equal(decodedCheckpoint.size, 3);
+const largeRecordingSize = 70 * 1024 * 1024;
+const safeMessageBlobSize = 8 * 1024 * 1024;
+const chunkSliceRanges = getRecordingChunkSliceRanges(largeRecordingSize, safeMessageBlobSize);
+assert.equal(chunkSliceRanges.length, 9);
+assert.equal(chunkSliceRanges[0].start, 0);
+assert.equal(chunkSliceRanges.at(-1).end, largeRecordingSize);
+assert.ok(chunkSliceRanges.every(({ start, end }) => end - start <= safeMessageBlobSize));
+assert.ok(chunkSliceRanges.every(({ start, end }, index) => start === (chunkSliceRanges[index - 1]?.end ?? 0)));
 let releaseFirstTerminalOperation;
 const terminalOrder = [];
 const firstTerminalOperation = runRecordingTerminalOperation("same-recording", async () => {
