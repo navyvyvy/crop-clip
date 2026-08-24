@@ -62,6 +62,13 @@ const CHZZK_CANCEL_BUTTON_ID = "crop-clip-chzzk-cancel-button";
 const CHZZK_SCREENSHOT_BUTTON_ID = "crop-clip-chzzk-screenshot-button";
 const CHZZK_TOOL_BUTTON_ID = "crop-clip-chzzk-tool-button";
 const CHZZK_TOOL_BUTTON_CLASS = "pzp-button pzp-pc-setting-button pzp-pc__setting-button pzp-pc-ui-button crop-clip-pzp-button";
+const CHZZK_NATIVE_BUTTON_SELECTOR = ".pzp-button, button[class*='pzp'][class*='button'], [role='button'][class*='pzp'][class*='button']";
+const CHZZK_BUTTON_HOST_SELECTOR = [
+  ".pzp-pc__bottom-buttons-right",
+  ".pzp-pc-ui-bottom__right",
+  "[class*='pzp'][class*='bottom'][class*='right']",
+  "[class*='pzp'][class*='control'][class*='right']",
+].join(",");
 const PLAYER_TOOL_LABEL = "녹화 영역 선택";
 const DEFAULT_CONTENT_SHORTCUT_KEYS: ShortcutKeys = {
   selectRegion: "a",
@@ -3407,18 +3414,18 @@ function isVisibleElement(element: HTMLElement): boolean {
   return rect.width > 0 && rect.height > 0;
 }
 
-function getVisiblePzpButtons(root: ParentNode = document): HTMLElement[] {
-  return Array.from(
-    root.querySelectorAll<HTMLElement>(
-      ".pzp-button, button[class*='pzp'][class*='button'], [role='button'][class*='pzp'][class*='button']",
-    ),
-  ).filter((button) =>
+function getPzpButtons(root: ParentNode = document): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(CHZZK_NATIVE_BUTTON_SELECTOR)).filter((button) =>
     button.id !== CHZZK_TOOL_BUTTON_ID &&
     button.id !== CHZZK_RECORD_BUTTON_ID &&
+    button.id !== CHZZK_RECORD_TIME_ID &&
     button.id !== CHZZK_CANCEL_BUTTON_ID &&
-    button.id !== CHZZK_SCREENSHOT_BUTTON_ID &&
-    isVisibleElement(button)
+    button.id !== CHZZK_SCREENSHOT_BUTTON_ID
   );
+}
+
+function getVisiblePzpButtons(root: ParentNode = document): HTMLElement[] {
+  return getPzpButtons(root).filter(isVisibleElement);
 }
 
 function compareBottomRight(a: DOMRect, b: DOMRect): number {
@@ -3431,22 +3438,15 @@ function compareBottomRight(a: DOMRect, b: DOMRect): number {
 
 function findChzzkButtonHost(): HTMLElement | null {
   const explicitHosts = Array.from(
-    document.querySelectorAll<HTMLElement>(
-      [
-        ".pzp-pc__bottom-buttons-right",
-        ".pzp-pc-ui-bottom__right",
-        "[class*='pzp'][class*='bottom'][class*='right']",
-        "[class*='pzp'][class*='control'][class*='right']",
-      ].join(","),
-    ),
+    document.querySelectorAll<HTMLElement>(CHZZK_BUTTON_HOST_SELECTOR),
   )
-    .filter(isVisibleElement)
     .map((host) => {
-      const reference = getVisiblePzpButtons(host)[0];
-      return reference ? { host, reference, rect: host.getBoundingClientRect() } : null;
+      const buttons = getPzpButtons(host);
+      const reference = buttons.find(isVisibleElement) ?? buttons[0];
+      return reference ? { host, reference, rect: host.getBoundingClientRect(), visible: isVisibleElement(host) } : null;
     })
-    .filter((item): item is { host: HTMLElement; reference: HTMLElement; rect: DOMRect } => item !== null)
-    .sort((a, b) => compareBottomRight(a.rect, b.rect));
+    .filter((item): item is NonNullable<typeof item> => item !== null)
+    .sort((a, b) => Number(b.visible) - Number(a.visible) || compareBottomRight(a.rect, b.rect));
 
   const explicitHost = explicitHosts[0];
   if (explicitHost) {
@@ -3485,7 +3485,7 @@ function findChzzkButtonHost(): HTMLElement | null {
   return fallback?.host ?? null;
 }
 
-function syncChzzkToolButton(): void {
+function syncChzzkToolButton(target: HTMLElement | null = findChzzkButtonHost()): void {
   if (!location.hostname.includes("chzzk.naver.com")) {
     return;
   }
@@ -3504,26 +3504,25 @@ function syncChzzkToolButton(): void {
     return;
   }
 
-  const target = findChzzkButtonHost();
-  if (!target) {
-    existing?.remove();
+  const isFullRecording = currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode === RECORDING_MODE.full;
+  if (!fullRecordButtonEnabled) {
     existingRecord?.remove();
     existingTime?.remove();
     existingCancel?.remove();
-    existingScreenshot?.remove();
-    return;
-  }
-
-  const host = target;
-  if (!fullRecordButtonEnabled) {
-    existingRecord?.remove();
+  } else if (!isFullRecording) {
     existingTime?.remove();
     existingCancel?.remove();
   }
   if (!fullScreenshotButtonEnabled) {
     existingScreenshot?.remove();
   }
-  const isFullRecording = currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode === RECORDING_MODE.full;
+
+  const host = target;
+  if (!host) {
+    startChzzkToolDiscovery();
+    return;
+  }
+
   const timeBadge = fullRecordButtonEnabled && isFullRecording ? existingTime ?? document.createElement("span") : null;
   if (timeBadge) {
     timeBadge.id = CHZZK_RECORD_TIME_ID;
@@ -3652,27 +3651,39 @@ function stopChzzkToolDiscovery(): void {
   }
 }
 
+function startChzzkToolDiscovery(): void {
+  if (chzzkToolDiscoveryTimerId !== null) {
+    return;
+  }
+
+  chzzkToolDiscoveryTimerId = window.setInterval(() => {
+    if (isChzzkClipEditorPage()) {
+      suspendPlayerTools();
+    } else if (findChzzkButtonHost()) {
+      installChzzkToolButton();
+    }
+  }, CHZZK_TOOL_DISCOVERY_INTERVAL_MS);
+}
+
+function mutationAddsChzzkButtonHost(records: MutationRecord[]): boolean {
+  return records.some((record) => Array.from(record.addedNodes).some((node) =>
+    node instanceof Element && (node.matches(CHZZK_BUTTON_HOST_SELECTOR) || Boolean(node.querySelector(CHZZK_BUTTON_HOST_SELECTOR)))
+  ));
+}
+
 function installChzzkToolButton(): void {
   if (!location.hostname.includes("chzzk.naver.com") || isChzzkClipEditorPage()) {
     return;
   }
 
   ensureStyle();
-  syncChzzkToolButton();
-  syncChzzkRecordTimer();
   chzzkToolObserver?.disconnect();
   chzzkToolObserver = null;
   stopChzzkToolDiscovery();
   const toolHost = findChzzkButtonHost();
+  syncChzzkToolButton(toolHost);
+  syncChzzkRecordTimer();
   if (!toolHost) {
-    chzzkToolDiscoveryTimerId = window.setInterval(() => {
-      if (isChzzkClipEditorPage()) {
-        suspendPlayerTools();
-      } else if (findChzzkButtonHost()) {
-        stopChzzkToolDiscovery();
-        syncPlayerToolsForLocation();
-      }
-    }, CHZZK_TOOL_DISCOVERY_INTERVAL_MS);
     return;
   }
 
@@ -3680,7 +3691,7 @@ function installChzzkToolButton(): void {
   const controlsRoot = toolHost?.closest(".pzp-pc__bottom, .pzp-pc-ui-bottom") ?? toolHost?.parentElement;
   const controlsParent = controlsRoot?.parentElement;
   const playerParent = playerRoot?.parentElement;
-  chzzkToolObserver = new MutationObserver(() => {
+  chzzkToolObserver = new MutationObserver((records) => {
     if (isChzzkClipEditorPage()) {
       suspendPlayerTools();
       return;
@@ -3699,6 +3710,8 @@ function installChzzkToolButton(): void {
       || (expectsFullRecordingControls && cancelButton?.parentElement !== toolHost)
       || (fullScreenshotButtonEnabled && screenshotButton?.parentElement !== toolHost);
     if (!toolHost.isConnected || missingExpectedButton) {
+      syncPlayerToolsForLocation();
+    } else if (mutationAddsChzzkButtonHost(records) && findChzzkButtonHost() !== toolHost) {
       syncPlayerToolsForLocation();
     }
   });
