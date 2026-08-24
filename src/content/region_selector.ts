@@ -48,6 +48,7 @@ const DEFAULT_MULTI_REGION_COUNT = 2;
 const DEFAULT_SEEK_SECONDS = 5;
 const VIDEO_FRAME_READY_TIMEOUT_MS = 3_000;
 const POINTER_CLICK_DEDUP_MS = 500;
+const CHZZK_TOOL_DISCOVERY_INTERVAL_MS = 500;
 const CROP_ACCENT = "#5bd6bf";
 const CROP_SECONDARY = "#5bb0d6";
 const CROP_REGION_COLORS = [CROP_ACCENT, CROP_SECONDARY, "#49c7e6", "#7be0b2"];
@@ -157,6 +158,7 @@ let currentRecordingState: LocalRecordingState = { status: RECORDING_STATUS.idle
 let directSession: DirectRecordingSession | null = null;
 let recordingCommandInFlight = false;
 let chzzkToolObserver: MutationObserver | null = null;
+let chzzkToolDiscoveryTimerId: number | null = null;
 let chzzkToolSyncFrame: number | null = null;
 let chzzkRecordTimerId: number | null = null;
 let seekFeedbackTimerId: number | null = null;
@@ -1582,30 +1584,36 @@ function getRecordingChunkSliceRanges(size: number, maxBytes: number): Array<{ s
 }
 
 function queueDirectChunkCheckpoint(session: DirectRecordingSession, blob: Blob): void {
+  if (session.cancelRequested) {
+    return;
+  }
+
   const capturedAt = Date.now();
   const ranges = getRecordingChunkSliceRanges(blob.size, MAX_RECORDING_MESSAGE_BLOB_BYTES);
-  const slices = ranges.map(({ start, end }, rangeIndex) => ({
-    blob: blob.slice(start, end, blob.type),
-    completesBlob: rangeIndex === ranges.length - 1,
-    index: ++session.checkpointIndex,
-  }));
   session.checkpointSaveChain = session.checkpointSaveChain.then(async () => {
     try {
-      for (const slice of slices) {
-        const dataUrl = await readBlobAsDataUrl(slice.blob);
+      for (const [rangeIndex, range] of ranges.entries()) {
+        if (session.cancelRequested) {
+          return;
+        }
+
+        const dataUrl = await readBlobAsDataUrl(blob.slice(range.start, range.end, blob.type));
+        if (session.cancelRequested) {
+          return;
+        }
         const response = await sendRuntimeMessage({
           type: "STORE_RECORDING_CHUNK",
           chunk: {
-            id: `${session.recordingId}:chunk:${String(slice.index).padStart(6, "0")}`,
+            id: `${session.recordingId}:chunk:${String(++session.checkpointIndex).padStart(6, "0")}`,
             recordingId: session.recordingId,
-            index: slice.index,
+            index: session.checkpointIndex,
             mimeType: session.mimeType,
             extension: session.extension,
             outputFormat: session.outputFormat,
             baseName: session.baseName,
             createdAt: session.createdAt,
             capturedAt,
-            completesBlob: slice.completesBlob,
+            completesBlob: rangeIndex === ranges.length - 1,
             dataUrl,
           },
         });
@@ -1709,7 +1717,7 @@ async function startDirectPart(session: DirectRecordingSession): Promise<void> {
   session.recorder = recorder;
 
   recorder.ondataavailable = (event) => {
-    if (event.data.size <= 0) {
+    if (event.data.size <= 0 || session.cancelRequested) {
       return;
     }
 
@@ -3637,11 +3645,11 @@ function syncChzzkRecordTimer(): void {
   }, 1000);
 }
 
-function mutationAddsChzzkPlayer(records: MutationRecord[]): boolean {
-  const selector = ".pzp, .chzzk_player, .pzp-pc__bottom-buttons-right, .pzp-pc-ui-bottom__right";
-  return records.some((record) => Array.from(record.addedNodes).some((node) =>
-    node instanceof Element && (node.matches(selector) || Boolean(node.querySelector(selector)))
-  ));
+function stopChzzkToolDiscovery(): void {
+  if (chzzkToolDiscoveryTimerId !== null) {
+    window.clearInterval(chzzkToolDiscoveryTimerId);
+    chzzkToolDiscoveryTimerId = null;
+  }
 }
 
 function installChzzkToolButton(): void {
@@ -3653,12 +3661,26 @@ function installChzzkToolButton(): void {
   syncChzzkToolButton();
   syncChzzkRecordTimer();
   chzzkToolObserver?.disconnect();
+  chzzkToolObserver = null;
+  stopChzzkToolDiscovery();
   const toolHost = findChzzkButtonHost();
+  if (!toolHost) {
+    chzzkToolDiscoveryTimerId = window.setInterval(() => {
+      if (isChzzkClipEditorPage()) {
+        suspendPlayerTools();
+      } else if (findChzzkButtonHost()) {
+        stopChzzkToolDiscovery();
+        syncPlayerToolsForLocation();
+      }
+    }, CHZZK_TOOL_DISCOVERY_INTERVAL_MS);
+    return;
+  }
+
   const playerRoot = toolHost?.closest(".chzzk_player, .pzp");
   const controlsRoot = toolHost?.closest(".pzp-pc__bottom, .pzp-pc-ui-bottom") ?? toolHost?.parentElement;
   const controlsParent = controlsRoot?.parentElement;
   const playerParent = playerRoot?.parentElement;
-  chzzkToolObserver = new MutationObserver((records) => {
+  chzzkToolObserver = new MutationObserver(() => {
     if (isChzzkClipEditorPage()) {
       suspendPlayerTools();
       return;
@@ -3676,32 +3698,25 @@ function installChzzkToolButton(): void {
       || (expectsFullRecordingControls && timeBadge?.parentElement !== toolHost)
       || (expectsFullRecordingControls && cancelButton?.parentElement !== toolHost)
       || (fullScreenshotButtonEnabled && screenshotButton?.parentElement !== toolHost);
-    if (toolHost && (!toolHost.isConnected || missingExpectedButton)) {
-      syncPlayerToolsForLocation();
-      return;
-    }
-    if (!toolHost && mutationAddsChzzkPlayer(records)) {
+    if (!toolHost.isConnected || missingExpectedButton) {
       syncPlayerToolsForLocation();
     }
   });
-  if (toolHost) {
-    if (controlsRoot) {
-      chzzkToolObserver.observe(controlsRoot, { childList: true, subtree: true });
-    }
-    if (controlsParent) {
-      chzzkToolObserver.observe(controlsParent, { childList: true });
-    }
-    if (playerParent && playerParent !== controlsParent) {
-      chzzkToolObserver.observe(playerParent, { childList: true });
-    }
-  } else {
-    chzzkToolObserver.observe(document.body, { childList: true, subtree: true });
+  if (controlsRoot) {
+    chzzkToolObserver.observe(controlsRoot, { childList: true, subtree: true });
+  }
+  if (controlsParent) {
+    chzzkToolObserver.observe(controlsParent, { childList: true });
+  }
+  if (playerParent && playerParent !== controlsParent) {
+    chzzkToolObserver.observe(playerParent, { childList: true });
   }
 }
 
 function suspendPlayerTools(): void {
   chzzkToolObserver?.disconnect();
   chzzkToolObserver = null;
+  stopChzzkToolDiscovery();
   if (chzzkToolSyncFrame !== null) {
     window.cancelAnimationFrame(chzzkToolSyncFrame);
     chzzkToolSyncFrame = null;

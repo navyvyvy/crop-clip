@@ -92,7 +92,6 @@ let parts: LoadedPart[] = [];
 let splitSegments: SplitSegment[] = [];
 let previewUrl: string | null = null;
 let recordingDurationSeconds = 0;
-let splitDefaultRequestId = 0;
 let sourceDurationSeconds = 0;
 let sourceSizeBytes = 0;
 let ffmpegLoadPromise: Promise<FfmpegLike> | null = null;
@@ -265,6 +264,61 @@ function downloadSource(source: Blob | string, filename: string): void {
   }
 }
 
+function waitForDownloadCompletion(downloadId: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      chrome.downloads.onChanged.removeListener(onChanged);
+      error ? reject(error) : resolve();
+    };
+    const checkState = (state?: string, error?: string) => {
+      if (state === "complete") {
+        finish();
+      } else if (state === "interrupted") {
+        finish(new Error(`다운로드가 중단되었습니다${error ? `: ${error}` : "."}`));
+      }
+    };
+    const onChanged = (delta: chrome.downloads.DownloadDelta) => {
+      if (delta.id === downloadId) {
+        checkState(delta.state?.current, delta.error?.current);
+      }
+    };
+
+    chrome.downloads.onChanged.addListener(onChanged);
+    void chrome.downloads.search({ id: downloadId }).then(([item]) => {
+      if (!item) {
+        finish(new Error("시작한 다운로드를 찾지 못했습니다."));
+        return;
+      }
+      checkState(item.state, item.error);
+    }, (error: unknown) => {
+      finish(error instanceof Error ? error : new Error("다운로드 상태를 확인하지 못했습니다."));
+    });
+  });
+}
+
+async function beginConfirmedDownload(source: Blob | string, filename: string): Promise<{ completion: Promise<void> }> {
+  const { url, revoke } = createObjectUrlSource(source);
+  try {
+    const downloadId = await chrome.downloads.download({ url, filename, conflictAction: "uniquify", saveAs: false });
+    const completion = waitForDownloadCompletion(downloadId).finally(() => {
+      if (revoke) {
+        URL.revokeObjectURL(url);
+      }
+    });
+    return { completion };
+  } catch (error) {
+    if (revoke) {
+      URL.revokeObjectURL(url);
+    }
+    throw error;
+  }
+}
+
 function clearFramePreview(): void {
   if (framePreviewUrl) {
     URL.revokeObjectURL(framePreviewUrl);
@@ -354,22 +408,26 @@ async function loadFfmpeg(): Promise<FfmpegLike> {
   return ffmpegLoadPromise;
 }
 
-async function deleteFfmpegFile(ffmpeg: FfmpegLike, name: string): Promise<void> {
+async function deleteFfmpegFile(ffmpeg: FfmpegLike, name: string, bestEffort = false): Promise<void> {
   try {
     await ffmpeg.deleteFile(name);
-  } catch {
-    // Missing temp files are fine.
+  } catch (error) {
+    if (!bestEffort) {
+      throw error;
+    }
   }
 }
 
-async function clearFfmpegOutputs(ffmpeg: FfmpegLike): Promise<void> {
+async function clearFfmpegOutputs(ffmpeg: FfmpegLike, bestEffort = false): Promise<void> {
   try {
     const files = await ffmpeg.listDir(".");
     await Promise.all(files
       .filter((file) => !file.isDir && (file.name === "input.webm" || file.name === "input.mp4" || file.name.startsWith("output")))
-      .map((file) => deleteFfmpegFile(ffmpeg, file.name)));
-  } catch {
-    // Best-effort cleanup only.
+      .map((file) => deleteFfmpegFile(ffmpeg, file.name, bestEffort)));
+  } catch (error) {
+    if (!bestEffort) {
+      throw error;
+    }
   }
 }
 
@@ -379,7 +437,12 @@ async function readFfmpegBlob(ffmpeg: FfmpegLike, filename: string, mimeType: st
     return new Blob([data], { type: mimeType });
   }
 
-  return new Blob([data.slice().buffer], { type: mimeType });
+  const buffer = data.buffer instanceof ArrayBuffer
+    ? data.byteOffset === 0 && data.byteLength === data.buffer.byteLength
+      ? data.buffer
+      : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
+    : data.slice().buffer;
+  return new Blob([buffer], { type: mimeType });
 }
 
 function getConvertedMimeType(format: ConvertFormat): string {
@@ -422,7 +485,7 @@ async function convertPartWithFfmpeg(part: LoadedPart, outputFormat: ConvertForm
     setProgressPercent(PROGRESS_FINALIZING_PERCENT);
     return { source: blob, filename: getRangeFilename(part, outputFormat, range) };
   } finally {
-    await clearFfmpegOutputs(ffmpeg);
+    await clearFfmpegOutputs(ffmpeg, true);
   }
 }
 
@@ -467,7 +530,7 @@ async function convertPartAtSpeed(part: LoadedPart, speed: number, range?: TimeR
     setProgressPercent(PROGRESS_FINALIZING_PERCENT);
     return { source: blob, filename: getSpeedFilename(part, speed, range) };
   } finally {
-    await clearFfmpegOutputs(ffmpeg);
+    await clearFfmpegOutputs(ffmpeg, true);
   }
 }
 
@@ -871,31 +934,13 @@ function updateSplitPresetButtons(): void {
   }
 }
 
-async function updateSplitDefaultValues(part: LoadedPart | undefined = getSelectedSourcePart()): Promise<void> {
+function updateSplitDefaultValues(part: LoadedPart | undefined = getSelectedSourcePart()): void {
   if (!part) {
     return;
   }
 
-  const requestId = ++splitDefaultRequestId;
   sourceSizeBytes = part.size;
   applySplitValueDefault();
-
-  let loaded: Awaited<ReturnType<typeof loadVideoForPart>> | null = null;
-  try {
-    loaded = await loadVideoForPart(part);
-    if (requestId === splitDefaultRequestId) {
-      setSourceDuration(loaded.duration);
-    }
-  } catch {
-    const fallback = recordingDurationSeconds || getRecordingDurationFallback();
-    if (requestId === splitDefaultRequestId && fallback > 0) {
-      setSourceDuration(fallback);
-    }
-  } finally {
-    if (loaded) {
-      releaseVideoSource(loaded.video, loaded.url, loaded.revoke);
-    }
-  }
 }
 
 async function loadVideoForPart(part: LoadedPart): Promise<{ video: HTMLVideoElement; url: string; revoke: boolean; duration: number }> {
@@ -1166,6 +1211,7 @@ async function createDurationSplitWithFfmpeg(
       const start = selectedRange.start + (actualTime?.start ?? index * segmentSeconds);
       const end = Math.min(selectedRange.end, selectedRange.start + (actualTime?.end ?? (index + 1) * segmentSeconds));
       const blob = await readFfmpegBlob(ffmpeg, files[index].name, `video/${outputFormat}`);
+      await deleteFfmpegFile(ffmpeg, files[index].name, true);
       segments.push({
         blob,
         filename: `${getFilenameBase(part.filename)}_${String(index + 1).padStart(3, "0")}.${outputFormat}`,
@@ -1177,7 +1223,7 @@ async function createDurationSplitWithFfmpeg(
     }
     return segments;
   } finally {
-    await clearFfmpegOutputs(ffmpeg);
+    await clearFfmpegOutputs(ffmpeg, true);
   }
 }
 
@@ -1205,6 +1251,7 @@ async function createSizeSplit(part: LoadedPart, maxMegabytes: number, outputFor
     }
 
     const nextSeconds = getNextSizeSplitSeconds(segmentSeconds, maxBytes, largestBytes, MIN_SIZE_SPLIT_SECONDS, SIZE_SPLIT_SAFETY_RATIO);
+    segments.length = 0;
     if (nextSeconds >= segmentSeconds) {
       break;
     }
@@ -1372,8 +1419,7 @@ function renderParts(): void {
   }
   renderSplitMode();
   setPreviewFromPart(parts[0]);
-  void renderTimelineThumbnails(parts[0]);
-  void updateSplitDefaultValues(parts[0]);
+  updateSplitDefaultValues(parts[0]);
   renderSplitDownloads();
   setSplitBusy(false);
 }
@@ -1382,6 +1428,22 @@ async function downloadSourcesSequentially(items: Array<{ source: Blob | string;
   for (const item of [...items].sort((a, b) => a.filename.localeCompare(b.filename, undefined, { numeric: true }))) {
     downloadSource(item.source, item.filename);
     await delay(SEQUENTIAL_DOWNLOAD_DELAY_MS);
+  }
+}
+
+async function downloadSourcesAndConfirm(items: Array<{ source: Blob | string; filename: string }>): Promise<void> {
+  const completions: Array<Promise<Error | null>> = [];
+  for (const item of [...items].sort((a, b) => a.filename.localeCompare(b.filename, undefined, { numeric: true }))) {
+    const { completion } = await beginConfirmedDownload(item.source, item.filename);
+    completions.push(completion.then(
+      () => null,
+      (error: unknown) => error instanceof Error ? error : new Error("다운로드를 완료하지 못했습니다."),
+    ));
+    await delay(SEQUENTIAL_DOWNLOAD_DELAY_MS);
+  }
+  const error = (await Promise.all(completions)).find((result): result is Error => result !== null);
+  if (error) {
+    throw error;
   }
 }
 
@@ -1501,8 +1563,7 @@ async function boot(): Promise<void> {
   }
 
   if (autoDownloadRecording) {
-    await downloadSourcesSequentially(parts.map((part) => ({ source: getPartSource(part), filename: part.filename })));
-    await delay(DOWNLOAD_URL_REVOKE_DELAY_MS);
+    await downloadSourcesAndConfirm(parts.map((part) => ({ source: getPartSource(part), filename: part.filename })));
     await markAutoDownloadHandled();
     allowRecordingDeletion = true;
     window.close();
@@ -1683,6 +1744,7 @@ elements.previewVideo.addEventListener("loadedmetadata", () => {
   if (Number.isFinite(elements.previewVideo.duration) && elements.previewVideo.duration > 0) {
     setSourceDuration(elements.previewVideo.duration);
   }
+  void renderTimelineThumbnails(getSelectedSourcePart());
 });
 
 elements.previewVideo.addEventListener("play", () => {
