@@ -82,7 +82,7 @@ export function normalizeRegion(raw: Partial<RegionSelection> | null | undefined
     return null;
   }
 
-  const values = [raw.x, raw.y, raw.width, raw.height, raw.viewportWidth, raw.viewportHeight, raw.devicePixelRatio, raw.selectedAt];
+  const values = [raw.x, raw.y, raw.width, raw.height];
   if (values.some((value) => !Number.isFinite(Number(value))) || Number(raw.width) <= 0 || Number(raw.height) <= 0) {
     return null;
   }
@@ -107,10 +107,6 @@ export function normalizeRegion(raw: Partial<RegionSelection> | null | undefined
     width: Number(raw.width),
     height: Number(raw.height),
     ...(videoRelative ? { videoRelative } : {}),
-    viewportWidth: Math.max(1, Number(raw.viewportWidth)),
-    viewportHeight: Math.max(1, Number(raw.viewportHeight)),
-    devicePixelRatio: Math.max(0.1, Number(raw.devicePixelRatio)),
-    selectedAt: Number(raw.selectedAt),
   };
 }
 

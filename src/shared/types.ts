@@ -1,6 +1,6 @@
 export type RecordingFormat = "webm" | "mp4";
-export type RecordingStatus = "idle" | "recording" | "completed" | "error";
-export type RecordingMode = "region" | "full";
+type RecordingStatus = "idle" | "recording" | "completed" | "error";
+type RecordingMode = "region" | "full";
 export type ShortcutAction = "selectRegion" | "clearRegion" | "clearAllRegions" | "regionRecord" | "cancelRecording" | "regionScreenshot" | "fullRecord" | "fullScreenshot";
 export type ShortcutKeys = Record<ShortcutAction, string>;
 
@@ -49,10 +49,6 @@ export interface RegionSelection {
     width: number;
     height: number;
   };
-  viewportWidth: number;
-  viewportHeight: number;
-  devicePixelRatio: number;
-  selectedAt: number;
 }
 
 export interface RecordingState {
@@ -79,7 +75,6 @@ export interface RecordingPartRecord {
   filename: string;
   mimeType: string;
   extension: RecordingFormat;
-  outputFormat: RecordingFormat;
   size: number;
   blob?: Blob;
   dataUrl?: string;
@@ -94,7 +89,6 @@ export interface RecordingChunkRecord {
   index: number;
   mimeType: string;
   extension: RecordingFormat;
-  outputFormat: RecordingFormat;
   baseName: string;
   createdAt: number;
   capturedAt: number;
@@ -111,8 +105,10 @@ export interface AppState {
 
 export const MIN_VIDEO_BITS_PER_SECOND = 100_000;
 export const MAX_VIDEO_BITS_PER_SECOND = 12_000_000;
-export const DEFAULT_VIDEO_BITS_PER_SECOND = 4_000_000;
+const DEFAULT_VIDEO_BITS_PER_SECOND = 6_000_000;
 export const FPS_WARNING_VIDEO_BITS_PER_SECOND = DEFAULT_VIDEO_BITS_PER_SECOND;
+export const STANDARD_RECORDING_FRAME_RATE = 30;
+export const HIGH_RECORDING_FRAME_RATE = 60;
 export const MIN_MULTI_REGION_COUNT = 2;
 export const MAX_MULTI_REGION_COUNT = 4;
 export const DEFAULT_MULTI_REGION_COUNT = 2;

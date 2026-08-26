@@ -1,6 +1,7 @@
 import { deleteRecording, deleteRecordingChunks, getChunksByRecordingId, putChunk, putPart, putRecording } from "../shared/idb.js";
 import { fail, ok, type AutoDownloadHandledMessage, type ContentCommand, type DeletionScheduleRequest, type FinalizeRecordingMessage, type MessageResponse, type PopupCommand, type RecordingErrorMessage, type StoreRecordingChunkMessage } from "../shared/messages.js";
 import { loadAppState, loadRecordingState, saveRecordingState } from "../shared/storage.js";
+import { MILLISECONDS_PER_SECOND, SECONDS_PER_HOUR, SECONDS_PER_MINUTE } from "../shared/time_range.js";
 import { RECORDING_MODE, RECORDING_STATUS, type RecordingRecord, type RegionSelection, type Settings } from "../shared/types.js";
 const DELETE_AFTER_MINUTES = 10;
 const DELETE_RETRY_MINUTES = 1;
@@ -11,6 +12,7 @@ const RECOVERY_FINALIZE_ATTEMPTS = 3;
 const RESULT_TAB_CREATE_ATTEMPTS = 3;
 const RESULT_TAB_RETRY_DELAY_MS = 200;
 const RESULT_TAB_RETRY_ALARM = "open-recording-result";
+const RESULT_TAB_RETRY_ALARM_DELAY_MINUTES = 0.5;
 let recordingStartInFlight = false;
 let resultTabLaunchPromise: Promise<boolean> | null = null;
 const checkpointStores = new Map<string, Promise<void>>();
@@ -133,6 +135,10 @@ async function sendCommandToContentScript<T = undefined>(tabId: number, message:
     return await sendMessage();
   } catch (error) {
     try {
+      await chrome.scripting.insertCSS({
+        target: { tabId },
+        files: ["content/region_selector.css"],
+      });
       await chrome.scripting.executeScript({
         target: { tabId },
         files: ["content/region_selector.js"],
@@ -146,10 +152,10 @@ async function sendCommandToContentScript<T = undefined>(tabId: number, message:
 }
 
 function buildDirectFilename(baseName: string, extension: string, createdAt: number, endedAt: number): string {
-  const totalSeconds = Math.max(1, Math.round((endedAt - createdAt) / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor(totalSeconds % 3600 / 60);
-  const seconds = totalSeconds % 60;
+  const totalSeconds = Math.max(1, Math.round((endedAt - createdAt) / MILLISECONDS_PER_SECOND));
+  const hours = Math.floor(totalSeconds / SECONDS_PER_HOUR);
+  const minutes = Math.floor(totalSeconds % SECONDS_PER_HOUR / SECONDS_PER_MINUTE);
+  const seconds = totalSeconds % SECONDS_PER_MINUTE;
   const duration = hours > 0
     ? `${hours}h${String(minutes).padStart(2, "0")}m${String(seconds).padStart(2, "0")}s`
     : minutes > 0 ? `${minutes}m${String(seconds).padStart(2, "0")}s` : `${seconds}s`;
@@ -472,7 +478,7 @@ async function openCompletedRecordingResult(): Promise<boolean> {
     }
   }
 
-  await chrome.alarms.create(RESULT_TAB_RETRY_ALARM, { delayInMinutes: 0.5 });
+      await chrome.alarms.create(RESULT_TAB_RETRY_ALARM, { delayInMinutes: RESULT_TAB_RETRY_ALARM_DELAY_MINUTES });
   return false;
 }
 
@@ -569,7 +575,6 @@ async function finalizeRecordingFromChunksUnlocked(recordingId: string, endedAt:
     filename: buildDirectFilename(first.baseName, first.extension, first.createdAt, actualEndedAt),
     mimeType: first.mimeType,
     extension: first.extension,
-    outputFormat: first.outputFormat,
     size: blob.size,
     blob,
     createdAt: actualEndedAt,

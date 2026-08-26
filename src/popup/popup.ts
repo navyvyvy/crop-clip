@@ -1,6 +1,7 @@
 import { DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, DEFAULT_SETTINGS, DEFAULT_SHORTCUT_KEYS, FPS_WARNING_VIDEO_BITS_PER_SECOND, MAX_MULTI_REGION_COUNT, MAX_SEEK_SECONDS, MAX_VIDEO_BITS_PER_SECOND, MIN_MULTI_REGION_COUNT, MIN_SEEK_SECONDS, MIN_VIDEO_BITS_PER_SECOND, RECORDING_FORMAT, RECORDING_MODE, RECORDING_STATUS, type AppState, type RecordingFormat, type Settings, type ShortcutAction } from "../shared/types.js";
 import { loadAppState, normalizeRecordingState, normalizeRegion, normalizeRegions, normalizeSettings, saveSettings } from "../shared/storage.js";
 import type { MessageResponse, PopupCommand } from "../shared/messages.js";
+import { MILLISECONDS_PER_SECOND, SECONDS_PER_HOUR, SECONDS_PER_MINUTE } from "../shared/time_range.js";
 
 const elements = {
   versionBadge: document.getElementById("version-badge") as HTMLSpanElement,
@@ -45,6 +46,9 @@ const BITS_PER_MEGABIT = 1_000_000;
 const BITRATE_STEP_MEGABITS_PER_SECOND = 0.5;
 const MIN_VIDEO_MEGABITS_PER_SECOND = MIN_VIDEO_BITS_PER_SECOND / BITS_PER_MEGABIT;
 const MAX_VIDEO_MEGABITS_PER_SECOND = MAX_VIDEO_BITS_PER_SECOND / BITS_PER_MEGABIT;
+
+elements.seekSecondsInput.min = String(MIN_SEEK_SECONDS);
+elements.seekSecondsInput.max = String(MAX_SEEK_SECONDS);
 const SHORTCUT_LABELS: Record<ShortcutAction, string> = {
   selectRegion: "영역 선택",
   clearRegion: "영역 해제",
@@ -70,10 +74,10 @@ let recordingTimerId: number | null = null;
 let waitingShortcutAction: ShortcutAction | null = null;
 
 function formatElapsed(ms: number): string {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
+  const totalSeconds = Math.max(0, Math.floor(ms / MILLISECONDS_PER_SECOND));
+  const hours = Math.floor(totalSeconds / SECONDS_PER_HOUR);
+  const minutes = Math.floor((totalSeconds % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE);
+  const seconds = totalSeconds % SECONDS_PER_MINUTE;
 
   if (hours > 0) {
     return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
@@ -103,7 +107,7 @@ function syncRecordingTimer(): void {
   }
 
   updateRecordingTimer();
-  recordingTimerId = window.setInterval(updateRecordingTimer, 1000);
+  recordingTimerId = window.setInterval(updateRecordingTimer, MILLISECONDS_PER_SECOND);
 }
 
 function showError(message = ""): void {

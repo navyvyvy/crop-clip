@@ -9,6 +9,7 @@
   --accent-strong: #7ae8d4;
   --danger: #ff7474;
   --warn: #ffcf72;
+  --popup-width: 340px;
 }
 
 * {
@@ -18,9 +19,9 @@
 html,
 body {
   margin: 0;
-  width: 340px;
-  min-width: 340px;
-  max-width: 340px;
+  width: var(--popup-width);
+  min-width: var(--popup-width);
+  max-width: var(--popup-width);
   overflow: hidden;
   background:
     radial-gradient(circle at top right, rgba(91, 214, 191, 0.12), transparent 34%),
@@ -215,61 +216,7 @@ h1 {
   white-space: nowrap;
 }
 
-.bitrate-field {
-  display: grid;
-  grid-template-columns: 20px minmax(34px, 1fr) 38px 20px;
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  background: var(--panel-2);
-}
-
-.bitrate-field input {
-  width: 100%;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--text);
-  padding: 5px 4px;
-  text-align: right;
-  font-size: 12px;
-}
-
-.bitrate-field button {
-  display: grid;
-  place-items: center;
-  width: 20px;
-  min-width: 0;
-  border: 0;
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--text);
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 900;
-  line-height: 1;
-}
-
-.bitrate-field button:hover:not(:disabled) {
-  background: var(--accent);
-  color: #06221d;
-}
-
-.bitrate-field button:disabled {
-  cursor: not-allowed;
-  opacity: 0.45;
-}
-
-.bitrate-field span {
-  display: grid;
-  place-items: center;
-  border-radius: 7px;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 800;
-}
-
+.bitrate-field,
 .seek-field,
 .count-field {
   display: grid;
@@ -281,6 +228,7 @@ h1 {
   background: var(--panel-2);
 }
 
+.bitrate-field input,
 .seek-field input,
 .count-field input {
   width: 100%;
@@ -293,19 +241,7 @@ h1 {
   font-size: 12px;
 }
 
-.seek-field input::-webkit-outer-spin-button,
-.seek-field input::-webkit-inner-spin-button,
-.count-field input::-webkit-outer-spin-button,
-.count-field input::-webkit-inner-spin-button {
-  margin: 0;
-  appearance: none;
-}
-
-.seek-field input[type="number"],
-.count-field input[type="number"] {
-  appearance: textfield;
-}
-
+.bitrate-field button,
 .seek-field button,
 .count-field button {
   display: grid;
@@ -322,18 +258,21 @@ h1 {
   line-height: 1;
 }
 
+.bitrate-field button:hover:not(:disabled),
 .seek-field button:hover:not(:disabled),
 .count-field button:hover:not(:disabled) {
   background: var(--accent);
   color: #06221d;
 }
 
+.bitrate-field button:disabled,
 .seek-field button:disabled,
 .count-field button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
 }
 
+.bitrate-field span,
 .seek-field span,
 .count-field span {
   display: grid;
@@ -342,6 +281,19 @@ h1 {
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
+}
+
+.seek-field input::-webkit-outer-spin-button,
+.seek-field input::-webkit-inner-spin-button,
+.count-field input::-webkit-outer-spin-button,
+.count-field input::-webkit-inner-spin-button {
+  margin: 0;
+  appearance: none;
+}
+
+.seek-field input[type="number"],
+.count-field input[type="number"] {
+  appearance: textfield;
 }
 
 .segmented {

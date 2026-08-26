@@ -11,6 +11,7 @@
     return;
   }
   contentScriptGlobal[CONTENT_SCRIPT_BOOT_KEY] = true;
+  document.getElementById("crop-clip-style")?.remove();
 
 const RECORDING_FORMAT = {
   webm: "webm",
@@ -32,28 +33,42 @@ const BORDER_CLASS = "crop-clip-border";
 const SEEK_FEEDBACK_ID = "crop-clip-seek-feedback";
 const SCREENSHOT_STACK_ID = "crop-clip-screenshot-stack";
 const RESIZE_MAGNIFIER_ID = "crop-clip-resize-magnifier";
-const STYLE_ID = "crop-clip-style";
-const MIN_WIDTH = 50;
-const MIN_HEIGHT = 50;
+const MIN_REGION_DIMENSION_PX = 50;
 const BORDER_WIDTH = 2;
-const RESIZE_HIT_SIZE = 22;
 const RESIZE_MAGNIFIER_WIDTH = 112;
 const RESIZE_MAGNIFIER_HEIGHT = 84;
 const RESIZE_MAGNIFIER_BORDER = 2;
 const RESIZE_MAGNIFIER_SAMPLE_WIDTH = 28;
 const RESIZE_MAGNIFIER_SAMPLE_HEIGHT = 21;
 const SNAP_DISTANCE = 10;
+const MIN_ACTIVE_REGIONS = 2;
 const MAX_ACTIVE_REGIONS = 4;
+const MIN_GROUPED_LAYOUT_REGIONS = 3;
 const DEFAULT_MULTI_REGION_COUNT = 2;
 const DEFAULT_SEEK_SECONDS = 5;
+const MILLISECONDS_PER_SECOND = 1_000;
+const SECONDS_PER_MINUTE = 60;
+const SECONDS_PER_HOUR = 3_600;
+const STANDARD_RECORDING_FRAME_RATE = 30;
+const HIGH_RECORDING_FRAME_RATE = 60;
 const VIDEO_FRAME_READY_TIMEOUT_MS = 3_000;
 const POINTER_CLICK_DEDUP_MS = 500;
 const CHZZK_TOOL_DISCOVERY_INTERVAL_MS = 500;
+const SEEK_FEEDBACK_DURATION_MS = 650;
 const CROP_ACCENT = "#5bd6bf";
 const CROP_SECONDARY = "#5bb0d6";
 const CROP_REGION_COLORS = [CROP_ACCENT, CROP_SECONDARY, "#49c7e6", "#7be0b2"];
-const CROP_GUIDE = "#ffd166";
 const MAX_SCREENSHOT_PREVIEWS = 8;
+const MAX_STREAMER_NAME_LENGTH = 60;
+const SCREENSHOT_STACK_VIEWPORT_GUTTER_PX = 80;
+const PLAYER_TOOL_VERTICAL_TOLERANCE_PX = 48;
+const PLAYER_BUTTON_ROW_TOLERANCE_PX = 24;
+const FLOATING_UI_VIEWPORT_PADDING_PX = 8;
+const MAGNIFIER_POINTER_OFFSET_PX = 18;
+const SCREENSHOT_STACK_OFFSET_PX = 10;
+const CHUNK_INDEX_DIGITS = 6;
+const VISIBLE_VIDEO_SCORE_WEIGHT = 4;
+const VIDEO_FRAME_SCORE_WEIGHT = 2;
 const AUDIO_BITS_PER_SECOND = 128_000;
 const MAX_RECORDING_MESSAGE_BLOB_BYTES = 8 * 1024 * 1024;
 const CHZZK_RECORD_BUTTON_ID = "crop-clip-chzzk-record-button";
@@ -124,7 +139,6 @@ interface DirectRecordingSession {
   recorder?: MediaRecorder;
   mimeType: string;
   extension: "webm" | "mp4";
-  outputFormat: "webm" | "mp4";
   baseName: string;
   checkpointIndex: number;
   checkpointSaveChain: Promise<void>;
@@ -176,491 +190,16 @@ let regionLayoutObserver: ResizeObserver | null = null;
 let regionLayoutVideo: HTMLVideoElement | null = null;
 let regionLayoutSyncFrame: number | null = null;
 
-function ensureStyle(): void {
-  let style = document.getElementById(STYLE_ID) as HTMLStyleElement | null;
-  if (!style) {
-    style = document.createElement("style");
-    style.id = STYLE_ID;
-    document.documentElement.appendChild(style);
-  }
-
-  const css = `
-    #${OVERLAY_ID} {
-      position: fixed;
-      inset: 0;
-      z-index: 2147483647;
-      cursor: crosshair;
-      background: rgba(10, 15, 20, 0.32);
-      backdrop-filter: saturate(110%);
-      user-select: none;
-    }
-
-    #${OVERLAY_ID} .hint {
-      position: absolute;
-      top: 16px;
-      left: 16px;
-      max-width: min(92vw, 360px);
-      padding: 10px 12px;
-      border-radius: 12px;
-      background: rgba(16, 22, 30, 0.92);
-      color: #eef4fb;
-      font: 600 13px/1.35 "Segoe UI Variable", "Noto Sans KR", system-ui, sans-serif;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.26);
-    }
-
-    #${OVERLAY_ID} .error {
-      margin-top: 8px;
-      color: #ffb0b0;
-      font-weight: 500;
-    }
-
-    #${OVERLAY_ID} .selection {
-      position: fixed;
-      border: 2px solid ${CROP_ACCENT};
-      background: rgba(91, 214, 191, 0.12);
-      box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.2) inset;
-      pointer-events: none;
-      display: none;
-    }
-
-    .${BORDER_CLASS} {
-      position: fixed;
-      z-index: 2147483646;
-      outline: ${BORDER_WIDTH}px solid var(--crop-clip-region-outline, rgba(91, 214, 191, 0.9));
-      box-shadow: 0 0 0 1px rgba(8, 16, 24, 0.42);
-      pointer-events: none;
-      border-radius: 2px;
-      box-sizing: border-box;
-    }
-
-    .${BORDER_CLASS}[data-active="true"] {
-      box-shadow: 0 0 0 1px var(--crop-clip-region-shadow, rgba(91, 214, 191, 0.62)), 0 0 14px rgba(91, 214, 191, 0.16);
-    }
-
-    .${BORDER_CLASS}[data-active="false"] {
-      box-shadow: 0 0 0 1px rgba(8, 16, 24, 0.34);
-    }
-
-    .${BORDER_CLASS} .guide-edge {
-      position: absolute;
-      z-index: 4;
-      pointer-events: none;
-      background: ${CROP_GUIDE};
-      box-shadow: 0 0 8px rgba(255, 209, 102, 0.6);
-    }
-
-    .${BORDER_CLASS} .guide-edge[hidden] {
-      display: none;
-    }
-
-    .${BORDER_CLASS} .guide-edge[data-side="n"] {
-      left: 0;
-      right: 0;
-      top: -${BORDER_WIDTH}px;
-      height: ${BORDER_WIDTH}px;
-    }
-
-    .${BORDER_CLASS} .guide-edge[data-side="s"] {
-      left: 0;
-      right: 0;
-      bottom: -${BORDER_WIDTH}px;
-      height: ${BORDER_WIDTH}px;
-    }
-
-    .${BORDER_CLASS} .guide-edge[data-side="w"] {
-      left: -${BORDER_WIDTH}px;
-      top: 0;
-      bottom: 0;
-      width: ${BORDER_WIDTH}px;
-    }
-
-    .${BORDER_CLASS} .guide-edge[data-side="e"] {
-      right: -${BORDER_WIDTH}px;
-      top: 0;
-      bottom: 0;
-      width: ${BORDER_WIDTH}px;
-    }
-
-    .${BORDER_CLASS} .resize-zone {
-      position: absolute;
-      z-index: 2;
-      background: transparent;
-      pointer-events: auto;
-      box-sizing: border-box;
-    }
-
-    .${BORDER_CLASS} .resize-zone[data-edge="n"] {
-      top: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
-      left: 0;
-      right: 0;
-      height: ${RESIZE_HIT_SIZE}px;
-      cursor: ns-resize;
-    }
-
-    .${BORDER_CLASS} .resize-zone[data-edge="s"] {
-      bottom: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
-      left: 0;
-      right: 0;
-      height: ${RESIZE_HIT_SIZE}px;
-      cursor: ns-resize;
-    }
-
-    .${BORDER_CLASS} .resize-zone[data-edge="w"] {
-      left: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
-      top: 0;
-      bottom: 0;
-      width: ${RESIZE_HIT_SIZE}px;
-      cursor: ew-resize;
-    }
-
-    .${BORDER_CLASS} .resize-zone[data-edge="e"] {
-      right: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
-      top: 0;
-      bottom: 0;
-      width: ${RESIZE_HIT_SIZE}px;
-      cursor: ew-resize;
-    }
-
-    .${BORDER_CLASS} .resize-zone[data-edge="nw"] {
-      left: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
-      top: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
-      width: ${RESIZE_HIT_SIZE}px;
-      height: ${RESIZE_HIT_SIZE}px;
-      cursor: nwse-resize;
-    }
-
-    .${BORDER_CLASS} .resize-zone[data-edge="ne"] {
-      right: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
-      top: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
-      width: ${RESIZE_HIT_SIZE}px;
-      height: ${RESIZE_HIT_SIZE}px;
-      cursor: nesw-resize;
-    }
-
-    .${BORDER_CLASS} .resize-zone[data-edge="sw"] {
-      left: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
-      bottom: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
-      width: ${RESIZE_HIT_SIZE}px;
-      height: ${RESIZE_HIT_SIZE}px;
-      cursor: nesw-resize;
-    }
-
-    .${BORDER_CLASS} .resize-zone[data-edge="se"] {
-      right: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
-      bottom: -${Math.round(RESIZE_HIT_SIZE / 2)}px;
-      width: ${RESIZE_HIT_SIZE}px;
-      height: ${RESIZE_HIT_SIZE}px;
-      cursor: nwse-resize;
-    }
-
-    .${BORDER_CLASS} .resize-modifiers {
-      position: absolute;
-      left: 50%;
-      top: 10px;
-      z-index: 5;
-      display: flex;
-      gap: 5px;
-      transform: translateX(-50%);
-      pointer-events: none;
-      white-space: nowrap;
-    }
-
-    .${BORDER_CLASS} .resize-modifiers[hidden],
-    .${BORDER_CLASS} .resize-modifier[hidden] {
-      display: none;
-    }
-
-    .${BORDER_CLASS} .resize-modifier {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      padding: 4px 7px;
-      border: 1px solid rgba(255, 209, 102, 0.68);
-      border-radius: 7px;
-      background: rgba(6, 13, 20, 0.9);
-      color: #f7fbff;
-      font: 700 11px/1 "Segoe UI Variable", "Noto Sans KR", system-ui, sans-serif;
-      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.32);
-    }
-
-    .${BORDER_CLASS} .resize-modifier kbd {
-      color: ${CROP_GUIDE};
-      font: inherit;
-    }
-
-    .${BORDER_CLASS} .region-toolbar {
-      position: absolute;
-      right: -2px;
-      top: -30px;
-      z-index: 5;
-      display: flex;
-      gap: 4px;
-      pointer-events: auto;
-    }
-
-    .${BORDER_CLASS} .region-tool {
-      min-width: 24px;
-      height: 22px;
-      border: 1px solid rgba(238, 244, 251, 0.5);
-      border-radius: 8px;
-      background: rgba(6, 13, 20, 0.86);
-      color: #f4fbff;
-      cursor: pointer;
-      font: 800 11px/20px "Segoe UI Variable", "Noto Sans KR", system-ui, sans-serif;
-      padding: 0 6px;
-      text-align: center;
-      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.36);
-    }
-
-    .${BORDER_CLASS} .region-tool:hover {
-      background: rgba(14, 24, 34, 0.9);
-      border-color: rgba(238, 244, 251, 0.54);
-    }
-
-    .${BORDER_CLASS} .region-tool svg {
-      display: block;
-      width: 14px;
-      height: 14px;
-      pointer-events: none;
-    }
-
-    .${BORDER_CLASS} .region-tool:disabled {
-      opacity: 0.42;
-      cursor: not-allowed;
-    }
-
-    .${BORDER_CLASS}[data-recording="true"] .resize-zone {
-      pointer-events: none;
-    }
-
-    .${BORDER_CLASS} .record-time {
-      min-width: 42px;
-      height: 22px;
-      padding: 0 7px;
-      border: 1px solid rgba(238, 244, 251, 0.36);
-      border-radius: 8px;
-      background: rgba(6, 13, 20, 0.86);
-      color: #f4fbff;
-      font: 800 11px/20px "Segoe UI Variable", "Noto Sans KR", system-ui, sans-serif;
-      text-align: center;
-      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.36);
-    }
-
-    .${BORDER_CLASS} .record-time[hidden] {
-      display: none;
-    }
-
-    .${BORDER_CLASS} .record-region {
-      min-width: 26px;
-      color: #f4fbff;
-    }
-
-    .${BORDER_CLASS} .record-region:hover {
-      color: #ffffff;
-    }
-
-    .${BORDER_CLASS} .record-region[data-recording="true"] {
-      color: #ff7474;
-      border-color: rgba(255, 116, 116, 0.55);
-      box-shadow: 0 0 0 1px rgba(255, 116, 116, 0.28);
-    }
-
-    .${BORDER_CLASS} .record-region[data-recording="true"]:hover {
-      color: #ff8a8a;
-      border-color: rgba(255, 138, 138, 0.7);
-      box-shadow: 0 0 0 1px rgba(255, 138, 138, 0.36);
-    }
-
-    .${BORDER_CLASS} .move-region {
-      cursor: move;
-    }
-
-    .${BORDER_CLASS} .cancel-recording {
-      color: #ff9a9a;
-    }
-
-    .${BORDER_CLASS} .clear-region {
-      color: rgba(255, 215, 215, 0.96);
-    }
-
-    #${RESIZE_MAGNIFIER_ID} {
-      position: fixed;
-      z-index: 2147483647;
-      width: ${RESIZE_MAGNIFIER_WIDTH}px;
-      height: ${RESIZE_MAGNIFIER_HEIGHT}px;
-      overflow: hidden;
-      border: ${RESIZE_MAGNIFIER_BORDER}px solid rgba(244, 251, 255, 0.92);
-      border-radius: 9px;
-      background: #000;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.42);
-      pointer-events: none;
-    }
-
-    #${RESIZE_MAGNIFIER_ID} canvas {
-      display: block;
-      width: 100%;
-      height: 100%;
-      image-rendering: pixelated;
-    }
-
-    #${RESIZE_MAGNIFIER_ID}::before,
-    #${RESIZE_MAGNIFIER_ID}::after {
-      content: "";
-      position: absolute;
-      background: rgba(255, 209, 102, 0.92);
-      box-shadow: 0 0 0 1px rgba(5, 10, 16, 0.55);
-    }
-
-    #${RESIZE_MAGNIFIER_ID}::before {
-      left: 50%;
-      top: 0;
-      width: 1px;
-      height: 100%;
-    }
-
-    #${RESIZE_MAGNIFIER_ID}::after {
-      left: 0;
-      top: 50%;
-      width: 100%;
-      height: 1px;
-    }
-
-    #${SCREENSHOT_STACK_ID} {
-      position: fixed;
-      z-index: 2147483645;
-      width: min(240px, 42vw);
-      pointer-events: auto;
-    }
-
-    #${SCREENSHOT_STACK_ID} .screenshot-card {
-      position: absolute;
-      left: 0;
-      top: 0;
-      width: 100%;
-      overflow: hidden;
-      border: 1px solid rgba(91, 214, 191, 0.5);
-      border-radius: 8px;
-      background: rgba(5, 10, 16, 0.9);
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.38);
-    }
-
-    #${SCREENSHOT_STACK_ID} img {
-      display: block;
-      width: 100%;
-      max-height: 150px;
-      object-fit: contain;
-      background: #000;
-    }
-
-    #${SCREENSHOT_STACK_ID} .screenshot-actions {
-      position: absolute;
-      top: 4px;
-      right: 4px;
-      display: flex;
-      gap: 4px;
-    }
-
-    #${SCREENSHOT_STACK_ID} .screenshot-action {
-      width: 22px;
-      height: 22px;
-      border: 1px solid rgba(238, 244, 251, 0.52);
-      border-radius: 7px;
-      background: rgba(6, 13, 20, 0.84);
-      color: #f4fbff;
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      padding: 0;
-    }
-
-    #${SCREENSHOT_STACK_ID} .screenshot-action:hover {
-      background: rgba(15, 26, 36, 0.94);
-    }
-
-    #${SCREENSHOT_STACK_ID} .screenshot-action svg {
-      width: 14px;
-      height: 14px;
-      pointer-events: none;
-    }
-
-    .crop-clip-pzp-button {
-      color: #ffffff;
-    }
-
-    .crop-clip-pzp-button .pzp-ui-icon {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    .crop-clip-pzp-button svg {
-      width: 22px;
-      height: 22px;
-      pointer-events: none;
-    }
-
-    #${CHZZK_CANCEL_BUTTON_ID} {
-      color: #ff9a9a;
-    }
-
-    #${CHZZK_RECORD_TIME_ID} {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-width: 42px;
-      height: 100%;
-      padding: 0 4px;
-      color: var(--crop-clip-danger);
-      font-size: 12px;
-      font-weight: 800;
-      line-height: 1;
-      white-space: nowrap;
-      pointer-events: none;
-    }
-
-    #${CHZZK_RECORD_TIME_ID}[hidden] {
-      display: none !important;
-    }
-
-    #${SEEK_FEEDBACK_ID} {
-      position: fixed;
-      z-index: 2147483644;
-      left: 50%;
-      top: 50%;
-      transform: translate(-50%, -50%);
-      padding: 8px 12px;
-      border: 1px solid rgba(238, 244, 251, 0.16);
-      border-radius: 10px;
-      background: rgba(6, 13, 20, 0.42);
-      color: rgba(244, 251, 255, 0.78);
-      font-size: 17px;
-      font-weight: 900;
-      line-height: 1;
-      pointer-events: none;
-      opacity: 0;
-      transition: opacity 120ms ease;
-    }
-
-    #${SEEK_FEEDBACK_ID}[data-visible="true"] {
-      opacity: 1;
-    }
-
-  `;
-  if (style.textContent !== css) {
-    style.textContent = css;
-  }
-}
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
 function formatElapsed(ms: number): string {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
+  const totalSeconds = Math.max(0, Math.floor(ms / MILLISECONDS_PER_SECOND));
+  const hours = Math.floor(totalSeconds / SECONDS_PER_HOUR);
+  const minutes = Math.floor((totalSeconds % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE);
+  const seconds = totalSeconds % SECONDS_PER_MINUTE;
   if (hours > 0) {
     return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
   }
@@ -776,10 +315,6 @@ function buildRegionSelection(
     width,
     height,
     ...(relative ? { videoRelative: relative } : {}),
-    viewportWidth: window.innerWidth,
-    viewportHeight: window.innerHeight,
-    devicePixelRatio: window.devicePixelRatio || 1,
-    selectedAt: Date.now(),
   };
 }
 
@@ -967,7 +502,7 @@ function computeDirectOutput(crop: { width: number; height: number }): { width: 
 
 function getMultiRegionLimit(settings?: Partial<Settings>): number {
   const value = settings?.multiRegionMaxCount ?? multiRegionMaxCount;
-  return clamp(Math.round(Number(value) || DEFAULT_MULTI_REGION_COUNT), 2, MAX_ACTIVE_REGIONS);
+  return clamp(Math.round(Number(value) || DEFAULT_MULTI_REGION_COUNT), MIN_ACTIVE_REGIONS, MAX_ACTIVE_REGIONS);
 }
 
 function getActiveRegionLimit(): number {
@@ -1034,7 +569,7 @@ function getPairLayoutDirection(crops: DirectCrop[]): "horizontal" | "vertical" 
 }
 
 function getGroupedLayout(crops: DirectCrop[]): DirectLayout | null {
-  if (crops.length < 3 || crops.length > 4) {
+  if (crops.length < MIN_GROUPED_LAYOUT_REGIONS || crops.length > MAX_ACTIVE_REGIONS) {
     return null;
   }
 
@@ -1153,7 +688,7 @@ function computeDirectLayout(crops: DirectCrop[]): DirectLayout {
   };
 }
 
-function selectDirectMimeType(settings: Settings): { mimeType: string; extension: "webm" | "mp4"; outputFormat: "webm" | "mp4" } {
+function selectDirectMimeType(settings: Settings): { mimeType: string; extension: "webm" | "mp4" } {
   const mp4Candidates = [
     'video/mp4;codecs="avc1.42E01E,mp4a.40.2"',
     'video/mp4;codecs="avc1,mp4a.40.2"',
@@ -1165,19 +700,19 @@ function selectDirectMimeType(settings: Settings): { mimeType: string; extension
     "video/webm;codecs=vp9,opus",
     "video/webm",
   ];
-  const candidates = settings.outputFormat === RECORDING_FORMAT.mp4 ? mp4Candidates : webmCandidates;
+  const extension = settings.outputFormat === RECORDING_FORMAT.mp4 ? RECORDING_FORMAT.mp4 : RECORDING_FORMAT.webm;
+  const candidates = extension === RECORDING_FORMAT.mp4 ? mp4Candidates : webmCandidates;
 
   for (const mimeType of candidates) {
     if (MediaRecorder.isTypeSupported(mimeType)) {
       return {
         mimeType,
-        extension: settings.outputFormat === RECORDING_FORMAT.mp4 ? RECORDING_FORMAT.mp4 : RECORDING_FORMAT.webm,
-        outputFormat: settings.outputFormat === RECORDING_FORMAT.mp4 ? RECORDING_FORMAT.mp4 : RECORDING_FORMAT.webm,
+        extension,
       };
     }
   }
 
-  if (settings.outputFormat === RECORDING_FORMAT.mp4) {
+  if (extension === RECORDING_FORMAT.mp4) {
     throw new Error("이 브라우저에서는 MP4 녹화가 제대로 동작하지 않습니다. WebM으로 변경하세요.");
   }
 
@@ -1193,7 +728,7 @@ function buildBaseName(): string {
 }
 
 function sanitizeFilenamePart(value: string): string {
-  return value.replace(/[\\/:*?"<>|]/g, "").replace(/\s+/g, "_").trim().slice(0, 60);
+  return value.replace(/[\\/:*?"<>|]/g, "").replace(/\s+/g, "_").trim().slice(0, MAX_STREAMER_NAME_LENGTH);
 }
 
 function getStreamerNameFromTitle(title: string): string {
@@ -1214,7 +749,7 @@ function getStreamerName(): string {
   ];
   for (const selector of selectors) {
     const text = document.querySelector<HTMLElement>(selector)?.textContent?.trim();
-    if (text && text.length <= 60) {
+    if (text && text.length <= MAX_STREAMER_NAME_LENGTH) {
       return text;
     }
   }
@@ -1310,6 +845,9 @@ function updateResizeMagnifier(video: HTMLVideoElement, clientX: number, clientY
   if (!magnifier) {
     magnifier = document.createElement("div");
     magnifier.id = RESIZE_MAGNIFIER_ID;
+    magnifier.style.setProperty("--crop-clip-magnifier-width", `${RESIZE_MAGNIFIER_WIDTH}px`);
+    magnifier.style.setProperty("--crop-clip-magnifier-height", `${RESIZE_MAGNIFIER_HEIGHT}px`);
+    magnifier.style.setProperty("--crop-clip-magnifier-border-width", `${RESIZE_MAGNIFIER_BORDER}px`);
     magnifier.innerHTML = `<canvas width="${RESIZE_MAGNIFIER_SAMPLE_WIDTH}" height="${RESIZE_MAGNIFIER_SAMPLE_HEIGHT}"></canvas>`;
     document.body.appendChild(magnifier);
   }
@@ -1344,10 +882,14 @@ function updateResizeMagnifier(video: HTMLVideoElement, clientX: number, clientY
 
   const width = RESIZE_MAGNIFIER_WIDTH + RESIZE_MAGNIFIER_BORDER * 2;
   const height = RESIZE_MAGNIFIER_HEIGHT + RESIZE_MAGNIFIER_BORDER * 2;
-  const preferredLeft = clientX + 18 + width <= window.innerWidth ? clientX + 18 : clientX - width - 18;
-  const preferredTop = clientY - height - 18 >= 0 ? clientY - height - 18 : clientY + 18;
-  magnifier.style.left = `${clamp(preferredLeft, 8, Math.max(8, window.innerWidth - width - 8))}px`;
-  magnifier.style.top = `${clamp(preferredTop, 8, Math.max(8, window.innerHeight - height - 8))}px`;
+  const preferredLeft = clientX + MAGNIFIER_POINTER_OFFSET_PX + width <= window.innerWidth
+    ? clientX + MAGNIFIER_POINTER_OFFSET_PX
+    : clientX - width - MAGNIFIER_POINTER_OFFSET_PX;
+  const preferredTop = clientY - height - MAGNIFIER_POINTER_OFFSET_PX >= 0
+    ? clientY - height - MAGNIFIER_POINTER_OFFSET_PX
+    : clientY + MAGNIFIER_POINTER_OFFSET_PX;
+  magnifier.style.left = `${clamp(preferredLeft, FLOATING_UI_VIEWPORT_PADDING_PX, Math.max(FLOATING_UI_VIEWPORT_PADDING_PX, window.innerWidth - width - FLOATING_UI_VIEWPORT_PADDING_PX))}px`;
+  magnifier.style.top = `${clamp(preferredTop, FLOATING_UI_VIEWPORT_PADDING_PX, Math.max(FLOATING_UI_VIEWPORT_PADDING_PX, window.innerHeight - height - FLOATING_UI_VIEWPORT_PADDING_PX))}px`;
 }
 
 function blobFromCanvas(canvas: HTMLCanvasElement): Promise<Blob> {
@@ -1364,10 +906,10 @@ function blobFromCanvas(canvas: HTMLCanvasElement): Promise<Blob> {
 }
 
 function positionScreenshotStack(stack: HTMLElement, rect = getVideoSelectionRect()): void {
-  const left = rect ? rect.left + 10 : 10;
-  const top = rect ? rect.top + 10 : 10;
-  stack.style.left = `${clamp(left, 8, Math.max(8, window.innerWidth - 80))}px`;
-  stack.style.top = `${clamp(top, 8, Math.max(8, window.innerHeight - 80))}px`;
+  const left = rect ? rect.left + SCREENSHOT_STACK_OFFSET_PX : SCREENSHOT_STACK_OFFSET_PX;
+  const top = rect ? rect.top + SCREENSHOT_STACK_OFFSET_PX : SCREENSHOT_STACK_OFFSET_PX;
+  stack.style.left = `${clamp(left, FLOATING_UI_VIEWPORT_PADDING_PX, Math.max(FLOATING_UI_VIEWPORT_PADDING_PX, window.innerWidth - SCREENSHOT_STACK_VIEWPORT_GUTTER_PX))}px`;
+  stack.style.top = `${clamp(top, FLOATING_UI_VIEWPORT_PADDING_PX, Math.max(FLOATING_UI_VIEWPORT_PADDING_PX, window.innerHeight - SCREENSHOT_STACK_VIEWPORT_GUTTER_PX))}px`;
 }
 
 function getScreenshotStack(): HTMLDivElement {
@@ -1611,12 +1153,11 @@ function queueDirectChunkCheckpoint(session: DirectRecordingSession, blob: Blob)
         const response = await sendRuntimeMessage({
           type: "STORE_RECORDING_CHUNK",
           chunk: {
-            id: `${session.recordingId}:chunk:${String(++session.checkpointIndex).padStart(6, "0")}`,
+            id: `${session.recordingId}:chunk:${String(++session.checkpointIndex).padStart(CHUNK_INDEX_DIGITS, "0")}`,
             recordingId: session.recordingId,
             index: session.checkpointIndex,
             mimeType: session.mimeType,
             extension: session.extension,
-            outputFormat: session.outputFormat,
             baseName: session.baseName,
             createdAt: session.createdAt,
             capturedAt,
@@ -1767,7 +1308,7 @@ async function startDirectPart(session: DirectRecordingSession): Promise<void> {
     });
   };
 
-  recorder.start(1000);
+  recorder.start(MILLISECONDS_PER_SECOND);
 }
 
 async function startDirectRecording(command: Extract<ContentCommand, { type: "START_DIRECT_RECORDING" }>): Promise<MessageResponse> {
@@ -1820,7 +1361,7 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
     }
   };
 
-  const frameRate = command.settings.enable60fps ? 60 : 30;
+  const frameRate = command.settings.enable60fps ? HIGH_RECORDING_FRAME_RATE : STANDARD_RECORDING_FRAME_RATE;
   const canvasStream = canvas.captureStream(frameRate);
   try {
     paintPlacements(layout.placements);
@@ -1881,12 +1422,11 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
     canvas,
     mimeType: mime.mimeType,
     extension: mime.extension,
-    outputFormat: mime.outputFormat,
     baseName: buildBaseName(),
     checkpointIndex: 0,
     checkpointSaveChain: Promise.resolve(),
     createdAt: Date.now(),
-    drawTimerId: window.setInterval(drawFrame, Math.max(16, Math.round(1000 / frameRate))),
+    drawTimerId: window.setInterval(drawFrame, Math.round(MILLISECONDS_PER_SECOND / frameRate)),
     stopRequested: false,
     cancelRequested: false,
     cleanedUp: false,
@@ -1962,7 +1502,6 @@ function removeSelectionBorders(): void {
 }
 
 function showSelectionBorders(regions: RegionSelection[]): void {
-  ensureStyle();
   removeSelectionBorders();
 
   if (regions.length === 0) {
@@ -1975,6 +1514,7 @@ function showSelectionBorders(regions: RegionSelection[]): void {
     const border = document.createElement("div");
     border.id = index === 0 ? BORDER_ID : `${BORDER_ID}-${index}`;
     border.className = BORDER_CLASS;
+    border.style.setProperty("--crop-clip-border-width", `${BORDER_WIDTH}px`);
     border.dataset.regionIndex = String(index);
     border.innerHTML = `
       ${getRegionToolbarHtml()}
@@ -2207,7 +1747,7 @@ function snapRegionEdges(
   });
 
   return {
-    region: buildRegionSelection(left, top, Math.max(MIN_WIDTH, right - left), Math.max(MIN_HEIGHT, bottom - top), renderedRect),
+    region: buildRegionSelection(left, top, Math.max(MIN_REGION_DIMENSION_PX, right - left), Math.max(MIN_REGION_DIMENSION_PX, bottom - top), renderedRect),
     guides,
   };
 }
@@ -2276,6 +1816,13 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
   const clearButton = border.querySelector<HTMLButtonElement>(".clear-region");
   const moveButton = border.querySelector<HTMLButtonElement>(".move-region");
   const addButton = border.querySelector<HTMLButtonElement>(".add-region");
+  const bindClick = (button: HTMLButtonElement | null, handler: (event: MouseEvent) => void) => {
+    if (!button) {
+      return;
+    }
+    button.addEventListener("click", handler);
+    cleanupCallbacks.push(() => button.removeEventListener("click", handler));
+  };
 
   const activate = () => setActiveRegion(index);
   border.addEventListener("pointerdown", activate);
@@ -2342,7 +1889,7 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
         if (recordTime && currentRecordingState.startedAt) {
           recordTime.textContent = formatElapsed(Date.now() - currentRecordingState.startedAt);
         }
-      }, 1000);
+      }, MILLISECONDS_PER_SECOND);
     } else if (!needsTimer && recordTimerId !== null) {
       window.clearInterval(recordTimerId);
       recordTimerId = null;
@@ -2392,10 +1939,7 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
   };
 
   updateRecordButton();
-  recordButton?.addEventListener("click", onRecord);
-  if (recordButton) {
-    cleanupCallbacks.push(() => recordButton.removeEventListener("click", onRecord));
-  }
+  bindClick(recordButton, onRecord);
 
   const onCancelRecording = (event: MouseEvent) => {
     event.preventDefault();
@@ -2410,10 +1954,7 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
     });
   };
 
-  cancelButton?.addEventListener("click", onCancelRecording);
-  if (cancelButton) {
-    cleanupCallbacks.push(() => cancelButton.removeEventListener("click", onCancelRecording));
-  }
+  bindClick(cancelButton, onCancelRecording);
 
   const onScreenshot = (event: MouseEvent) => {
     event.preventDefault();
@@ -2422,10 +1963,7 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
     void captureRegionScreenshot();
   };
 
-  screenshotButton?.addEventListener("click", onScreenshot);
-  if (screenshotButton) {
-    cleanupCallbacks.push(() => screenshotButton.removeEventListener("click", onScreenshot));
-  }
+  bindClick(screenshotButton, onScreenshot);
 
   cleanupCallbacks.push(() => {
     if (recordTimerId !== null) {
@@ -2443,10 +1981,7 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
     removeRegionAtIndex(index);
   };
 
-  clearButton?.addEventListener("click", onClear);
-  if (clearButton) {
-    cleanupCallbacks.push(() => clearButton.removeEventListener("click", onClear));
-  }
+  bindClick(clearButton, onClear);
 
   const onAdd = (event: MouseEvent) => {
     event.preventDefault();
@@ -2457,10 +1992,7 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
     startSelection();
   };
 
-  addButton?.addEventListener("click", onAdd);
-  if (addButton) {
-    cleanupCallbacks.push(() => addButton.removeEventListener("click", onAdd));
-  }
+  bindClick(addButton, onAdd);
 
   const startMove = (event: PointerEvent) => {
     const region = currentRegions[index];
@@ -2550,8 +2082,8 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
       return;
     }
     stopActiveDrag?.();
-    const minWidth = Math.min(MIN_WIDTH, bounds.width);
-    const minHeight = Math.min(MIN_HEIGHT, bounds.height);
+    const minWidth = Math.min(MIN_REGION_DIMENSION_PX, bounds.width);
+    const minHeight = Math.min(MIN_REGION_DIMENSION_PX, bounds.height);
     const modifierHud = border.querySelector<HTMLElement>(".resize-modifiers");
     const shiftModifier = border.querySelector<HTMLElement>('[data-modifier="shift"]');
     const altModifier = border.querySelector<HTMLElement>('[data-modifier="alt"]');
@@ -2712,7 +2244,7 @@ function normalizeRegion(raw: unknown): RegionSelection | null {
   }
 
   const value = raw as Partial<RegionSelection>;
-  const fields = [value.x, value.y, value.width, value.height, value.viewportWidth, value.viewportHeight, value.devicePixelRatio, value.selectedAt];
+  const fields = [value.x, value.y, value.width, value.height];
   if (fields.some((item) => !Number.isFinite(Number(item))) || Number(value.width) <= 0 || Number(value.height) <= 0) {
     return null;
   }
@@ -2736,10 +2268,6 @@ function normalizeRegion(raw: unknown): RegionSelection | null {
     width: Number(value.width),
     height: Number(value.height),
     ...(videoRelative ? { videoRelative } : {}),
-    viewportWidth: Math.max(1, Number(value.viewportWidth)),
-    viewportHeight: Math.max(1, Number(value.viewportHeight)),
-    devicePixelRatio: Math.max(0.1, Number(value.devicePixelRatio)),
-    selectedAt: Number(value.selectedAt),
   };
 }
 
@@ -2980,7 +2508,6 @@ function startSelection(): void {
     return;
   }
 
-  ensureStyle();
   const overlay = document.createElement("div");
   overlay.id = OVERLAY_ID;
   overlay.innerHTML = `
@@ -3076,8 +2603,8 @@ function startSelection(): void {
     const width = Math.abs(endX - startX);
     const height = Math.abs(endY - startY);
 
-    if (width < MIN_WIDTH || height < MIN_HEIGHT) {
-      setOverlayError(`영역은 최소 ${MIN_WIDTH}px x ${MIN_HEIGHT}px 이상이어야 합니다.`);
+    if (width < MIN_REGION_DIMENSION_PX || height < MIN_REGION_DIMENSION_PX) {
+      setOverlayError(`영역은 최소 ${MIN_REGION_DIMENSION_PX}px x ${MIN_REGION_DIMENSION_PX}px 이상이어야 합니다.`);
       updateSelectionBox(selectionBox, 0, 0, 0, 0);
       return;
     }
@@ -3182,58 +2709,43 @@ function setChzzkToolContent(button: HTMLElement, contentKey: string, html: stri
   button.innerHTML = html;
 }
 
+function setChzzkButtonPresentation(button: HTMLElement, contentKey: string, label: string, icon: string): void {
+  button.setAttribute("aria-label", label);
+  button.setAttribute("type", "button");
+  button.removeAttribute("title");
+  setChzzkToolContent(button, contentKey, `
+    <span class="pzp-button__tooltip pzp-button__tooltip--top">${label}</span>
+    <span class="pzp-ui-icon pzp-pc-setting-button__icon">${icon}</span>
+  `);
+}
+
 function setChzzkRecordButtonContent(button: HTMLElement): void {
   const isFullRecording = currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode === RECORDING_MODE.full;
   const isRegionRecording = currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode !== RECORDING_MODE.full;
   const label = withShortcut(isFullRecording ? "전체 녹화 정지" : "전체 녹화 시작", "fullRecord");
-  button.setAttribute("aria-label", label);
-  button.setAttribute("type", "button");
-  button.removeAttribute("title");
   button.toggleAttribute("data-recording", isFullRecording);
   if (button instanceof HTMLButtonElement) {
     button.disabled = isRegionRecording;
   }
-  setChzzkToolContent(button, `record:${label}:${isFullRecording}`, `
-    <span class="pzp-button__tooltip pzp-button__tooltip--top">${label}</span>
-    <span class="pzp-ui-icon pzp-pc-setting-button__icon">${getRecordIconSvg(isFullRecording)}</span>
-  `);
+  setChzzkButtonPresentation(button, `record:${label}:${isFullRecording}`, label, getRecordIconSvg(isFullRecording));
 }
 
 function setChzzkCancelButtonContent(button: HTMLElement): void {
   const label = withShortcut("녹화 취소", "cancelRecording");
-  button.setAttribute("aria-label", label);
-  button.setAttribute("type", "button");
-  button.removeAttribute("title");
-  setChzzkToolContent(button, `cancel:${label}`, `
-    <span class="pzp-button__tooltip pzp-button__tooltip--top">${label}</span>
-    <span class="pzp-ui-icon pzp-pc-setting-button__icon">${getTrashIconSvg()}</span>
-  `);
+  setChzzkButtonPresentation(button, `cancel:${label}`, label, getTrashIconSvg());
 }
 
 function setChzzkScreenshotButtonContent(button: HTMLElement): void {
   const label = withShortcut("전체 스크린샷", "fullScreenshot");
-  button.setAttribute("aria-label", label);
-  button.setAttribute("type", "button");
-  button.removeAttribute("title");
-  setChzzkToolContent(button, `screenshot:${label}`, `
-    <span class="pzp-button__tooltip pzp-button__tooltip--top">${label}</span>
-    <span class="pzp-ui-icon pzp-pc-setting-button__icon">${getCameraIconSvg()}</span>
-  `);
+  setChzzkButtonPresentation(button, `screenshot:${label}`, label, getCameraIconSvg());
 }
 
 function setChzzkButtonContent(button: HTMLElement): void {
   const label = withShortcut(PLAYER_TOOL_LABEL, "selectRegion");
-  button.setAttribute("aria-label", label);
-  button.setAttribute("type", "button");
-  button.removeAttribute("title");
-  setChzzkToolContent(button, `select:${label}`, `
-    <span class="pzp-button__tooltip pzp-button__tooltip--top">${label}</span>
-    <span class="pzp-ui-icon pzp-pc-setting-button__icon">${getCropIconSvg()}</span>
-  `);
+  setChzzkButtonPresentation(button, `select:${label}`, label, getCropIconSvg());
 }
 
 function showSeekFeedback(deltaSeconds: number): void {
-  ensureStyle();
   const videoRect = findPrimaryVideoElement()?.getBoundingClientRect();
   const feedback = document.getElementById(SEEK_FEEDBACK_ID) ?? document.createElement("div");
   feedback.id = SEEK_FEEDBACK_ID;
@@ -3254,7 +2766,7 @@ function showSeekFeedback(deltaSeconds: number): void {
   seekFeedbackTimerId = window.setTimeout(() => {
     feedback.dataset.visible = "false";
     seekFeedbackTimerId = null;
-  }, 650);
+  }, SEEK_FEEDBACK_DURATION_MS);
 }
 
 function handlePlayerScreenshotActivation(event: MouseEvent): void {
@@ -3430,7 +2942,7 @@ function getVisiblePzpButtons(root: ParentNode = document): HTMLElement[] {
 
 function compareBottomRight(a: DOMRect, b: DOMRect): number {
   const bottomDifference = b.bottom - a.bottom;
-  if (Math.abs(bottomDifference) > 24) {
+  if (Math.abs(bottomDifference) > PLAYER_BUTTON_ROW_TOLERANCE_PX) {
     return bottomDifference;
   }
   return b.right - a.right;
@@ -3462,7 +2974,7 @@ function findChzzkButtonHost(): HTMLElement | null {
     }
 
     const buttonRect = button.getBoundingClientRect();
-    if (videoRect && (buttonRect.bottom < videoRect.top || buttonRect.top > videoRect.bottom + 48)) {
+    if (videoRect && (buttonRect.bottom < videoRect.top || buttonRect.top > videoRect.bottom + PLAYER_TOOL_VERTICAL_TOLERANCE_PX)) {
       continue;
     }
 
@@ -3477,7 +2989,7 @@ function findChzzkButtonHost(): HTMLElement | null {
       if (!videoRect) {
         return true;
       }
-      return item.rect.bottom >= videoRect.top && item.rect.top <= videoRect.bottom + 48;
+      return item.rect.bottom >= videoRect.top && item.rect.top <= videoRect.bottom + PLAYER_TOOL_VERTICAL_TOLERANCE_PX;
     })
     .sort((a, b) => compareBottomRight(a.rect, b.rect));
 
@@ -3641,7 +3153,7 @@ function syncChzzkRecordTimer(): void {
     if (timeBadge && currentRecordingState.startedAt) {
       timeBadge.textContent = formatElapsed(Date.now() - currentRecordingState.startedAt);
     }
-  }, 1000);
+  }, MILLISECONDS_PER_SECOND);
 }
 
 function stopChzzkToolDiscovery(): void {
@@ -3676,7 +3188,6 @@ function installChzzkToolButton(): void {
     return;
   }
 
-  ensureStyle();
   chzzkToolObserver?.disconnect();
   chzzkToolObserver = null;
   stopChzzkToolDiscovery();
@@ -3891,7 +3402,11 @@ function findPrimaryVideoElement(): HTMLVideoElement | null {
     const hasSource = Boolean(video.currentSrc || video.srcObject || video.getAttribute("src"));
     const hasFrame = video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0 && video.videoHeight > 0;
     const isPlaying = hasFrame && !video.paused && !video.ended;
-    const score = visibleArea * 4 + area + (hasSource ? area : 0) + (hasFrame ? area * 2 : 0) + (isPlaying ? area * 4 : 0);
+    const score = visibleArea * VISIBLE_VIDEO_SCORE_WEIGHT
+      + area
+      + (hasSource ? area : 0)
+      + (hasFrame ? area * VIDEO_FRAME_SCORE_WEIGHT : 0)
+      + (isPlaying ? area * VISIBLE_VIDEO_SCORE_WEIGHT : 0);
     if (score >= bestScore) {
       best = video;
       bestScore = score;

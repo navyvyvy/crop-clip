@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { bytesToMegabytes, estimateRangeSize, getExpectedSplitCount, getNextSizeSplitSeconds, isFullTimeRange, megabytesToBytes, normalizeTimeRange, parseSegmentTimeList, parseTimeInput, snapTimeRangeValue, updateTimeRangeHandle } from "../dist/shared/time_range.js";
+import { bytesToMegabytes, estimateRangeSize, floorTimeToStep, getExpectedSplitCount, getNextSizeSplitSeconds, isFullTimeRange, megabytesToBytes, normalizeTimeRange, parseSegmentTimeList, parseTimeInput, snapTimeRangeValue, updateTimeRangeHandle } from "../dist/shared/time_range.js";
 
 assert.deepEqual(normalizeTimeRange(-5, 80, 50), { start: 0, end: 50 });
 assert.deepEqual(normalizeTimeRange(10, 40, 50), { start: 10, end: 40 });
@@ -11,6 +11,7 @@ assert.equal(isFullTimeRange({ start: 10, end: 40 }, 50), false);
 assert.equal(estimateRangeSize(10_000, { start: 10, end: 40 }, 50), 6_000);
 assert.equal(megabytesToBytes(40), 40_000_000);
 assert.equal(bytesToMegabytes(40_000_000), 40);
+assert.equal(floorTimeToStep(8.79), 8.7);
 assert.equal(getExpectedSplitCount(8, 3), 3);
 assert.equal(getExpectedSplitCount(9, 3), 3);
 assert.equal(getExpectedSplitCount(9.000001, 3), 3);

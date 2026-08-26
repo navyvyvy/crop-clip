@@ -1,4 +1,4 @@
-import { rm, mkdir, readdir, stat, copyFile, readFile, writeFile } from "node:fs/promises";
+import { rm, mkdir, readdir, copyFile, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import process from "node:process";
@@ -39,8 +39,7 @@ async function copyStaticFiles(fromDir, toDir) {
       continue;
     }
 
-    const info = await stat(sourcePath);
-    if (info.isFile()) {
+    if (entry.isFile()) {
       await copyFile(sourcePath, targetPath);
     }
   }
@@ -127,10 +126,6 @@ async function writeZip(sourceDir, zipPath) {
   let offset = 0;
 
   for (const file of await listFiles(sourceDir)) {
-    if (file.fullPath === zipPath) {
-      continue;
-    }
-
     const data = await readFile(file.fullPath);
     const compressed = deflateRawSync(data);
     const name = Buffer.from(file.name);

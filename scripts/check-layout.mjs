@@ -3,6 +3,7 @@ import fs from "node:fs";
 import ts from "typescript";
 
 const sourceText = fs.readFileSync(new URL("../src/content/region_selector.ts", import.meta.url), "utf8");
+const contentStyleText = fs.readFileSync(new URL("../src/content/region_selector.css", import.meta.url), "utf8");
 const sourceFile = ts.createSourceFile("region_selector.ts", sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 const serviceWorkerText = fs.readFileSync(new URL("../src/background/service_worker.ts", import.meta.url), "utf8");
 const serviceWorkerFile = ts.createSourceFile("service_worker.ts", serviceWorkerText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
@@ -13,6 +14,15 @@ const messagesText = fs.readFileSync(new URL("../src/shared/messages.ts", import
 const idbText = fs.readFileSync(new URL("../src/shared/idb.ts", import.meta.url), "utf8");
 const manifest = JSON.parse(fs.readFileSync(new URL("../manifest.json", import.meta.url), "utf8"));
 assert.equal(manifest.content_scripts[0].exclude_matches, undefined);
+assert.deepEqual(manifest.content_scripts[0].css, ["content/region_selector.css"]);
+assert.match(contentStyleText, /#crop-clip-overlay/);
+assert.match(contentStyleText, /\.crop-clip-border/);
+assert.match(contentStyleText, /outline: var\(--crop-clip-border-width\)/);
+assert.match(contentStyleText, /width: var\(--crop-clip-magnifier-width\)/);
+assert.match(sourceText, /setProperty\("--crop-clip-border-width", `\$\{BORDER_WIDTH\}px`\)/);
+assert.match(sourceText, /setProperty\("--crop-clip-magnifier-width", `\$\{RESIZE_MAGNIFIER_WIDTH\}px`\)/);
+assert.doesNotMatch(contentStyleText, /\$\{/);
+assert.match(sourceText, /document\.getElementById\("crop-clip-style"\)\?\.remove\(\)/);
 assert.match(sourceText, /function suspendPlayerTools\(\)/);
 assert.match(sourceText, /currententrychange/);
 assert.match(sourceText, /chzzkToolObserver\.observe\(controlsRoot, \{ childList: true, subtree: true \}\)/);
@@ -30,7 +40,8 @@ assert.match(sourceText, /function mutationAddsChzzkButtonHost\(records: Mutatio
 assert.doesNotMatch(sourceText, /regionLayoutTimerId/);
 assert.match(sourceText, /new ResizeObserver\(requestRegionLayoutSync\)/);
 assert.match(sourceText, /if \(!toolHost\.isConnected \|\| missingExpectedButton\) \{\s*syncPlayerToolsForLocation\(\);\s*\} else if \(mutationAddsChzzkButtonHost\(records\) && findChzzkButtonHost\(\) !== toolHost\)/);
-assert.match(sourceText, /if \(style\.textContent !== css\)/);
+assert.doesNotMatch(sourceText, /function ensureStyle\(/);
+assert.match(serviceWorkerText, /chrome\.scripting\.insertCSS\([\s\S]*?content\/region_selector\.css/);
 assert.match(sourceText, /applyBorderGeometry\(border, region, renderedRect\)/);
 assert.match(sourceText, /const bounds = selectionBounds;/);
 assert.match(sourceText, /getContext\("2d", \{ alpha: false, desynchronized: true \}\)/);
@@ -73,6 +84,7 @@ assert.match(resultText, /querySelectorAll<HTMLButtonElement>\("\[data-split-mod
 assert.match(resultText, /빠른 변환을 지원하지 않아 실시간으로 처리 중입니다/);
 assert.match(settingsText, /enableAutoDownloadRecording: false/);
 assert.match(settingsText, /enableAutoDownloadSplit: false/);
+assert.match(settingsText, /const DEFAULT_VIDEO_BITS_PER_SECOND = 6_000_000/);
 assert.match(storageText, /enableAutoDownloadRecording: Boolean\(raw\?\.enableAutoDownloadRecording\)/);
 assert.match(storageText, /enableAutoDownloadSplit: Boolean\(raw\?\.enableAutoDownloadSplit\)/);
 assert.match(storageText, /resultTabId: Number\.isFinite\(raw\?\.resultTabId as number\)/);
@@ -111,6 +123,7 @@ const functionNames = new Set([
   "getRecordingChunkSliceRanges",
   "runRecordingTerminalOperation",
   "normalizeRecordingState",
+  "normalizeRegion",
   "regionEdges",
   "clamp",
 ]);
@@ -125,10 +138,10 @@ function collectStatements(node, file) {
 collectStatements(sourceFile, sourceFile);
 collectStatements(serviceWorkerFile, serviceWorkerFile);
 const statements = selectedStatements.join("\n");
-const runtime = ts.transpileModule(`const recordingTerminalOperations = new Map();\nconst RECORDING_STATUS = { idle: "idle", recording: "recording", completed: "completed", error: "error" };\nconst RECORDING_MODE = { region: "region", full: "full" };\n${statements}\nreturn { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, getRecordingChunkSliceRanges, runRecordingTerminalOperation, normalizeRecordingState };`, {
+const runtime = ts.transpileModule(`const recordingTerminalOperations = new Map();\nconst RECORDING_STATUS = { idle: "idle", recording: "recording", completed: "completed", error: "error" };\nconst RECORDING_MODE = { region: "region", full: "full" };\nconst MILLISECONDS_PER_SECOND = 1_000;\nconst SECONDS_PER_MINUTE = 60;\nconst SECONDS_PER_HOUR = 3_600;\nconst MIN_GROUPED_LAYOUT_REGIONS = 3;\nconst MAX_ACTIVE_REGIONS = 4;\n${statements}\nreturn { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, getRecordingChunkSliceRanges, runRecordingTerminalOperation, normalizeRecordingState, normalizeRegion };`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
 }).outputText;
-const { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, getRecordingChunkSliceRanges, runRecordingTerminalOperation, normalizeRecordingState } = new Function(runtime)();
+const { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, getRecordingChunkSliceRanges, runRecordingTerminalOperation, normalizeRecordingState, normalizeRegion } = new Function(runtime)();
 
 assert.equal(getStreamerNameFromTitle("치지직 게임 - CHZZK"), "치지직 게임");
 assert.equal(getStreamerNameFromTitle("치지직 스포츠 - CHZZK"), "치지직 스포츠");
@@ -173,6 +186,10 @@ assert.deepEqual(await Promise.all([firstTerminalOperation, secondTerminalOperat
 assert.deepEqual(terminalOrder, ["first-start", "first-end", "second"]);
 assert.deepEqual(normalizeRecordingState({ status: "recording", recordingId: "recording-tab", startedAt: 1_000, mode: "full" }, "other-tab"), { status: "idle" });
 assert.deepEqual(normalizeRecordingState({ status: "recording", recordingId: "recording-tab", startedAt: 1_000, mode: "full" }, "recording-tab"), { status: "recording", startedAt: 1_000, mode: "full" });
+const minimalRegion = { x: 10, y: 20, width: 300, height: 200 };
+assert.deepEqual(normalizeRegion(minimalRegion), minimalRegion);
+assert.deepEqual(normalizeRegion({ ...minimalRegion, viewportWidth: 1920, viewportHeight: 1080, devicePixelRatio: 2, selectedAt: 1_000 }), minimalRegion);
+assert.equal(normalizeRegion({ ...minimalRegion, width: 0 }), null);
 const resizeStart = { left: 100, top: 100, right: 300, bottom: 200 };
 const resizeBounds = { left: 0, top: 0, right: 500, bottom: 500 };
 assert.deepEqual(computeResizedEdges(resizeStart, "e", 50, 0, resizeBounds, 50, 50, true, false), {
