@@ -934,6 +934,13 @@ function applySplitValueDefault(): void {
 }
 
 function getSplitPresetValue(button: HTMLButtonElement): number {
+  const count = Number(button.dataset.splitCount);
+  if (count === 3 || count === 4) {
+    const range = getSelectedTimeRange();
+    const steps = Number(((range.end - range.start) / count / TIME_STEP_SECONDS).toFixed(10));
+    return Number((Math.ceil(steps) * TIME_STEP_SECONDS).toFixed(TIME_DECIMAL_PLACES));
+  }
+
   const ratio = Number(button.dataset.splitRatio);
   if (Number.isFinite(ratio) && ratio > 0) {
     const duration = getFullSourceDuration();
@@ -948,12 +955,15 @@ function updateSplitPresetButtons(): void {
   const mode = elements.splitModeSelect.value;
   const maximum = Number(elements.splitValueInput.max);
   const currentValue = Number(elements.splitValueInput.value);
+  const range = getSelectedTimeRange();
   for (const button of elements.splitPresetButtons) {
     const matchesMode = button.dataset.splitMode === mode;
     const value = getSplitPresetValue(button);
+    const count = Number(button.dataset.splitCount);
+    const unavailableCount = Boolean(count) && getExpectedSplitCount(range.end - range.start, value) !== count;
     button.hidden = !matchesMode;
-    button.disabled = workBusy || parts.length === 0 || value >= maximum;
-    button.setAttribute("aria-pressed", String(matchesMode && value === currentValue));
+    button.disabled = workBusy || parts.length === 0 || value >= maximum || unavailableCount;
+    button.setAttribute("aria-pressed", String(matchesMode && !unavailableCount && value === currentValue));
   }
 }
 

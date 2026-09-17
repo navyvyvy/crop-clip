@@ -106,6 +106,55 @@ assert.match(resultText, /if \(autoDownloadSplit\) \{\s*await downloadSourcesSeq
 assert.doesNotMatch(messagesText, /CANCEL_RECORDING_DELETION/);
 assert.doesNotMatch(idbText, /openKeyCursor/);
 assert.match(idbText, /\.openCursor\(IDBKeyRange\.only\(recordingId\)\)/);
+
+const resultHtml = fs.readFileSync(new URL("../src/result/result.html", import.meta.url), "utf8");
+assert.match(resultHtml, /data-split-count="3"[^>]*>3분할<\/button>/);
+assert.match(resultHtml, /data-split-count="4"[^>]*>4분할<\/button>/);
+assert.doesNotMatch(resultHtml, /data-split-mode="duration" data-split-value="(?:25|40)"/);
+const resultFile = ts.createSourceFile("result.ts", resultText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+const presetCode = resultFile.statements
+  .filter((node) => ts.isFunctionDeclaration(node) && ["getSplitPresetValue", "updateSplitPresetButtons"].includes(node.name?.text))
+  .map((node) => node.getText(resultFile)).join("\n");
+const timeRangeCode = ts.transpileModule(fs.readFileSync(new URL("../src/shared/time_range.ts", import.meta.url), "utf8"), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
+}).outputText;
+const { getExpectedSplitCount } = await import(`data:text/javascript;base64,${Buffer.from(timeRangeCode).toString("base64")}`);
+const presetRuntime = ts.transpileModule(presetCode, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
+}).outputText;
+const presetButtons = [3, 4].map((count) => ({
+  dataset: { splitMode: "duration", splitCount: String(count) },
+  setAttribute(name, value) { this[name] = value; },
+}));
+const presetElements = { splitModeSelect: { value: "duration" }, splitValueInput: { value: "", max: "" }, splitPresetButtons: presetButtons };
+let presetRange = { start: 0, end: 0 };
+const presetFunctions = new Function("elements", "getSelectedTimeRange", "getExpectedSplitCount", `
+  const TIME_STEP_SECONDS = 0.1, TIME_DECIMAL_PLACES = 1, parts = [{}], workBusy = false;
+  ${presetRuntime}
+  return { getSplitPresetValue, updateSplitPresetButtons };
+`)(presetElements, () => presetRange, getExpectedSplitCount);
+for (const [start, end, expectedValues] of [[0, 120, [40, 30]], [10, 20, [3.4, 2.5]], [10, 18.7, [2.9, 2.2]], [4.2, 5.4, [0.4, 0.3]]]) {
+  presetRange = { start, end };
+  presetElements.splitValueInput.max = String(end - start);
+  for (const [index, button] of presetButtons.entries()) {
+    const value = presetFunctions.getSplitPresetValue(button);
+    assert.equal(value, expectedValues[index]);
+    assert.equal(getExpectedSplitCount(end - start, value), Number(button.dataset.splitCount));
+    presetElements.splitValueInput.value = String(value);
+    presetFunctions.updateSplitPresetButtons();
+    assert.equal(button.disabled, false);
+    assert.equal(button["aria-pressed"], "true");
+  }
+}
+presetRange = { start: 0, end: 0.9 };
+presetElements.splitValueInput.max = "0.9";
+presetElements.splitValueInput.value = "0.3";
+presetFunctions.updateSplitPresetButtons();
+assert.equal(presetButtons[0].disabled, false);
+assert.equal(presetButtons[1].disabled, true);
+assert.equal(presetButtons[1]["aria-pressed"], "false");
+assert.equal(presetFunctions.getSplitPresetValue({ dataset: { splitValue: "40" } }), 40);
+
 const functionNames = new Set([
   "computeDirectOutput",
   "scaleLayout",
