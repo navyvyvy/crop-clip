@@ -72,6 +72,7 @@ const elements = {
   splitUnitLabel: document.getElementById("split-unit-label") as HTMLSpanElement,
   splitPresetButtons: Array.from(document.querySelectorAll<HTMLButtonElement>("[data-split-mode]")),
   splitButton: document.getElementById("split-button") as HTMLButtonElement,
+  splitEstimate: document.getElementById("split-estimate") as HTMLParagraphElement,
   splitStatus: document.getElementById("split-status") as HTMLParagraphElement,
   splitProgress: document.getElementById("split-progress") as HTMLDivElement,
   splitProgressBar: document.getElementById("split-progress-bar") as HTMLDivElement,
@@ -120,6 +121,7 @@ interface SplitSegment {
 }
 
 interface FfmpegLike {
+  terminate(): void;
   on(event: "progress", callback: (event: { progress?: number; time?: number }) => void): void;
   load(options: { coreURL: string; wasmURL: string }): Promise<unknown>;
   writeFile(path: string, data: Uint8Array): Promise<unknown>;
@@ -416,10 +418,15 @@ async function loadFfmpeg(): Promise<FfmpegLike> {
           setProgressPercent(ffmpegProgressBase + progress * (FFMPEG_EXEC_PROGRESS_MAX - ffmpegProgressBase));
         }
       });
-      await ffmpeg.load({
-        coreURL: chrome.runtime.getURL("vendor/ffmpeg/core/ffmpeg-core.js"),
-        wasmURL: chrome.runtime.getURL("vendor/ffmpeg/core/ffmpeg-core.wasm"),
-      });
+      try {
+        await ffmpeg.load({
+          coreURL: chrome.runtime.getURL("vendor/ffmpeg/core/ffmpeg-core.js"),
+          wasmURL: chrome.runtime.getURL("vendor/ffmpeg/core/ffmpeg-core.wasm"),
+        });
+      } catch (error) {
+        ffmpeg.terminate();
+        throw error;
+      }
       setFfmpegProgressBase(FFMPEG_READY_PERCENT);
       return ffmpeg;
     })().catch((error) => {
@@ -429,6 +436,13 @@ async function loadFfmpeg(): Promise<FfmpegLike> {
   }
 
   return ffmpegLoadPromise;
+}
+
+async function releaseFfmpeg(): Promise<void> {
+  const pending = ffmpegLoadPromise;
+  ffmpegLoadPromise = null;
+  const ffmpeg = await pending?.catch(() => null);
+  ffmpeg?.terminate();
 }
 
 async function deleteFfmpegFile(ffmpeg: FfmpegLike, name: string, bestEffort = false): Promise<void> {
@@ -965,6 +979,29 @@ function updateSplitPresetButtons(): void {
     button.disabled = workBusy || parts.length === 0 || value >= maximum || unavailableCount;
     button.setAttribute("aria-pressed", String(matchesMode && !unavailableCount && value === currentValue));
   }
+  updateSplitEstimate();
+}
+
+function updateSplitEstimate(): void {
+  const range = getSelectedTimeRange();
+  const duration = range.end - range.start;
+  const seconds = Math.max(TIME_STEP_SECONDS, Number(elements.splitValueInput.value));
+  elements.splitEstimate.hidden = parts.length === 0
+    || elements.splitModeSelect.value !== "duration"
+    || !elements.splitValueInput.value
+    || !Number.isFinite(seconds)
+    || seconds >= roundTrimTime(duration);
+  if (elements.splitEstimate.hidden) {
+    elements.splitEstimate.textContent = "";
+    return;
+  }
+
+  const count = getExpectedSplitCount(duration, seconds);
+  const lastSeconds = duration - (count - 1) * seconds;
+  const lastLabel = roundTrimTime(lastSeconds) < roundTrimTime(seconds)
+    ? ` · 마지막 약 ${formatSecondsLabel(lastSeconds)}`
+    : "";
+  elements.splitEstimate.textContent = `예상 ${count}개 · 약 ${formatSecondsLabel(seconds)}씩${lastLabel}`;
 }
 
 function updateSplitDefaultValues(part: LoadedPart | undefined = getSelectedSourcePart()): void {
@@ -1212,6 +1249,7 @@ async function createDurationSplitWithFfmpeg(
       "-map", "0",
       "-c", "copy",
       "-f", "segment",
+      "-segment_format", outputFormat === RECORDING_FORMAT.webm ? "matroska" : "mp4",
       "-segment_time", String(segmentSeconds),
       "-break_non_keyframes", "1",
       "-segment_list", segmentListName,
@@ -1610,6 +1648,7 @@ async function boot(): Promise<void> {
   } catch {
     setWorkStatus("탐색 정보를 만들지 못해 원본 미리보기를 사용합니다.");
   } finally {
+    await releaseFfmpeg();
     hideSplitProgress();
   }
   renderHeader();
@@ -1640,6 +1679,7 @@ elements.downloadCurrentButton.addEventListener("click", () => {
     } catch (error) {
       window.alert(error instanceof Error ? error.message : "선택 구간을 만들지 못했습니다.");
     } finally {
+      await releaseFfmpeg();
       hideSplitProgress();
       setSplitBusy(false);
     }
@@ -1676,6 +1716,7 @@ for (const button of elements.convertButtons) {
         const message = error instanceof Error ? error.message : "파일을 변환하지 못했습니다.";
         window.alert(message);
       } finally {
+        await releaseFfmpeg();
         hideSplitProgress();
         setSplitBusy(false);
       }
@@ -1762,6 +1803,7 @@ elements.speedConvertButton.addEventListener("click", () => {
     } catch (error) {
       window.alert(error instanceof Error ? error.message : "배속 MP4를 만들지 못했습니다.");
     } finally {
+      await releaseFfmpeg();
       hideSplitProgress();
       setSplitBusy(false);
     }
@@ -2012,6 +2054,7 @@ elements.splitButton.addEventListener("click", () => {
       elements.splitStatus.textContent = message;
       window.alert(message);
     } finally {
+      await releaseFfmpeg();
       hideSplitProgress();
       setSplitBusy(false);
     }

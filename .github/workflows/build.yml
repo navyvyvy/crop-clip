@@ -31,7 +31,10 @@ jobs:
 
       - run: npm ci
       - run: npm run typecheck
+      - run: npm run check:layout
+      - run: node scripts/check-ffmpeg-lifecycle.mjs
       - run: npm run build
+      - run: node scripts/check-time-range.mjs
 
       - uses: actions/upload-artifact@v6
         with:

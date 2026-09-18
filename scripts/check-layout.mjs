@@ -112,8 +112,27 @@ assert.match(resultHtml, /data-split-count="3"[^>]*>3분할<\/button>/);
 assert.match(resultHtml, /data-split-count="4"[^>]*>4분할<\/button>/);
 assert.doesNotMatch(resultHtml, /data-split-mode="duration" data-split-value="(?:25|40)"/);
 const resultFile = ts.createSourceFile("result.ts", resultText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+const splitFunction = resultFile.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "createDurationSplitWithFfmpeg");
+let splitArgs;
+function findSplitExec(node) {
+  if (ts.isCallExpression(node) && node.expression.getText(resultFile) === "ffmpeg.exec") {
+    splitArgs = node.arguments[0].getText(resultFile);
+  }
+  ts.forEachChild(node, findSplitExec);
+}
+findSplitExec(splitFunction);
+const buildSplitArgs = new Function("outputFormat", `
+  const range = undefined, inputName = "input.webm", segmentSeconds = 3, segmentListName = "output.csv";
+  const pattern = "output%03d." + outputFormat, RECORDING_FORMAT = { webm: "webm", mp4: "mp4" };
+  return ${splitArgs};
+`);
+for (const [format, muxer] of [["webm", "matroska"], ["mp4", "mp4"]]) {
+  const args = buildSplitArgs(format);
+  assert.equal(args[args.indexOf("-segment_format") + 1], muxer);
+  assert.equal(args[args.indexOf("-c") + 1], "copy", "splitting must preserve the encoded video");
+}
 const presetCode = resultFile.statements
-  .filter((node) => ts.isFunctionDeclaration(node) && ["getSplitPresetValue", "updateSplitPresetButtons"].includes(node.name?.text))
+  .filter((node) => ts.isFunctionDeclaration(node) && ["getSplitPresetValue", "updateSplitPresetButtons", "updateSplitEstimate", "formatSecondsLabel", "formatTimeInput", "formatPreciseDuration", "roundTrimTime"].includes(node.name?.text))
   .map((node) => node.getText(resultFile)).join("\n");
 const timeRangeCode = ts.transpileModule(fs.readFileSync(new URL("../src/shared/time_range.ts", import.meta.url), "utf8"), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
@@ -126,10 +145,11 @@ const presetButtons = [3, 4].map((count) => ({
   dataset: { splitMode: "duration", splitCount: String(count) },
   setAttribute(name, value) { this[name] = value; },
 }));
-const presetElements = { splitModeSelect: { value: "duration" }, splitValueInput: { value: "", max: "" }, splitPresetButtons: presetButtons };
+const presetElements = { splitModeSelect: { value: "duration" }, splitValueInput: { value: "", max: "" }, splitPresetButtons: presetButtons, splitEstimate: { textContent: "", hidden: true } };
 let presetRange = { start: 0, end: 0 };
 const presetFunctions = new Function("elements", "getSelectedTimeRange", "getExpectedSplitCount", `
   const TIME_STEP_SECONDS = 0.1, TIME_DECIMAL_PLACES = 1, parts = [{}], workBusy = false;
+  const SECONDS_PER_MINUTE = 60, TIME_STEPS_PER_MINUTE = 600, TIME_STEPS_PER_HOUR = 36000;
   ${presetRuntime}
   return { getSplitPresetValue, updateSplitPresetButtons };
 `)(presetElements, () => presetRange, getExpectedSplitCount);
@@ -154,6 +174,29 @@ assert.equal(presetButtons[0].disabled, false);
 assert.equal(presetButtons[1].disabled, true);
 assert.equal(presetButtons[1]["aria-pressed"], "false");
 assert.equal(presetFunctions.getSplitPresetValue({ dataset: { splitValue: "40" } }), 40);
+
+presetRange = { start: 10, end: 20 };
+presetElements.splitValueInput.value = String(presetFunctions.getSplitPresetValue(presetButtons[0]));
+presetFunctions.updateSplitPresetButtons();
+assert.equal(presetElements.splitEstimate.hidden, false);
+assert.equal(presetElements.splitEstimate.textContent, "예상 3개 · 약 3.4초씩 · 마지막 약 3.2초");
+presetElements.splitValueInput.value = String(presetFunctions.getSplitPresetValue(presetButtons[1]));
+presetFunctions.updateSplitPresetButtons();
+assert.equal(presetElements.splitEstimate.textContent, "예상 4개 · 약 2.5초씩");
+presetRange = { start: 10, end: 19 };
+presetFunctions.updateSplitPresetButtons();
+assert.equal(presetElements.splitEstimate.textContent, "예상 4개 · 약 2.5초씩 · 마지막 약 1.5초");
+presetRange = { start: 0, end: 180 };
+presetElements.splitValueInput.value = "60";
+presetFunctions.updateSplitPresetButtons();
+assert.equal(presetElements.splitEstimate.textContent, "예상 3개 · 약 1:00씩");
+for (const [mode, value] of [["size", "40"], ["duration", ""], ["duration", "NaN"], ["duration", "180"], ["duration", "200"]]) {
+  presetElements.splitModeSelect.value = mode;
+  presetElements.splitValueInput.value = value;
+  presetFunctions.updateSplitPresetButtons();
+  assert.equal(presetElements.splitEstimate.hidden, true);
+  assert.equal(presetElements.splitEstimate.textContent, "");
+}
 
 const functionNames = new Set([
   "computeDirectOutput",

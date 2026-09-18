@@ -1,0 +1,60 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import ts from "typescript";
+
+const text = fs.readFileSync(new URL("../src/result/result.ts", import.meta.url), "utf8");
+const file = ts.createSourceFile("result.ts", text, ts.ScriptTarget.Latest, true);
+const compile = (code) => ts.transpile(code, { target: ts.ScriptTarget.ES2022 });
+const cleanupBlocks = [];
+function visit(node) {
+  if (ts.isTryStatement(node) && node.finallyBlock?.getText(file).includes("hideSplitProgress();")) {
+    cleanupBlocks.push(node.finallyBlock.getText(file));
+  }
+  ts.forEachChild(node, visit);
+}
+visit(file);
+assert.equal(cleanupBlocks.length, 5, "cover preview, trim, conversion, speed and split completion");
+for (const block of cleanupBlocks) {
+  let releases = 0;
+  await new Function("releaseFfmpeg", "hideSplitProgress", "setSplitBusy", `return (async () => ${compile(block)})();`)(
+    async () => { releases++; }, () => {}, () => {},
+  );
+  assert.equal(releases, 1, "completed jobs must release the idle conversion engine");
+}
+
+const functions = file.statements.filter((node) => ts.isFunctionDeclaration(node)
+  && ["loadFfmpeg", "releaseFfmpeg"].includes(node.name?.text)).map(node => node.getText(file)).join("\n");
+const instances = [];
+let failLoad = false;
+class FFmpeg {
+  terminated = false;
+  constructor() { instances.push(this); }
+  on() {}
+  async load() { if (failLoad) throw new Error("load failed"); }
+  terminate() { this.terminated = true; }
+}
+const code = compile(functions).replace(/import\(chrome\.runtime\.getURL\([^)]*\)\)/g, "Promise.resolve({ FFmpeg })");
+const api = new Function("FFmpeg", `
+  let ffmpegLoadPromise = null;
+  const chrome = { runtime: { getURL: x => x } };
+  const setWorkStatus = () => {}, setFfmpegProgressBase = () => {};
+  const FFMPEG_LOAD_START_PERCENT = 3, FFMPEG_READY_PERCENT = 8;
+  ${code}
+  return { loadFfmpeg, releaseFfmpeg };
+`)(FFmpeg);
+const first = await api.loadFfmpeg();
+assert.equal(await api.loadFfmpeg(), first, "reuse the engine within a batch");
+await api.releaseFfmpeg();
+assert.equal(first.terminated, true);
+const second = await api.loadFfmpeg();
+assert.notEqual(second, first, "next job can reload the engine");
+await api.releaseFfmpeg();
+await api.releaseFfmpeg();
+failLoad = true;
+await assert.rejects(api.loadFfmpeg(), /load failed/);
+assert.equal(instances.at(-1).terminated, true, "failed loads must release their worker");
+failLoad = false;
+await api.loadFfmpeg();
+await api.releaseFfmpeg();
+assert.ok(instances.every(instance => instance.terminated));
+console.log("FFmpeg lifecycle checks passed");
