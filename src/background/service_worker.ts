@@ -626,6 +626,12 @@ async function recoverRecordingAfterTabExit(tabId: number): Promise<void> {
   }
 
   await delay(CHECKPOINT_FINALIZE_DELAY_MS);
+  // SPA navigation also reports "loading". Recover only after the recording owner is gone.
+  const owner = await sendToTab<MessageResponse<boolean>>(tabId, {
+    type: "HAS_DIRECT_RECORDING",
+    recordingId: state.recordingId,
+  }).catch(() => undefined);
+  if (owner?.ok && owner.data) return;
   await recoverRecording(state.recordingId, Date.now());
 }
 

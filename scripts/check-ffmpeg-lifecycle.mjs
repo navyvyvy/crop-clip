@@ -57,4 +57,23 @@ failLoad = false;
 await api.loadFfmpeg();
 await api.releaseFfmpeg();
 assert.ok(instances.every(instance => instance.terminated));
+const releaseSource = file.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "releaseVideoSource");
+const revoked = [];
+const releaseVideoSource = new Function("URL", `${compile(releaseSource.getText(file))}; return releaseVideoSource;`)(
+  { revokeObjectURL: url => revoked.push(url) },
+);
+for (const ownsUrl of [false, true]) {
+  const video = {
+    src: "blob:preview", paused: false, readyState: 4, isConnected: true,
+    pause() { this.paused = true; },
+    removeAttribute(name) { if (name === "src") this.src = ""; },
+    load() { if (!this.src) this.readyState = 0; },
+    remove() { this.isConnected = false; },
+  };
+  releaseVideoSource(video, "blob:preview", ownsUrl);
+  assert.equal(video.paused, true);
+  assert.equal(video.readyState, 0, "detached preview must release its decoder");
+  assert.equal(video.isConnected, false);
+  assert.equal(revoked.length, Number(ownsUrl), "only revoke URLs owned by the temporary video");
+}
 console.log("FFmpeg lifecycle checks passed");

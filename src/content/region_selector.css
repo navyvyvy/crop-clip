@@ -449,7 +449,9 @@
   color: rgba(244, 251, 255, 0.78);
   font-size: 17px;
   font-weight: 900;
-  line-height: 1;
+  line-height: 1.4;
+  max-width: min(480px, calc(100vw - 32px));
+  text-align: center;
   pointer-events: none;
   opacity: 0;
   transition: opacity 120ms ease;

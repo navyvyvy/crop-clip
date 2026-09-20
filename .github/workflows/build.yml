@@ -33,6 +33,9 @@ jobs:
       - run: npm run typecheck
       - run: npm run check:layout
       - run: node scripts/check-ffmpeg-lifecycle.mjs
+      - run: node scripts/check-recording-cleanup.mjs
+      - run: node scripts/check-recording-backpressure.mjs
+      - run: node scripts/check-recording-navigation.mjs
       - run: npm run build
       - run: node scripts/check-time-range.mjs
 

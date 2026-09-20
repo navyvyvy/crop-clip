@@ -1,0 +1,251 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import ts from "typescript";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+if (!global.gc) {
+  const result = spawnSync(process.execPath, ["--expose-gc", fileURLToPath(import.meta.url)], { stdio: "inherit" });
+  if (result.error) throw result.error;
+  process.exit(result.status ?? 1);
+}
+
+const text = fs.readFileSync(new URL("../src/content/region_selector.ts", import.meta.url), "utf8");
+const file = ts.createSourceFile("region_selector.ts", text, ts.ScriptTarget.Latest, true);
+const functions = [];
+const startupFunctions = [];
+let drawFrameSource;
+function visit(node) {
+  if (ts.isFunctionDeclaration(node) && ["startDirectRecording", "ignoreRecordingRejection", "releaseDirectRecordingCapture", "stopRecordingStream"].includes(node.name?.text)) startupFunctions.push(node.getText(file));
+  if (ts.isVariableDeclaration(node) && node.name.getText(file) === "drawFrame") drawFrameSource = node.initializer.getText(file);
+  if (ts.isFunctionDeclaration(node) && ["getVideoStream", "stopRecordingStream", "releaseDirectRecordingCapture", "cleanupDirectRecordingSession", "startDirectPart", "finalizeDirectRecording", "cancelDirectRecordingSession", "abortDirectRecordingSession", "failDirectRecordingSession", "finishDirectRecording", "requestDirectPartStop"].includes(node.name?.text)) {
+    functions.push(node.getText(file));
+  }
+  ts.forEachChild(node, visit);
+}
+visit(file);
+const { cleanup, getVideoStream, startDirectPart, messages, observers } = new Function("MediaStream", `
+  let directSession = null;
+  const playerCaptureStreams = new WeakMap();
+  const window = { clearInterval() {} };
+  const AUDIO_BITS_PER_SECOND = 128000, MILLISECONDS_PER_SECOND = 1000;
+  const messages = [];
+  const observers = [];
+  class MutationObserver {
+    constructor(callback) { this.callback = callback; observers.push(this); }
+    observe() { this.connected = true; }
+    disconnect() { this.connected = false; }
+  }
+  const sendRuntimeMessage = async message => { messages.push(message); return { ok: true }; };
+  class MediaRecorder {
+    constructor() { this.state = 'inactive'; }
+    start() { this.state = 'recording'; }
+    requestData() {}
+    stop() { this.state = 'inactive'; }
+  }
+  ${ts.transpile(functions.join("\n"), { target: ts.ScriptTarget.ES2022 })}
+  return { cleanup: cleanupDirectRecordingSession, getVideoStream, startDirectPart, messages, observers };
+`)(Stream);
+function track(kind = "video") { return { kind, enabled: true, readyState: "live", clone() { return track(this.kind); }, stop() { this.readyState = "ended"; } }; }
+function Stream(tracks) { return new FakeStream(tracks); }
+class FakeStream extends EventTarget {
+  constructor(tracks) { super(); this.tracks = tracks; }
+  getTracks() { return [...this.tracks]; }
+  getVideoTracks() { return this.tracks.filter(track => track.kind === "video"); }
+  getAudioTracks() { return this.tracks.filter(track => track.kind === "audio"); }
+  removeTrack(track) { this.tracks = this.tracks.filter(item => item !== track); }
+  addTrack(track) {
+    this.tracks.push(track);
+    this.dispatchEvent(Object.assign(new Event("addtrack"), { track }));
+  }
+}
+
+const unusedVideo = track(), requiredAudio = track("audio");
+const captured = new Stream([unusedVideo, requiredAudio]);
+let captureCalls = 0;
+const player = { isConnected: true, parentNode: { parentNode: null }, captureStream: () => { captureCalls++; return captured; } };
+for (let recording = 0; recording < 20; recording++) {
+  const recordingStream = getVideoStream(player);
+  assert.equal(recordingStream.getAudioTracks().length, 1);
+  assert.equal(recordingStream.getAudioTracks()[0].enabled, true);
+  recordingStream.getTracks().forEach(track => track.stop());
+}
+assert.equal(captureCalls, 1, "repeated recordings must not allocate native captures for the same player");
+assert.equal(unusedVideo.readyState, "ended", "canvas output must not keep a duplicate source video capture running");
+assert.equal(requiredAudio.readyState, "live", "recording audio must remain active");
+assert.equal(requiredAudio.enabled, false, "the reusable source must stay disabled; only recording clones output audio");
+assert.deepEqual(captured.getTracks(), [requiredAudio]);
+assert.equal(getVideoStream({}), null);
+
+// Reloads update the cached source, but cannot restart a completed recording.
+for (let recording = 0; recording < 3; recording++) {
+  const sourceStream = getVideoStream(player);
+  const [audio] = sourceStream.getAudioTracks(), canvasVideo = track();
+  let watcherRemoved = false;
+  const session = {
+    sourceStream, outputStream: new Stream([canvasVideo, audio]),
+    canvas: { remove() {} }, drawTimerId: 1, cleanedUp: false,
+    sourceChangeCleanup() { watcherRemoved = true; },
+  };
+  cleanup(session);
+  cleanup(session);
+  assert.ok(watcherRemoved);
+  assert.ok([audio, canvasVideo].every(track => track.readyState === "ended"));
+  assert.equal(session.outputStream.getTracks().length, 0, "release ended output tracks as well as source tracks");
+  assert.equal(session.canvas, null);
+  assert.equal(session.video, null);
+  for (let reload = 0; reload < 3; reload++) {
+    const lateVideo = track(), lateAudio = track("audio");
+    captured.addTrack(lateVideo);
+    captured.addTrack(lateAudio);
+    assert.equal(lateVideo.readyState, "ended", "completed recording must not restart video capture");
+    assert.equal(lateAudio.enabled, false, "the cached audio source stays disabled after reload");
+    assert.equal(sourceStream.getTracks().length, 0, "finished recording clones cannot receive reloaded source tracks");
+    assert.deepEqual(captured.getTracks(), [lateAudio], "reloads cannot accumulate old source tracks");
+    captured.dispatchEvent(Object.assign(new Event("addtrack"), { track: requiredAudio }));
+    assert.deepEqual(captured.getTracks(), [lateAudio], "a late event for a removed track must not stop the current audio");
+  }
+}
+
+const detachWatcher = observers[0];
+assert.equal(observers.length, 1, "reuse the player removal watcher across recordings");
+player.parentNode = { parentNode: { parentNode: null } };
+detachWatcher.callback();
+assert.equal(detachWatcher.connected, true, "moving a connected player must keep its capture and watch the new parents");
+assert.equal(captured.getAudioTracks().length, 1);
+player.isConnected = false;
+detachWatcher.callback();
+assert.equal(detachWatcher.connected, false, "stop watching after the player is detached");
+assert.equal(captured.getTracks().length, 0, "detach releases the reusable audio connection");
+const detachedAudio = track("audio");
+captured.addTrack(detachedAudio);
+assert.equal(detachedAudio.readyState, "ended", "late source events cannot restart a detached player capture");
+
+// Stopping the encoder must release capture even while a disk write is pending.
+for (const cancelWhileSaving of [false, true]) {
+  let completeWrite, finish;
+  const sourceAudio = track("audio"), canvasVideo = track();
+  const session = {
+    recordingId: "delayed-save", settings: {},
+    sourceStream: new Stream([sourceAudio]), outputStream: new Stream([canvasVideo, sourceAudio]),
+    canvas: { width: 3840, height: 2160, remove() {} }, drawTimerId: 1, cleanedUp: false,
+    checkpointSaveChain: new Promise(resolve => { completeWrite = resolve; }),
+    pendingChunks: [], pendingBytes: 0, checkpointAbort: new AbortController(),
+    resolveFinish() { finish = "completed"; }, rejectFinish(error) { throw error; },
+  };
+  const canvas = session.canvas;
+  await startDirectPart(session);
+  session.recorder.state = "inactive";
+  session.recorder.onstop();
+  assert.equal(sourceAudio.readyState, "ended", "stopped recording must not capture audio while waiting for storage");
+  assert.equal(canvasVideo.readyState, "ended", "stopped recording must not capture frames while waiting for storage");
+  assert.equal(canvas.width * canvas.height, 0, "release the full-resolution canvas backing buffer");
+  assert.equal(session.canvas, null, "saving must not retain a canvas object");
+  assert.equal(session.video, null, "saving must not retain the source player");
+  assert.equal(session.recorder, undefined, "saving must not retain the stopped encoder or its handlers");
+  assert.equal(finish, undefined, "wait for all recorded data before reporting completion");
+  session.cancelRequested = cancelWhileSaving;
+  const before = messages.length;
+  completeWrite();
+  for (let tick = 0; tick < 5; tick++) await Promise.resolve();
+  assert.equal(finish, "completed");
+  assert.equal(messages.length - before, cancelWhileSaving ? 0 : 1, "cancellation during saving must not finalize the recording");
+}
+console.log("recording cleanup checks passed");
+
+for (const failure of ["encoder", "storage"]) {
+  let resolveFinish, rejectFinish;
+  const finished = new Promise((resolve, reject) => { resolveFinish = resolve; rejectFinish = reject; });
+  const session = {
+    recordingId: failure, settings: {}, sourceStream: new Stream([track("audio")]),
+    outputStream: new Stream([track()]), canvas: { width: 1920, height: 1080, remove() {} },
+    checkpointSaveChain: Promise.resolve(), pendingChunks: [new Blob(["queued"])], pendingBytes: 6,
+    checkpointAbort: new AbortController(), resolveFinish, rejectFinish,
+  };
+  const rejected = assert.rejects(finished, failure === "encoder" ? /녹화 중 오류/ : /disk failed/);
+  const before = messages.length;
+  await startDirectPart(session);
+  const recorder = session.recorder;
+  if (failure === "encoder") recorder.onerror();
+  else session.checkpointError = new Error("disk failed");
+  recorder.state = "inactive";
+  recorder.onstop();
+  await rejected;
+  assert.equal(session.pendingBytes, 0);
+  assert.equal(session.pendingChunks.length, 0);
+  assert.equal(session.recorder, undefined);
+  assert.equal(session.canvas, null);
+  assert.equal(session.checkpointAbort.signal.aborted, true);
+  assert.equal(messages.slice(before).filter(message => message.type === "RECORDING_ERROR").length, 1);
+}
+console.log("recording error cleanup checks passed");
+
+const video = { paused: false, readyState: 4, frame: 1, getVideoPlaybackQuality() { return { totalVideoFrames: this.frame }; } };
+let paints = 0;
+const draw = new Function("video", "paintPlacements", `
+  let lastPaintedFrame = -1, cropLayoutKey = 'fixed';
+  const HTMLMediaElement = { HAVE_CURRENT_DATA: 2 };
+  const sourceRegions = [{}], session = { placements: [] };
+  const computeDirectCropFromSelection = () => ({}), getCropLayoutKey = () => 'fixed';
+  return ${ts.transpile(drawFrameSource, { target: ts.ScriptTarget.ES2022 })};
+`)(video, () => paints++);
+for (let tick = 0; tick < 60; tick++) draw();
+assert.equal(paints, 1, "paint each decoded frame only once, even when the recording timer runs faster");
+video.paused = true;
+video.frame++;
+draw();
+assert.equal(paints, 1, "paused playback must not cause redundant full-frame copies");
+video.paused = false;
+draw();
+assert.equal(paints, 2, "resume drawing as soon as playback resumes");
+video.readyState = 0;
+video.frame++;
+draw();
+assert.equal(paints, 2, "do not draw a frame while the player is loading");
+console.log("recording frame checks passed");
+
+// Exercise the real startup scope: clearing session fields alone cannot detect
+// a pending Promise handler that still retains the drawing closure.
+const startup = new Function(`
+  let directSession = null, currentRecordingState;
+  const currentRegions = [], timers = new Map(), refs = {};
+  const window = { setInterval(fn) { timers.set(1, fn); return 1; }, clearInterval(id) { timers.delete(id); } };
+  class MediaStream {
+    getTracks() { return []; } getVideoTracks() { return []; } getAudioTracks() { return []; }
+  }
+  const document = { createElement() {
+    const canvas = { remove() {}, captureStream: () => new MediaStream(),
+      getContext() { return { canvas: this, fillRect() {}, drawImage() {} }; } };
+    refs.canvas = new WeakRef(canvas); return canvas;
+  } };
+  const findPrimaryVideoElement = () => {
+    const player = { muted: false, volume: 1 }; refs.video = new WeakRef(player); return player;
+  };
+  const waitForCurrentVideoFrame = async () => true;
+  const computeDirectCropFromSelection = () => ({});
+  const computeDirectLayout = () => ({ output: { width: 1920, height: 1080 }, placements: [] });
+  const selectDirectMimeType = () => ({ mimeType: 'video/webm', extension: 'webm' });
+  const getVideoStream = () => new MediaStream();
+  const getCropLayoutKey = () => '', buildBaseName = () => 'recording';
+  const startDirectPart = async () => {};
+  const watchDirectRecordingSource = () => {}, showSelectionBorders = () => {};
+  const requestChzzkToolSync = () => {}, syncChzzkRecordTimer = () => {};
+  const loadState = async () => ({ recordingState: {} });
+  const HIGH_RECORDING_FRAME_RATE = 60, STANDARD_RECORDING_FRAME_RATE = 30, MILLISECONDS_PER_SECOND = 1000;
+  ${ts.transpile(startupFunctions.join("\n"), { target: ts.ScriptTarget.ES2022 })}
+  return { start: startDirectRecording, refs, timers,
+    stop() { releaseDirectRecordingCapture(directSession); },
+    finish() { directSession.resolveFinish(); } };
+`)();
+assert.deepEqual(await startup.start({ recordingId: "pending-save", region: {}, settings: {} }), { ok: true });
+startup.stop();
+assert.equal(startup.timers.size, 0);
+// Keep the completion Promise pending, as when a storage acknowledgement stalls.
+for (let round = 0; round < 3; round++) {
+  await new Promise(resolve => setImmediate(resolve));
+  global.gc();
+}
+assert.equal(startup.refs.canvas.deref(), undefined, "pending completion must not retain the canvas through a closure");
+assert.equal(startup.refs.video.deref(), undefined, "pending completion must not retain the source player through a closure");
+startup.finish();
+console.log("recording pending-save collection checks passed");

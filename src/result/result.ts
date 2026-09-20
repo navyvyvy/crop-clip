@@ -271,6 +271,9 @@ function createObjectUrlSource(source: Blob | string): { url: string; revoke: bo
 }
 
 function releaseVideoSource(video: HTMLVideoElement, url: string, revoke: boolean): void {
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
   video.remove();
   if (revoke) {
     URL.revokeObjectURL(url);

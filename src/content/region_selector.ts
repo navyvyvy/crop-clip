@@ -71,6 +71,7 @@ const VISIBLE_VIDEO_SCORE_WEIGHT = 4;
 const VIDEO_FRAME_SCORE_WEIGHT = 2;
 const AUDIO_BITS_PER_SECOND = 128_000;
 const MAX_RECORDING_MESSAGE_BLOB_BYTES = 8 * 1024 * 1024;
+const MAX_PENDING_RECORDING_BYTES = 64 * 1024 * 1024;
 const CHZZK_RECORD_BUTTON_ID = "crop-clip-chzzk-record-button";
 const CHZZK_RECORD_TIME_ID = "crop-clip-chzzk-record-time";
 const CHZZK_CANCEL_BUTTON_ID = "crop-clip-chzzk-cancel-button";
@@ -132,16 +133,20 @@ interface DirectLayout {
 interface DirectRecordingSession {
   recordingId: string;
   settings: Settings;
-  video: HTMLVideoElement;
+  video: HTMLVideoElement | null;
   sourceStream: MediaStream;
   outputStream: MediaStream;
-  canvas: HTMLCanvasElement;
+  canvas: HTMLCanvasElement | null;
   recorder?: MediaRecorder;
   mimeType: string;
   extension: "webm" | "mp4";
   baseName: string;
   checkpointIndex: number;
   checkpointSaveChain: Promise<void>;
+  pendingChunks: Array<{ blob: Blob; capturedAt: number }>;
+  pendingBytes: number;
+  checkpointSaving: boolean;
+  checkpointAbort: AbortController;
   checkpointError?: Error;
   createdAt: number;
   endedAt?: number;
@@ -214,9 +219,64 @@ function isExtensionContextAvailable(): boolean {
   }
 }
 
+const playerCaptureStreams = new WeakMap<HTMLVideoElement, MediaStream>();
+
 function getVideoStream(video: HTMLVideoElement): MediaStream | null {
   const source = video as HTMLVideoElement & { captureStream?: () => MediaStream; mozCaptureStream?: () => MediaStream };
-  return source.captureStream?.() ?? source.mozCaptureStream?.() ?? null;
+  let stream = playerCaptureStreams.get(video);
+  if (!stream) {
+    stream = source.captureStream?.() ?? source.mozCaptureStream?.();
+    if (!stream) return null;
+    const captured = stream;
+    let released = false;
+    // Chrome retains native captures on the player. Reuse one disabled audio source;
+    // only per-recording clones output audio, and no original video is needed.
+    const prepareTrack = (track: MediaStreamTrack) => {
+      if (!captured.getTracks().includes(track)) return;
+      if (released || track.kind === "video") {
+        track.stop();
+        captured.removeTrack(track);
+      } else {
+        track.enabled = false;
+        for (const previous of captured.getAudioTracks()) {
+          if (previous !== track) {
+            previous.stop();
+            captured.removeTrack(previous);
+          }
+        }
+      }
+    };
+    captured.getTracks().forEach(prepareTrack);
+    captured.addEventListener("addtrack", (event) => prepareTrack(event.track));
+    playerCaptureStreams.set(video, captured);
+    let parents: Node[] = [];
+    const watchParents = () => {
+      const next: Node[] = [];
+      for (let parent = video.parentNode; parent; parent = parent.parentNode) next.push(parent);
+      if (next.length === parents.length && next.every((parent, index) => parent === parents[index])) return;
+      detachObserver.disconnect();
+      next.forEach(parent => detachObserver.observe(parent, { childList: true }));
+      parents = next;
+    };
+    const detachObserver = new MutationObserver(() => {
+      if (video.isConnected) {
+        watchParents();
+        return;
+      }
+      released = true;
+      detachObserver.disconnect();
+      parents = [];
+      playerCaptureStreams.delete(video);
+      if (directSession?.video === video) stopDirectRecordingAfterSourceChange(directSession);
+      captured.getTracks().forEach(prepareTrack);
+    });
+    watchParents();
+  }
+  return new MediaStream(stream.getAudioTracks().filter(track => track.readyState === "live").map(track => {
+    const clone = track.clone();
+    clone.enabled = true;
+    return clone;
+  }));
 }
 
 function waitForCurrentVideoFrame(video: HTMLVideoElement): Promise<boolean> {
@@ -1133,14 +1193,38 @@ function getRecordingChunkSliceRanges(size: number, maxBytes: number): Array<{ s
 }
 
 function queueDirectChunkCheckpoint(session: DirectRecordingSession, blob: Blob): void {
-  if (session.cancelRequested) {
+  if (session.cancelRequested || session.checkpointError) {
     return;
   }
 
-  const capturedAt = Date.now();
-  const ranges = getRecordingChunkSliceRanges(blob.size, MAX_RECORDING_MESSAGE_BLOB_BYTES);
-  session.checkpointSaveChain = session.checkpointSaveChain.then(async () => {
-    try {
+  session.pendingChunks.push({ blob, capturedAt: Date.now() });
+  session.pendingBytes += blob.size;
+  if (session.pendingBytes >= MAX_PENDING_RECORDING_BYTES && !session.stopRequested) {
+    session.stopRequested = true;
+    requestDirectPartStop(session);
+    showPlayerFeedback("저장이 지연되어 녹화를 종료했습니다. 녹화한 내용은 계속 저장합니다.", 8_000);
+  }
+  if (!session.checkpointSaving) {
+    session.checkpointSaving = true;
+    session.checkpointSaveChain = saveDirectCheckpoints(session);
+  }
+}
+
+function sendCheckpointMessage(message: Record<string, unknown>, signal: AbortSignal): Promise<MessageResponse> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  let abort: () => void;
+  return new Promise<MessageResponse>((resolve, reject) => {
+    abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    void sendRuntimeMessage(message).then(resolve, reject);
+  }).finally(() => signal.removeEventListener("abort", abort));
+}
+
+async function saveDirectCheckpoints(session: DirectRecordingSession): Promise<void> {
+  try {
+    while (session.pendingChunks.length > 0 && !session.cancelRequested) {
+      const { blob, capturedAt } = session.pendingChunks.shift()!;
+      const ranges = getRecordingChunkSliceRanges(blob.size, MAX_RECORDING_MESSAGE_BLOB_BYTES);
       for (const [rangeIndex, range] of ranges.entries()) {
         if (session.cancelRequested) {
           return;
@@ -1150,7 +1234,7 @@ function queueDirectChunkCheckpoint(session: DirectRecordingSession, blob: Blob)
         if (session.cancelRequested) {
           return;
         }
-        const response = await sendRuntimeMessage({
+        const response = await sendCheckpointMessage({
           type: "STORE_RECORDING_CHUNK",
           chunk: {
             id: `${session.recordingId}:chunk:${String(++session.checkpointIndex).padStart(CHUNK_INDEX_DIGITS, "0")}`,
@@ -1164,18 +1248,34 @@ function queueDirectChunkCheckpoint(session: DirectRecordingSession, blob: Blob)
             completesBlob: rangeIndex === ranges.length - 1,
             dataUrl,
           },
-        });
+        }, session.checkpointAbort.signal);
         if (!response.ok) {
           throw new Error(response.error);
         }
       }
-    } catch (error) {
-      session.checkpointError ??= error instanceof Error ? error : new Error("녹화 체크포인트를 저장하지 못했습니다.");
+      session.pendingBytes = Math.max(0, session.pendingBytes - blob.size);
     }
+  } catch (error) {
+    if (!session.cancelRequested) {
+      session.checkpointError ??= error instanceof Error ? error : new Error("녹화 체크포인트를 저장하지 못했습니다.");
+      session.stopRequested = true;
+      requestDirectPartStop(session);
+    }
+  } finally {
+    session.pendingChunks.length = 0;
+    session.pendingBytes = 0;
+    session.checkpointSaving = false;
+  }
+}
+
+function stopRecordingStream(stream: MediaStream): void {
+  stream.getTracks().forEach((track) => {
+    track.stop();
+    stream.removeTrack(track);
   });
 }
 
-function cleanupDirectRecordingSession(session: DirectRecordingSession): void {
+function releaseDirectRecordingCapture(session: DirectRecordingSession): void {
   if (session.cleanedUp) {
     return;
   }
@@ -1184,9 +1284,19 @@ function cleanupDirectRecordingSession(session: DirectRecordingSession): void {
   window.clearInterval(session.drawTimerId);
   session.sourceChangeCleanup?.();
   session.sourceChangeCleanup = undefined;
-  session.sourceStream.getTracks().forEach((track) => track.stop());
-  session.outputStream.getTracks().forEach((track) => track.stop());
-  session.canvas.remove();
+  stopRecordingStream(session.sourceStream);
+  stopRecordingStream(session.outputStream);
+  if (session.canvas) {
+    session.canvas.width = 0;
+    session.canvas.height = 0;
+    session.canvas.remove();
+  }
+  session.canvas = null;
+  session.video = null;
+}
+
+function cleanupDirectRecordingSession(session: DirectRecordingSession): void {
+  releaseDirectRecordingCapture(session);
   if (directSession === session) {
     directSession = null;
   }
@@ -1210,9 +1320,46 @@ async function finalizeDirectRecording(session: DirectRecordingSession): Promise
   }
 }
 
-function cancelDirectRecordingSession(session: DirectRecordingSession): void {
+function abortDirectRecordingSession(session: DirectRecordingSession): void {
+  session.cancelRequested = true;
+  session.stopRequested = true;
+  requestDirectPartStop(session);
+  session.pendingChunks.length = 0;
+  session.pendingBytes = 0;
+  session.checkpointAbort.abort();
   cleanupDirectRecordingSession(session);
+}
+
+function cancelDirectRecordingSession(session: DirectRecordingSession): void {
+  abortDirectRecordingSession(session);
   session.resolveFinish();
+}
+
+function failDirectRecordingSession(session: DirectRecordingSession, error: Error): void {
+  abortDirectRecordingSession(session);
+  session.rejectFinish(error);
+  void sendRuntimeMessage({ type: "RECORDING_ERROR", recordingId: session.recordingId, error: error.message }).catch(() => {});
+}
+
+async function finishDirectRecording(session: DirectRecordingSession): Promise<void> {
+  releaseDirectRecordingCapture(session);
+  if (session.recorder) {
+    session.recorder.ondataavailable = null;
+    session.recorder.onerror = null;
+    session.recorder.onstop = null;
+    session.recorder = undefined;
+  }
+  try {
+    if (!session.cancelRequested) await session.checkpointSaveChain;
+    if (session.cancelRequested) {
+      cancelDirectRecordingSession(session);
+      return;
+    }
+    if (session.checkpointError) throw session.checkpointError;
+    await finalizeDirectRecording(session);
+  } catch (error) {
+    failDirectRecordingSession(session, error instanceof Error ? error : new Error("녹화 결과를 저장하지 못했습니다."));
+  }
 }
 
 function stopDirectRecordingAfterSourceChange(session: DirectRecordingSession): void {
@@ -1225,16 +1372,15 @@ function stopDirectRecordingAfterSourceChange(session: DirectRecordingSession): 
 }
 
 function watchDirectRecordingSource(session: DirectRecordingSession): void {
+  const video = session.video;
+  if (!video) return;
   const stop = () => stopDirectRecordingAfterSourceChange(session);
   const sourceTracks = session.sourceStream.getTracks();
-  session.video.addEventListener("ended", stop);
-  session.video.addEventListener("loadstart", stop);
-  session.video.addEventListener("emptied", stop);
+  const events = ["ended", "loadstart", "emptied"];
+  events.forEach(event => video.addEventListener(event, stop));
   sourceTracks.forEach((track) => track.addEventListener("ended", stop));
   session.sourceChangeCleanup = () => {
-    session.video.removeEventListener("ended", stop);
-    session.video.removeEventListener("loadstart", stop);
-    session.video.removeEventListener("emptied", stop);
+    events.forEach(event => video.removeEventListener(event, stop));
     sourceTracks.forEach((track) => track.removeEventListener("ended", stop));
   };
 }
@@ -1272,50 +1418,17 @@ async function startDirectPart(session: DirectRecordingSession): Promise<void> {
     queueDirectChunkCheckpoint(session, event.data);
   };
 
-  recorder.onerror = () => {
-    const error = new Error("녹화 중 오류가 발생했습니다.");
-    session.cancelRequested = true;
-    session.stopRequested = true;
-    cleanupDirectRecordingSession(session);
-    session.rejectFinish(error);
-    void sendRuntimeMessage({
-      type: "RECORDING_ERROR",
-      recordingId: session.recordingId,
-      error: error.message,
-    }).catch(() => {});
-  };
-
-  recorder.onstop = () => {
-    void (async () => {
-      if (session.cancelRequested) {
-        cancelDirectRecordingSession(session);
-        return;
-      }
-
-      await session.checkpointSaveChain;
-      if (session.checkpointError) {
-        throw session.checkpointError;
-      }
-      await finalizeDirectRecording(session);
-    })().catch((error: Error) => {
-      cleanupDirectRecordingSession(session);
-      session.rejectFinish(error);
-      void sendRuntimeMessage({
-        type: "RECORDING_ERROR",
-        recordingId: session.recordingId,
-        error: error.message,
-      }).catch(() => {});
-    });
-  };
+  recorder.onerror = () => failDirectRecordingSession(session, new Error("녹화 중 오류가 발생했습니다."));
+  recorder.onstop = () => { void finishDirectRecording(session); };
 
   recorder.start(MILLISECONDS_PER_SECOND);
 }
 
+// A handler created inside startDirectRecording retains its canvas/video scope until saving finishes.
+function ignoreRecordingRejection(): void {}
+
 async function startDirectRecording(command: Extract<ContentCommand, { type: "START_DIRECT_RECORDING" }>): Promise<MessageResponse> {
   if (directSession) {
-    directSession.cancelRequested = true;
-    directSession.stopRequested = true;
-    requestDirectPartStop(directSession);
     cancelDirectRecordingSession(directSession);
   }
 
@@ -1366,7 +1479,7 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
   try {
     paintPlacements(layout.placements);
   } catch {
-    canvasStream.getTracks().forEach((track) => track.stop());
+    stopRecordingStream(canvasStream);
     return { ok: false, error: "녹화 화면을 준비하지 못했습니다." };
   }
 
@@ -1374,11 +1487,11 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
   try {
     sourceStream = getVideoStream(video);
   } catch {
-    canvasStream.getTracks().forEach((track) => track.stop());
+    stopRecordingStream(canvasStream);
     return { ok: false, error: "이 브라우저에서는 현재 영상 녹화를 지원하지 않습니다." };
   }
   if (!sourceStream) {
-    canvasStream.getTracks().forEach((track) => track.stop());
+    stopRecordingStream(canvasStream);
     return { ok: false, error: "이 브라우저에서는 현재 영상 녹화를 지원하지 않습니다." };
   }
 
@@ -1388,8 +1501,12 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
   ];
   const outputStream = new MediaStream(tracks);
   let cropLayoutKey = getCropLayoutKey(crops);
+  let lastPaintedFrame = -1;
 
   const drawFrame = () => {
+    if (video.paused || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+    const frame = video.getVideoPlaybackQuality?.().totalVideoFrames;
+    if (frame !== undefined && frame === lastPaintedFrame) return;
     const nextCrops = sourceRegions
       .map((region) => computeDirectCropFromSelection(region, video))
       .filter((crop): crop is DirectCrop => crop !== null);
@@ -1403,6 +1520,7 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
       session.placements = scaleLayout(nextLayout, scale, Math.round((output.width - width) / 2), Math.round((output.height - height) / 2));
     }
     paintPlacements(session.placements);
+    lastPaintedFrame = frame ?? -1;
   };
 
   let resolveFinish: () => void = () => {};
@@ -1411,7 +1529,7 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
     resolveFinish = resolve;
     rejectFinish = reject;
   });
-  void finishPromise.catch(() => {});
+  void finishPromise.catch(ignoreRecordingRejection);
 
   const session: DirectRecordingSession = {
     recordingId: command.recordingId,
@@ -1425,6 +1543,10 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
     baseName: buildBaseName(),
     checkpointIndex: 0,
     checkpointSaveChain: Promise.resolve(),
+    pendingChunks: [],
+    pendingBytes: 0,
+    checkpointSaving: false,
+    checkpointAbort: new AbortController(),
     createdAt: Date.now(),
     drawTimerId: window.setInterval(drawFrame, Math.round(MILLISECONDS_PER_SECOND / frameRate)),
     stopRequested: false,
@@ -1447,7 +1569,8 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
     syncChzzkRecordTimer();
     return { ok: true };
   } catch (error) {
-    cleanupDirectRecordingSession(session);
+    abortDirectRecordingSession(session);
+    session.rejectFinish(error instanceof Error ? error : new Error("녹화를 시작하지 못했습니다."));
     throw error;
   }
 }
@@ -1473,20 +1596,12 @@ async function cancelDirectRecording(recordingId?: string): Promise<MessageRespo
     return { ok: true };
   }
 
-  session.cancelRequested = true;
-  session.stopRequested = true;
-  requestDirectPartStop(session);
   cancelDirectRecordingSession(session);
   return { ok: true };
 }
 
 function stopDirectRecordingForUnload(): void {
-  if (!directSession || directSession.stopRequested) {
-    return;
-  }
-
-  directSession.stopRequested = true;
-  requestDirectPartStop(directSession);
+  if (directSession) stopDirectRecordingAfterSourceChange(directSession);
 }
 
 function removeSelectionBorders(): void {
@@ -2745,11 +2860,11 @@ function setChzzkButtonContent(button: HTMLElement): void {
   setChzzkButtonPresentation(button, `select:${label}`, label, getCropIconSvg());
 }
 
-function showSeekFeedback(deltaSeconds: number): void {
+function showPlayerFeedback(message: string, duration = SEEK_FEEDBACK_DURATION_MS): void {
   const videoRect = findPrimaryVideoElement()?.getBoundingClientRect();
   const feedback = document.getElementById(SEEK_FEEDBACK_ID) ?? document.createElement("div");
   feedback.id = SEEK_FEEDBACK_ID;
-  feedback.textContent = `${deltaSeconds > 0 ? "+" : ""}${deltaSeconds}초`;
+  feedback.textContent = message;
   if (videoRect && videoRect.width > 0 && videoRect.height > 0) {
     feedback.style.left = `${videoRect.left + videoRect.width / 2}px`;
     feedback.style.top = `${videoRect.top + videoRect.height / 2}px`;
@@ -2766,7 +2881,11 @@ function showSeekFeedback(deltaSeconds: number): void {
   seekFeedbackTimerId = window.setTimeout(() => {
     feedback.dataset.visible = "false";
     seekFeedbackTimerId = null;
-  }, SEEK_FEEDBACK_DURATION_MS);
+  }, duration);
+}
+
+function showSeekFeedback(deltaSeconds: number): void {
+  showPlayerFeedback(`${deltaSeconds > 0 ? "+" : ""}${deltaSeconds}초`);
 }
 
 function handlePlayerScreenshotActivation(event: MouseEvent): void {
@@ -3417,7 +3536,12 @@ function findPrimaryVideoElement(): HTMLVideoElement | null {
 }
 
 if (isExtensionContextAvailable()) {
-  chrome.runtime.onMessage.addListener((message: ContentCommand, _sender, sendResponse: (response: MessageResponse | RegionGeometryResponse | RegionGeometriesResponse) => void) => {
+  chrome.runtime.onMessage.addListener((message: ContentCommand, _sender, sendResponse: (response: MessageResponse | MessageResponse<boolean> | RegionGeometryResponse | RegionGeometriesResponse) => void) => {
+    if (message.type === "HAS_DIRECT_RECORDING") {
+      sendResponse({ ok: true, data: directSession?.recordingId === message.recordingId });
+      return false;
+    }
+
     if (message.type === "CLEAR_REGION") {
       void (async () => {
         const state = await loadState();
