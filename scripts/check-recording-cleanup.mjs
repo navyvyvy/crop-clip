@@ -228,7 +228,7 @@ console.log("recording frame checks passed");
 
 // Exercise the real startup scope: clearing session fields alone cannot detect
 // a pending Promise handler that still retains the drawing closure.
-const startup = new Function(`
+const createStartup = new Function("playerState", `
   let directSession = null, currentRecordingState;
   const currentRegions = [], timers = new Map(), refs = {};
   const window = { setInterval(fn) { timers.set(1, fn); return 1; }, clearInterval(id) { timers.delete(id); } };
@@ -241,7 +241,7 @@ const startup = new Function(`
     refs.canvas = new WeakRef(canvas); return canvas;
   } };
   const findPrimaryVideoElement = () => {
-    const player = { muted: false, volume: 1 }; refs.video = new WeakRef(player); return player;
+    const player = { ...playerState }; refs.video = new WeakRef(player); return player;
   };
   const waitForCurrentVideoFrame = async () => true;
   const prepareRecordingEncoder = async () => {};
@@ -259,7 +259,19 @@ const startup = new Function(`
   return { start: startDirectRecording, refs, timers,
     stop() { releaseDirectRecordingCapture(directSession); },
     finish() { directSession.resolveFinish(); } };
-`)();
+`);
+for (const allowMutedRecording of [undefined, false, true]) {
+  for (const playerState of [{ muted: false, volume: 1 }, { muted: true, volume: 1 }, { muted: false, volume: 0 }]) {
+    const recording = createStartup(playerState);
+    const response = await recording.start({ recordingId: "mute-option", region: {}, settings: { allowMutedRecording } });
+    const allowed = allowMutedRecording === true || (!playerState.muted && playerState.volume > 0);
+    assert.equal(response.ok, allowed, "muted recording requires an explicit opt-in");
+    assert.deepEqual(recording.refs.video.deref(), playerState, "recording must preserve player mute and volume");
+    if (allowed) { recording.stop(); recording.finish(); }
+    assert.equal(recording.timers.size, 0);
+  }
+}
+const startup = createStartup({ muted: false, volume: 1 });
 assert.deepEqual(await startup.start({ recordingId: "pending-save", region: {}, settings: {} }), { ok: true });
 startup.stop();
 assert.equal(startup.timers.size, 0);

@@ -89,14 +89,14 @@ assert.match(storageText, /enableAutoDownloadRecording: Boolean\(raw\?\.enableAu
 assert.match(storageText, /enableAutoDownloadSplit: Boolean\(raw\?\.enableAutoDownloadSplit\)/);
 assert.match(storageText, /resultTabId: Number\.isFinite\(raw\?\.resultTabId as number\)/);
 assert.match(serviceWorkerText, /autoDownload=1/);
-assert.match(serviceWorkerText, /active: !settings\.enableAutoDownloadRecording/);
+assert.match(serviceWorkerText, /active: settings\.autoFocusResult && !settings\.enableAutoDownloadRecording/);
 assert.match(messagesText, /AUTO_DOWNLOAD_HANDLED/);
 assert.ok(manifest.permissions.includes("downloads"));
 assert.match(resultText, /function waitForDownloadCompletion\(/);
 assert.match(resultText, /if \(autoDownloadRecording\) \{\s*await downloadSourcesAndConfirm/);
 assert.match(resultText, /await downloadSourcesAndConfirm\([\s\S]*?await markAutoDownloadHandled\(\);\s*allowRecordingDeletion = true;\s*window\.close\(\)/);
 assert.match(resultText, /let restoreSourceTabOnClose = !autoDownloadRecording/);
-assert.match(resultText, /function restoreSourceTab\(\): void \{\s*if \(!restoreSourceTabOnClose\) \{\s*return;/);
+assert.match(resultText, /function restoreSourceTab\(\): void \{\s*if \(!restoreSourceTabOnClose \|\| !resultTab\?\.active\) \{\s*return;/);
 assert.match(resultText, /if \(autoDownloadRecording && parts\.length === 0\) \{\s*throw new Error/);
 assert.match(resultText, /async function revealAutoDownloadFailure\(\): Promise<void>/);
 assert.match(resultText, /restoreSourceTabOnClose = true/);

@@ -1454,7 +1454,7 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
     return { ok: false, error: "영상 프레임이 아직 준비되지 않았습니다. 잠시 후 다시 시도하세요." };
   }
 
-  if (video.muted || video.volume === 0) {
+  if (!command.settings.allowMutedRecording && (video.muted || video.volume === 0)) {
     return { ok: false, error: "영상이 음소거되어 녹화할 수 없습니다." };
   }
 

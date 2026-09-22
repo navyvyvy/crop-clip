@@ -25,6 +25,7 @@ export interface Settings {
   outputFormat: RecordingFormat;
   videoBitsPerSecond: number;
   enable60fps: boolean;
+  allowMutedRecording: boolean;
   enableMultiRegion: boolean;
   multiRegionMaxCount: number;
   enableFullRecordButton: boolean;
@@ -32,6 +33,7 @@ export interface Settings {
   enableSeek: boolean;
   seekSeconds: number;
   enableStreamerFilename: boolean;
+  autoFocusResult: boolean;
   enableAutoDownloadRecording: boolean;
   enableAutoDownloadSplit: boolean;
   enableShortcuts: boolean;
@@ -130,6 +132,7 @@ export const DEFAULT_SETTINGS: Settings = {
   outputFormat: RECORDING_FORMAT.webm,
   videoBitsPerSecond: DEFAULT_VIDEO_BITS_PER_SECOND,
   enable60fps: false,
+  allowMutedRecording: false,
   enableMultiRegion: false,
   multiRegionMaxCount: DEFAULT_MULTI_REGION_COUNT,
   enableFullRecordButton: false,
@@ -137,6 +140,7 @@ export const DEFAULT_SETTINGS: Settings = {
   enableSeek: false,
   seekSeconds: DEFAULT_SEEK_SECONDS,
   enableStreamerFilename: false,
+  autoFocusResult: true,
   enableAutoDownloadRecording: false,
   enableAutoDownloadSplit: false,
   enableShortcuts: false,

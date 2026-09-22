@@ -30,214 +30,254 @@
 
         <section class="panel">
           <div class="settings-list">
-            <label class="setting-row">
-              <span class="setting-copy">
-                <span class="setting-title">저장 형식</span>
-                <span class="setting-desc">기본은 WebM입니다.</span>
-              </span>
-              <span class="segmented">
-                <label>
-                  <input type="radio" name="output-format" value="webm" />
-                  <span>WebM</span>
-                </label>
-                <label>
-                  <input type="radio" name="output-format" value="mp4" />
-                  <span>MP4</span>
-                </label>
-              </span>
-            </label>
+            <section class="settings-group" aria-labelledby="recording-settings-title">
+              <h2 id="recording-settings-title" class="settings-heading">녹화 설정</h2>
+              <label class="setting-row">
+                <span class="setting-copy">
+                  <span class="setting-title">저장 형식</span>
+                  <span class="setting-desc">기본은 WebM입니다.</span>
+                </span>
+                <span class="segmented">
+                  <label>
+                    <input type="radio" name="output-format" value="webm" />
+                    <span>WebM</span>
+                  </label>
+                  <label>
+                    <input type="radio" name="output-format" value="mp4" />
+                    <span>MP4</span>
+                  </label>
+                </span>
+              </label>
 
-            <div class="setting-row">
-              <span class="setting-copy">
-                <span class="setting-title">비트레이트</span>
-                <span class="setting-desc">화질·용량 조절, 기본 6 Mbps</span>
-              </span>
-              <span class="bitrate-field">
-                <button id="bitrate-decrease-button" type="button" aria-label="비트레이트 감소">−</button>
-                <input id="custom-video-bitrate-input" type="text" inputmode="decimal" pattern="[0-9.]*" />
-                <span>Mbps</span>
-                <button id="bitrate-increase-button" type="button" aria-label="비트레이트 증가">+</button>
-              </span>
-            </div>
+              <div class="setting-row">
+                <span class="setting-copy">
+                  <span class="setting-title">비트레이트</span>
+                  <span class="setting-desc">화질·용량 조절, 기본 6 Mbps</span>
+                </span>
+                <span class="bitrate-field">
+                  <button id="bitrate-decrease-button" type="button" aria-label="비트레이트 감소">−</button>
+                  <input id="custom-video-bitrate-input" type="text" inputmode="decimal" pattern="[0-9.]*" />
+                  <span>Mbps</span>
+                  <button id="bitrate-increase-button" type="button" aria-label="비트레이트 증가">+</button>
+                </span>
+              </div>
 
-            <label class="setting-row">
-              <span class="setting-copy">
-                <span class="setting-title">60fps 녹화</span>
-                <span class="setting-desc">움직임이 많은 화면에 사용합니다.</span>
-              </span>
-              <span class="segmented">
-                <label>
-                  <input type="radio" name="fps-mode" value="off" />
-                  <span>OFF</span>
-                </label>
-                <label>
-                  <input type="radio" name="fps-mode" value="on" />
-                  <span>ON</span>
-                </label>
-              </span>
-            </label>
+              <label class="setting-row">
+                <span class="setting-copy">
+                  <span class="setting-title">60fps 녹화</span>
+                  <span class="setting-desc">움직임이 많은 화면에 사용합니다.</span>
+                </span>
+                <span class="segmented">
+                  <label>
+                    <input type="radio" name="fps-mode" value="off" />
+                    <span>OFF</span>
+                  </label>
+                  <label>
+                    <input type="radio" name="fps-mode" value="on" />
+                    <span>ON</span>
+                  </label>
+                </span>
+              </label>
 
-            <label class="setting-row">
-              <span class="setting-copy">
-                <span class="setting-title">다중영역</span>
-                <span class="setting-desc">여러 영역을 이어 붙여 녹화합니다.</span>
-              </span>
-              <span class="segmented">
-                <label>
-                  <input type="radio" name="multi-region-mode" value="off" />
-                  <span>OFF</span>
-                </label>
-                <label>
-                  <input type="radio" name="multi-region-mode" value="on" />
-                  <span>ON</span>
-                </label>
-              </span>
-            </label>
+              <div class="setting-row">
+                <span class="setting-copy">
+                  <span id="muted-recording-title" class="setting-title">음소거 중 녹화 허용</span>
+                  <span id="muted-recording-desc" class="setting-desc">녹화 파일에는 소리가 포함됩니다.</span>
+                </span>
+                <span class="segmented" role="radiogroup" aria-labelledby="muted-recording-title" aria-describedby="muted-recording-desc">
+                  <label>
+                    <input type="radio" name="muted-recording-mode" value="off" />
+                    <span>OFF</span>
+                  </label>
+                  <label>
+                    <input type="radio" name="muted-recording-mode" value="on" />
+                    <span>ON</span>
+                  </label>
+                </span>
+              </div>
 
-            <div id="multi-region-count-row" class="setting-row sub-setting-row">
-              <span class="setting-copy">
-                <span class="setting-title">다중영역 개수</span>
-                <span class="setting-desc">동시에 사용할 영역 수, 최대 4개</span>
-              </span>
-              <span class="count-field">
-                <button id="multi-region-count-decrease-button" type="button" aria-label="다중영역 개수 감소">−</button>
-                <input id="multi-region-count-input" type="text" inputmode="numeric" pattern="[0-9]*" />
-                <span>개</span>
-                <button id="multi-region-count-increase-button" type="button" aria-label="다중영역 개수 증가">+</button>
-              </span>
-            </div>
+              <label class="setting-row">
+                <span class="setting-copy">
+                  <span class="setting-title">다중영역</span>
+                  <span class="setting-desc">여러 영역을 이어 붙여 녹화합니다.</span>
+                </span>
+                <span class="segmented">
+                  <label>
+                    <input type="radio" name="multi-region-mode" value="off" />
+                    <span>OFF</span>
+                  </label>
+                  <label>
+                    <input type="radio" name="multi-region-mode" value="on" />
+                    <span>ON</span>
+                  </label>
+                </span>
+              </label>
 
-            <label class="setting-row">
-              <span class="setting-copy">
-                <span class="setting-title">전체 녹화 버튼</span>
-                <span class="setting-desc">플레이어 녹화 버튼 표시</span>
-              </span>
-              <span class="segmented">
-                <label>
-                  <input type="radio" name="full-record-mode" value="off" />
-                  <span>OFF</span>
-                </label>
-                <label>
-                  <input type="radio" name="full-record-mode" value="on" />
-                  <span>ON</span>
-                </label>
-              </span>
-            </label>
+              <div id="multi-region-count-row" class="setting-row sub-setting-row">
+                <span class="setting-copy">
+                  <span class="setting-title">다중영역 개수</span>
+                  <span class="setting-desc">동시에 사용할 영역 수, 최대 4개</span>
+                </span>
+                <span class="count-field">
+                  <button id="multi-region-count-decrease-button" type="button" aria-label="다중영역 개수 감소">−</button>
+                  <input id="multi-region-count-input" type="text" inputmode="numeric" pattern="[0-9]*" />
+                  <span>개</span>
+                  <button id="multi-region-count-increase-button" type="button" aria-label="다중영역 개수 증가">+</button>
+                </span>
+              </div>
 
-            <label class="setting-row">
-              <span class="setting-copy">
-                <span class="setting-title">전체 스크린샷 버튼</span>
-                <span class="setting-desc">플레이어 캡처 버튼 표시</span>
-              </span>
-              <span class="segmented">
-                <label>
-                  <input type="radio" name="full-screenshot-mode" value="off" />
-                  <span>OFF</span>
-                </label>
-                <label>
-                  <input type="radio" name="full-screenshot-mode" value="on" />
-                  <span>ON</span>
-                </label>
-              </span>
-            </label>
+              <label class="setting-row">
+                <span class="setting-copy">
+                  <span class="setting-title">스트리머명 파일명</span>
+                  <span class="setting-desc">파일명 앞에 이름을 붙입니다.</span>
+                </span>
+                <span class="segmented">
+                  <label>
+                    <input type="radio" name="streamer-filename-mode" value="off" />
+                    <span>OFF</span>
+                  </label>
+                  <label>
+                    <input type="radio" name="streamer-filename-mode" value="on" />
+                    <span>ON</span>
+                  </label>
+                </span>
+              </label>
+            </section>
 
-            <label class="setting-row">
-              <span class="setting-copy">
-                <span class="setting-title">시간 탐색</span>
-                <span class="setting-desc">좌/우 방향키로 설정한 초만큼 이동</span>
-              </span>
-              <span class="segmented">
-                <label>
-                  <input type="radio" name="seek-button-mode" value="off" />
-                  <span>OFF</span>
-                </label>
-                <label>
-                  <input type="radio" name="seek-button-mode" value="on" />
-                  <span>ON</span>
-                </label>
-              </span>
-            </label>
+            <section class="settings-group" aria-labelledby="convenience-settings-title">
+              <h2 id="convenience-settings-title" class="settings-heading">편의 기능</h2>
+              <label class="setting-row">
+                <span class="setting-copy">
+                  <span class="setting-title">전체 녹화 버튼</span>
+                  <span class="setting-desc">플레이어 녹화 버튼 표시</span>
+                </span>
+                <span class="segmented">
+                  <label>
+                    <input type="radio" name="full-record-mode" value="off" />
+                    <span>OFF</span>
+                  </label>
+                  <label>
+                    <input type="radio" name="full-record-mode" value="on" />
+                    <span>ON</span>
+                  </label>
+                </span>
+              </label>
 
-            <div id="seek-seconds-row" class="setting-row sub-setting-row">
-              <span class="setting-copy">
-                <span class="setting-title">시간 탐색 이동 시간</span>
-                <span class="setting-desc">한 번에 이동할 시간</span>
-              </span>
-              <span class="seek-field">
-                <button id="seek-decrease-button" type="button" aria-label="이동 시간 감소">−</button>
-                <input id="seek-seconds-input" type="number" step="1" />
-                <span>초</span>
-                <button id="seek-increase-button" type="button" aria-label="이동 시간 증가">+</button>
-              </span>
-            </div>
+              <label class="setting-row">
+                <span class="setting-copy">
+                  <span class="setting-title">전체 스크린샷 버튼</span>
+                  <span class="setting-desc">플레이어 캡처 버튼 표시</span>
+                </span>
+                <span class="segmented">
+                  <label>
+                    <input type="radio" name="full-screenshot-mode" value="off" />
+                    <span>OFF</span>
+                  </label>
+                  <label>
+                    <input type="radio" name="full-screenshot-mode" value="on" />
+                    <span>ON</span>
+                  </label>
+                </span>
+              </label>
 
-            <label class="setting-row">
-              <span class="setting-copy">
-                <span class="setting-title">스트리머명 파일명</span>
-                <span class="setting-desc">파일명 앞에 이름을 붙입니다.</span>
-              </span>
-              <span class="segmented">
-                <label>
-                  <input type="radio" name="streamer-filename-mode" value="off" />
-                  <span>OFF</span>
-                </label>
-                <label>
-                  <input type="radio" name="streamer-filename-mode" value="on" />
-                  <span>ON</span>
-                </label>
-              </span>
-            </label>
+              <label class="setting-row">
+                <span class="setting-copy">
+                  <span class="setting-title">시간 탐색</span>
+                  <span class="setting-desc">좌/우 방향키로 설정한 초만큼 이동</span>
+                </span>
+                <span class="segmented">
+                  <label>
+                    <input type="radio" name="seek-button-mode" value="off" />
+                    <span>OFF</span>
+                  </label>
+                  <label>
+                    <input type="radio" name="seek-button-mode" value="on" />
+                    <span>ON</span>
+                  </label>
+                </span>
+              </label>
 
-            <label class="setting-row">
-              <span class="setting-copy">
-                <span class="setting-title">녹화 완료 자동 다운로드</span>
-                <span class="setting-desc">결과창 없이 원본을 저장합니다.</span>
-              </span>
-              <span class="segmented">
-                <label>
-                  <input type="radio" name="auto-download-recording-mode" value="off" />
-                  <span>OFF</span>
-                </label>
-                <label>
-                  <input type="radio" name="auto-download-recording-mode" value="on" />
-                  <span>ON</span>
-                </label>
-              </span>
-            </label>
+              <div id="seek-seconds-row" class="setting-row sub-setting-row">
+                <span class="setting-copy">
+                  <span class="setting-title">시간 탐색 이동 시간</span>
+                  <span class="setting-desc">한 번에 이동할 시간</span>
+                </span>
+                <span class="seek-field">
+                  <button id="seek-decrease-button" type="button" aria-label="이동 시간 감소">−</button>
+                  <input id="seek-seconds-input" type="number" step="1" />
+                  <span>초</span>
+                  <button id="seek-increase-button" type="button" aria-label="이동 시간 증가">+</button>
+                </span>
+              </div>
 
-            <label class="setting-row">
-              <span class="setting-copy">
-                <span class="setting-title">나누기 자동 다운로드</span>
-                <span class="setting-desc">완료된 파일을 순서대로 저장합니다.</span>
-              </span>
-              <span class="segmented">
-                <label>
-                  <input type="radio" name="auto-download-split-mode" value="off" />
-                  <span>OFF</span>
-                </label>
-                <label>
-                  <input type="radio" name="auto-download-split-mode" value="on" />
-                  <span>ON</span>
-                </label>
-              </span>
-            </label>
+              <div class="setting-row">
+                <span class="setting-copy">
+                  <span id="auto-focus-result-title" class="setting-title">결과창 자동 전환</span>
+                  <span id="auto-focus-result-desc" class="setting-desc">OFF면 방송 화면을 유지합니다.</span>
+                </span>
+                <span class="segmented" role="radiogroup" aria-labelledby="auto-focus-result-title" aria-describedby="auto-focus-result-desc">
+                  <label>
+                    <input type="radio" name="auto-focus-result-mode" value="off" />
+                    <span>OFF</span>
+                  </label>
+                  <label>
+                    <input type="radio" name="auto-focus-result-mode" value="on" />
+                    <span>ON</span>
+                  </label>
+                </span>
+              </div>
 
-            <label class="setting-row">
-              <span class="setting-copy">
-                <span class="setting-title">단축키</span>
-                <span class="setting-desc">설정한 키로 페이지에서 실행</span>
-              </span>
-              <span class="segmented">
-                <label>
-                  <input type="radio" name="shortcut-mode" value="off" />
-                  <span>OFF</span>
-                </label>
-                <label>
-                  <input type="radio" name="shortcut-mode" value="on" />
-                  <span>ON</span>
-                </label>
-              </span>
-            </label>
+              <label class="setting-row">
+                <span class="setting-copy">
+                  <span class="setting-title">녹화 완료 자동 다운로드</span>
+                  <span class="setting-desc">결과창 없이 원본을 저장합니다.</span>
+                </span>
+                <span class="segmented">
+                  <label>
+                    <input type="radio" name="auto-download-recording-mode" value="off" />
+                    <span>OFF</span>
+                  </label>
+                  <label>
+                    <input type="radio" name="auto-download-recording-mode" value="on" />
+                    <span>ON</span>
+                  </label>
+                </span>
+              </label>
+
+              <label class="setting-row">
+                <span class="setting-copy">
+                  <span class="setting-title">나누기 자동 다운로드</span>
+                  <span class="setting-desc">완료된 파일을 순서대로 저장합니다.</span>
+                </span>
+                <span class="segmented">
+                  <label>
+                    <input type="radio" name="auto-download-split-mode" value="off" />
+                    <span>OFF</span>
+                  </label>
+                  <label>
+                    <input type="radio" name="auto-download-split-mode" value="on" />
+                    <span>ON</span>
+                  </label>
+                </span>
+              </label>
+
+              <label class="setting-row">
+                <span class="setting-copy">
+                  <span class="setting-title">단축키</span>
+                  <span class="setting-desc">설정한 키로 페이지에서 실행</span>
+                </span>
+                <span class="segmented">
+                  <label>
+                    <input type="radio" name="shortcut-mode" value="off" />
+                    <span>OFF</span>
+                  </label>
+                  <label>
+                    <input type="radio" name="shortcut-mode" value="on" />
+                    <span>ON</span>
+                  </label>
+                </span>
+              </label>
+            </section>
           </div>
           <p id="fps-warning" class="warning"></p>
 

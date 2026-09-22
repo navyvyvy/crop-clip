@@ -33,6 +33,12 @@ type ConvertFormat = OutputFormat | "gif";
 let autoDownloadSplit = false;
 let restoreSourceTabOnClose = !autoDownloadRecording;
 let allowRecordingDeletion = !autoDownloadRecording;
+// During pagehide the tab may already be gone, so track activity before closing.
+let resultTab: chrome.tabs.Tab | undefined;
+void chrome.tabs.getCurrent().then(tab => { resultTab = tab; }).catch(() => {});
+chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+  if (resultTab?.windowId === windowId) resultTab.active = resultTab.id === tabId;
+});
 
 const elements = {
   resultLoading: document.getElementById("result-loading") as HTMLDivElement,
@@ -1552,7 +1558,7 @@ function startDeletionKeepalive(): void {
 }
 
 function restoreSourceTab(): void {
-  if (!restoreSourceTabOnClose) {
+  if (!restoreSourceTabOnClose || !resultTab?.active) {
     return;
   }
   if (Number.isFinite(sourceTabId) && sourceTabId > 0) {

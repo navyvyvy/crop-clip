@@ -9,7 +9,7 @@
   --accent-strong: #7ae8d4;
   --danger: #ff7474;
   --warn: #ffcf72;
-  --popup-width: 340px;
+  --popup-width: 640px;
 }
 
 * {
@@ -34,6 +34,7 @@ body {
 body {
   height: auto;
   max-height: 600px;
+  overflow-y: auto;
 }
 
 button,
@@ -178,7 +179,24 @@ h1 {
 
 .settings-list {
   display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.settings-group {
+  display: grid;
   gap: 3px;
+  min-width: 0;
+}
+
+.settings-heading {
+  margin: 0 0 4px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .setting-row {
@@ -213,7 +231,7 @@ h1 {
   color: var(--muted);
   font-size: 10px;
   line-height: 1.15;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .bitrate-field,
@@ -332,6 +350,11 @@ h1 {
   color: #06221d;
 }
 
+.segmented input:focus-visible + span {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 1px;
+}
+
 .warning {
   min-height: 0;
   margin-top: 0;
@@ -380,6 +403,10 @@ h1 {
 .icon-link svg {
   width: 16px;
   height: 16px;
+}
+
+body:has(.shortcut-dialog[open]) {
+  min-height: 420px;
 }
 
 .shortcut-dialog {

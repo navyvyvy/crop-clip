@@ -465,7 +465,7 @@ async function openCompletedRecordingResult(): Promise<boolean> {
 
   for (let attempt = 0; attempt < RESULT_TAB_CREATE_ATTEMPTS; attempt += 1) {
     try {
-      const resultTab = await chrome.tabs.create({ url, active: !settings.enableAutoDownloadRecording });
+      const resultTab = await chrome.tabs.create({ url, active: settings.autoFocusResult && !settings.enableAutoDownloadRecording });
       await chrome.alarms.clear(RESULT_TAB_RETRY_ALARM);
       if (settings.enableAutoDownloadRecording) {
         const latestState = await loadRecordingState();

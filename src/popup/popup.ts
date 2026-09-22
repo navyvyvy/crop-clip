@@ -14,6 +14,7 @@ const elements = {
   fullScreenshotButton: document.getElementById("full-screenshot-button") as HTMLButtonElement,
   outputFormatInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='output-format']")),
   fpsModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='fps-mode']")),
+  mutedRecordingModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='muted-recording-mode']")),
   multiRegionModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='multi-region-mode']")),
   multiRegionCountRow: document.getElementById("multi-region-count-row") as HTMLDivElement,
   multiRegionCountDecreaseButton: document.getElementById("multi-region-count-decrease-button") as HTMLButtonElement,
@@ -27,6 +28,7 @@ const elements = {
   seekIncreaseButton: document.getElementById("seek-increase-button") as HTMLButtonElement,
   seekSecondsInput: document.getElementById("seek-seconds-input") as HTMLInputElement,
   streamerFilenameModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='streamer-filename-mode']")),
+  autoFocusResultModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='auto-focus-result-mode']")),
   autoDownloadRecordingModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='auto-download-recording-mode']")),
   autoDownloadSplitModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='auto-download-split-mode']")),
   shortcutModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='shortcut-mode']")),
@@ -141,6 +143,9 @@ function syncPresetUi(settings: Settings): void {
   for (const input of elements.fpsModeInputs) {
     input.checked = input.value === (settings.enable60fps ? "on" : "off");
   }
+  for (const input of elements.mutedRecordingModeInputs) {
+    input.checked = input.value === (settings.allowMutedRecording ? "on" : "off");
+  }
   for (const input of elements.multiRegionModeInputs) {
     input.checked = input.value === (settings.enableMultiRegion ? "on" : "off");
   }
@@ -159,6 +164,9 @@ function syncPresetUi(settings: Settings): void {
   elements.seekSecondsInput.value = String(settings.seekSeconds);
   for (const input of elements.streamerFilenameModeInputs) {
     input.checked = input.value === (settings.enableStreamerFilename ? "on" : "off");
+  }
+  for (const input of elements.autoFocusResultModeInputs) {
+    input.checked = input.value === (settings.autoFocusResult ? "on" : "off");
   }
   for (const input of elements.autoDownloadRecordingModeInputs) {
     input.checked = input.value === (settings.enableAutoDownloadRecording ? "on" : "off");
@@ -198,6 +206,7 @@ function renderState(): void {
   const controls = [
     ...elements.outputFormatInputs,
     ...elements.fpsModeInputs,
+    ...elements.mutedRecordingModeInputs,
     ...elements.multiRegionModeInputs,
     elements.multiRegionCountDecreaseButton,
     elements.multiRegionCountIncreaseButton,
@@ -209,6 +218,7 @@ function renderState(): void {
     elements.seekIncreaseButton,
     elements.seekSecondsInput,
     ...elements.streamerFilenameModeInputs,
+    ...elements.autoFocusResultModeInputs,
     ...elements.autoDownloadRecordingModeInputs,
     ...elements.autoDownloadSplitModeInputs,
     ...elements.shortcutModeInputs,
@@ -265,6 +275,7 @@ async function refreshAppState(): Promise<void> {
 function readSettingsFromUi(): Settings {
   const outputFormat = (elements.outputFormatInputs.find((input) => input.checked)?.value ?? DEFAULT_SETTINGS.outputFormat) as RecordingFormat;
   const enable60fps = elements.fpsModeInputs.find((input) => input.checked)?.value === "on";
+  const allowMutedRecording = elements.mutedRecordingModeInputs.find((input) => input.checked)?.value === "on";
   const enableMultiRegion = elements.multiRegionModeInputs.find((input) => input.checked)?.value === "on";
   const multiRegionMaxCount = Number(elements.multiRegionCountInput.value || DEFAULT_MULTI_REGION_COUNT);
   const enableFullRecordButton = elements.fullRecordModeInputs.find((input) => input.checked)?.value !== "off";
@@ -272,6 +283,7 @@ function readSettingsFromUi(): Settings {
   const enableSeek = elements.seekButtonModeInputs.find((input) => input.checked)?.value !== "off";
   const seekSeconds = Number(elements.seekSecondsInput.value || DEFAULT_SEEK_SECONDS);
   const enableStreamerFilename = elements.streamerFilenameModeInputs.find((input) => input.checked)?.value !== "off";
+  const autoFocusResult = elements.autoFocusResultModeInputs.find((input) => input.checked)?.value !== "off";
   const enableAutoDownloadRecording = elements.autoDownloadRecordingModeInputs.find((input) => input.checked)?.value !== "off";
   const enableAutoDownloadSplit = elements.autoDownloadSplitModeInputs.find((input) => input.checked)?.value !== "off";
   const enableShortcuts = elements.shortcutModeInputs.find((input) => input.checked)?.value !== "off";
@@ -282,6 +294,7 @@ function readSettingsFromUi(): Settings {
     outputFormat,
     videoBitsPerSecond,
     enable60fps,
+    allowMutedRecording,
     enableMultiRegion,
     multiRegionMaxCount,
     enableFullRecordButton,
@@ -289,6 +302,7 @@ function readSettingsFromUi(): Settings {
     enableSeek,
     seekSeconds,
     enableStreamerFilename,
+    autoFocusResult,
     enableAutoDownloadRecording,
     enableAutoDownloadSplit,
     enableShortcuts,
@@ -464,7 +478,7 @@ elements.fullScreenshotButton.addEventListener("click", () => {
   });
 });
 
-for (const element of [...elements.outputFormatInputs, ...elements.fpsModeInputs, ...elements.multiRegionModeInputs, ...elements.fullRecordModeInputs, ...elements.fullScreenshotModeInputs, ...elements.seekButtonModeInputs, ...elements.streamerFilenameModeInputs, ...elements.autoDownloadRecordingModeInputs, ...elements.autoDownloadSplitModeInputs, ...elements.shortcutModeInputs]) {
+for (const element of [...elements.outputFormatInputs, ...elements.fpsModeInputs, ...elements.mutedRecordingModeInputs, ...elements.multiRegionModeInputs, ...elements.fullRecordModeInputs, ...elements.fullScreenshotModeInputs, ...elements.seekButtonModeInputs, ...elements.streamerFilenameModeInputs, ...elements.autoFocusResultModeInputs, ...elements.autoDownloadRecordingModeInputs, ...elements.autoDownloadSplitModeInputs, ...elements.shortcutModeInputs]) {
   element.addEventListener("change", () => {
     void persistUiSettings();
   });
