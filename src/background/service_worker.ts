@@ -141,7 +141,7 @@ async function sendCommandToContentScript<T = undefined>(tabId: number, message:
       });
       await chrome.scripting.executeScript({
         target: { tabId },
-        files: ["content/region_selector.js"],
+        files: ["shared/recording_encoder.js", "content/region_selector.js"],
       });
       await delay(TAB_MESSAGE_RETRY_DELAY_MS);
       return await sendMessage();
@@ -284,6 +284,12 @@ async function startRecordingSession(fullPlayer: boolean): Promise<MessageRespon
     if (!delivered || latestState.status === RECORDING_STATUS.completed) {
       return fail("이전 녹화 결과를 준비 중입니다. 잠시 후 다시 시도하세요.");
     }
+  }
+
+  // Keep the timer and recording state idle until GPU discovery is complete.
+  if (state.settings.outputFormat === "mp4") {
+    const prepared = await sendCommandToContentScript(tabId, { type: "PREPARE_DIRECT_RECORDING" });
+    if (!prepared.ok) return prepared;
   }
 
   const settings = state.settings;

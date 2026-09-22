@@ -1149,6 +1149,7 @@ async function renderTimelineThumbnails(part: LoadedPart | undefined): Promise<v
 }
 
 async function recordVideoRange(video: HTMLVideoElement, startSeconds: number, endSeconds: number, mimeType: string): Promise<Blob> {
+  if (mimeType.startsWith("video/mp4")) await prepareRecordingEncoder();
   await seekVideo(video, startSeconds);
   const streamSource = video as HTMLVideoElement & { captureStream?: () => MediaStream; mozCaptureStream?: () => MediaStream };
   const stream = streamSource.captureStream?.() ?? streamSource.mozCaptureStream?.();
@@ -1156,63 +1157,51 @@ async function recordVideoRange(video: HTMLVideoElement, startSeconds: number, e
     throw new Error("브라우저가 결과 영상 분할을 지원하지 않습니다.");
   }
 
-  const chunks: BlobPart[] = [];
-  const options = mimeType ? { mimeType } : undefined;
-  const recorder = new MediaRecorder(stream, options);
-  const stopped = new Promise<Blob>((resolve, reject) => {
-    recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        chunks.push(event.data);
-      }
-    };
-    recorder.onstop = () => {
-      resolve(new Blob(chunks, { type: mimeType || "video/webm" }));
-    };
-    recorder.onerror = () => {
-      reject(new Error("영상 파일을 만드는 중 녹화 오류가 발생했습니다."));
-    };
-  });
-
+  let recorder: MediaRecorder | undefined;
+  let cleanupPlayback = () => {};
   try {
-    recorder.start(MILLISECONDS_PER_SECOND);
-    await video.play();
-    await new Promise<void>((resolve, reject) => {
+    const activeRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    recorder = activeRecorder;
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      const chunks: BlobPart[] = [];
       let timeoutId = 0;
-      const cleanup = () => {
+      const check = () => {
+        if (video.currentTime >= endSeconds || video.ended) {
+          video.pause();
+          if (activeRecorder.state !== "inactive") activeRecorder.stop();
+        }
+      };
+      const onError = () => reject(new Error("영상 파일을 재생하지 못했습니다."));
+      cleanupPlayback = () => {
         video.removeEventListener("timeupdate", check);
         video.removeEventListener("error", onError);
         window.clearTimeout(timeoutId);
       };
-      const check = () => {
-        if (video.currentTime >= endSeconds || video.ended) {
-          cleanup();
-          resolve();
-        }
+      activeRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) chunks.push(event.data);
       };
-      const onError = () => {
-        cleanup();
-        reject(new Error("영상 파일을 재생하지 못했습니다."));
-      };
+      activeRecorder.onstop = () => resolve(new Blob(chunks, { type: mimeType || "video/webm" }));
+      activeRecorder.onerror = () => reject(new Error("영상 파일을 만드는 중 녹화 오류가 발생했습니다."));
       video.addEventListener("timeupdate", check);
       video.addEventListener("error", onError, { once: true });
+      activeRecorder.start(MILLISECONDS_PER_SECOND);
       timeoutId = window.setTimeout(() => {
-        cleanup();
         reject(new Error("영상 구간 처리 시간이 초과되었습니다."));
       }, Math.max(MEDIA_EVENT_TIMEOUT_MS, (endSeconds - startSeconds) * MILLISECONDS_PER_SECOND + MEDIA_EVENT_TIMEOUT_MS));
+      void video.play().then(check, reject);
     });
-    video.pause();
-    if (recorder.state !== "inactive") {
-      recorder.stop();
-    }
-    const blob = await stopped;
     if (blob.size <= 0) {
       throw new Error("변환된 영상 데이터가 비어 있습니다.");
     }
     return blob;
   } finally {
+    cleanupPlayback();
     video.pause();
-    if (recorder.state !== "inactive") {
-      recorder.stop();
+    if (recorder) {
+      recorder.ondataavailable = null;
+      recorder.onstop = null;
+      recorder.onerror = null;
+      if (recorder.state !== "inactive") recorder.stop();
     }
     stream.getTracks().forEach((track) => track.stop());
   }

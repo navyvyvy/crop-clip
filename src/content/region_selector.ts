@@ -250,6 +250,7 @@ function getVideoStream(video: HTMLVideoElement): MediaStream | null {
     captured.addEventListener("addtrack", (event) => prepareTrack(event.track));
     playerCaptureStreams.set(video, captured);
     let parents: Node[] = [];
+    let detachTimer = 0;
     const watchParents = () => {
       const next: Node[] = [];
       for (let parent = video.parentNode; parent; parent = parent.parentNode) next.push(parent);
@@ -258,9 +259,17 @@ function getVideoStream(video: HTMLVideoElement): MediaStream | null {
       next.forEach(parent => detachObserver.observe(parent, { childList: true }));
       parents = next;
     };
-    const detachObserver = new MutationObserver(() => {
+    const checkAttachment = () => {
       if (video.isConnected) {
+        window.clearTimeout(detachTimer);
+        detachTimer = 0;
         watchParents();
+        return;
+      }
+      // SPA layouts may detach the playing element before mounting the mini player.
+      // Allow one second for reattachment, then release a genuinely removed player.
+      if (!detachTimer) {
+        detachTimer = window.setTimeout(checkAttachment, 1000);
         return;
       }
       released = true;
@@ -269,6 +278,9 @@ function getVideoStream(video: HTMLVideoElement): MediaStream | null {
       playerCaptureStreams.delete(video);
       if (directSession?.video === video) stopDirectRecordingAfterSourceChange(directSession);
       captured.getTracks().forEach(prepareTrack);
+    };
+    const detachObserver = new MutationObserver(() => {
+      if (video.isConnected || !detachTimer) checkAttachment();
     });
     watchParents();
   }
@@ -1428,6 +1440,7 @@ async function startDirectPart(session: DirectRecordingSession): Promise<void> {
 function ignoreRecordingRejection(): void {}
 
 async function startDirectRecording(command: Extract<ContentCommand, { type: "START_DIRECT_RECORDING" }>): Promise<MessageResponse> {
+  if (command.settings.outputFormat === "mp4") await prepareRecordingEncoder();
   if (directSession) {
     cancelDirectRecordingSession(directSession);
   }
@@ -3537,6 +3550,13 @@ function findPrimaryVideoElement(): HTMLVideoElement | null {
 
 if (isExtensionContextAvailable()) {
   chrome.runtime.onMessage.addListener((message: ContentCommand, _sender, sendResponse: (response: MessageResponse | MessageResponse<boolean> | RegionGeometryResponse | RegionGeometriesResponse) => void) => {
+    if (message.type === "PREPARE_DIRECT_RECORDING") {
+      void prepareRecordingEncoder()
+        .then(() => sendResponse({ ok: true }))
+        .catch((error: Error) => sendResponse({ ok: false, error: error.message }));
+      return true;
+    }
+
     if (message.type === "HAS_DIRECT_RECORDING") {
       sendResponse({ ok: true, data: directSession?.recordingId === message.recordingId });
       return false;

@@ -33,7 +33,7 @@
     {
       "matches": ["*://*.chzzk.naver.com/*"],
       "css": ["content/region_selector.css"],
-      "js": ["content/region_selector.js"],
+      "js": ["shared/recording_encoder.js", "content/region_selector.js"],
       "run_at": "document_idle"
     }
   ]

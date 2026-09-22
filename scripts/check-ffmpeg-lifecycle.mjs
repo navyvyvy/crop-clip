@@ -77,3 +77,53 @@ for (const ownsUrl of [false, true]) {
   assert.equal(revoked.length, Number(ownsUrl), "only revoke URLs owned by the temporary video");
 }
 console.log("FFmpeg lifecycle checks passed");
+
+const rangeSource = file.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "recordVideoRange");
+for (const failure of ["constructor", "start", "play", "encoder", "video", "timeout", "none"]) {
+  const track = { readyState: "live", stop() { this.readyState = "ended"; } };
+  const timers = new Map(), listeners = new Set();
+  let encoder;
+  class Video extends EventTarget {
+    currentTime = 0;
+    ended = false;
+    paused = true;
+    captureStream() { return { getTracks: () => [track] }; }
+    pause() { this.paused = true; }
+    async play() {
+      if (failure === "play") throw new Error("play failed");
+      this.paused = false;
+      queueMicrotask(() => {
+        if (failure === "encoder") encoder.onerror();
+        else if (failure === "video") this.dispatchEvent(new Event("error"));
+        else if (failure === "timeout") timers.values().next().value();
+        else { this.currentTime = 10; this.dispatchEvent(new Event("timeupdate")); }
+      });
+    }
+    addEventListener(name, listener, options) { listeners.add(listener); super.addEventListener(name, listener, options); }
+    removeEventListener(name, listener) { listeners.delete(listener); super.removeEventListener(name, listener); }
+  }
+  class Recorder {
+    state = "inactive";
+    constructor() { if (failure === "constructor") throw new Error("constructor failed"); encoder = this; }
+    start() { if (failure === "start") throw new Error("start failed"); this.state = "recording"; }
+    stop() {
+      this.state = "inactive";
+      queueMicrotask(() => { this.ondataavailable?.({ data: new Blob(["video"]) }); this.onstop?.(); });
+    }
+  }
+  const recordRange = new Function("MediaRecorder", "window", `
+    const seekVideo = async () => {}, MILLISECONDS_PER_SECOND = 1000, MEDIA_EVENT_TIMEOUT_MS = 30000;
+    const prepareRecordingEncoder = async () => {};
+    ${compile(rangeSource.getText(file))}
+    return recordVideoRange;
+  `)(Recorder, { setTimeout(fn) { timers.set(1, fn); return 1; }, clearTimeout(id) { timers.delete(id); } });
+  const video = new Video();
+  const result = recordRange(video, 0, 10, "video/webm");
+  if (failure === "none") assert.ok((await result).size > 0);
+  else await assert.rejects(result);
+  assert.equal(track.readyState, "ended", failure + ": release captured tracks on every exit");
+  assert.equal(video.paused, true, failure + ": pause the temporary player");
+  assert.equal(timers.size, 0, failure + ": cancel range timeout");
+  assert.equal(listeners.size, 0, failure + ": remove playback listeners");
+}
+console.log("recorder conversion cleanup checks passed");

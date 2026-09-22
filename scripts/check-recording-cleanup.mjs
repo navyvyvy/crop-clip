@@ -24,10 +24,11 @@ function visit(node) {
   ts.forEachChild(node, visit);
 }
 visit(file);
-const { cleanup, getVideoStream, startDirectPart, messages, observers } = new Function("MediaStream", `
+const { cleanup, getVideoStream, startDirectPart, messages, observers, detachTimers } = new Function("MediaStream", `
   let directSession = null;
   const playerCaptureStreams = new WeakMap();
-  const window = { clearInterval() {} };
+  const detachTimers = new Map();
+  const window = { clearInterval() {}, setTimeout(fn) { detachTimers.set(1, fn); return 1; }, clearTimeout(id) { detachTimers.delete(id); } };
   const AUDIO_BITS_PER_SECOND = 128000, MILLISECONDS_PER_SECOND = 1000;
   const messages = [];
   const observers = [];
@@ -44,7 +45,7 @@ const { cleanup, getVideoStream, startDirectPart, messages, observers } = new Fu
     stop() { this.state = 'inactive'; }
   }
   ${ts.transpile(functions.join("\n"), { target: ts.ScriptTarget.ES2022 })}
-  return { cleanup: cleanupDirectRecordingSession, getVideoStream, startDirectPart, messages, observers };
+  return { cleanup: cleanupDirectRecordingSession, getVideoStream, startDirectPart, messages, observers, detachTimers };
 `)(Stream);
 function track(kind = "video") { return { kind, enabled: true, readyState: "live", clone() { return track(this.kind); }, stop() { this.readyState = "ended"; } }; }
 function Stream(tracks) { return new FakeStream(tracks); }
@@ -115,6 +116,27 @@ assert.equal(detachWatcher.connected, true, "moving a connected player must keep
 assert.equal(captured.getAudioTracks().length, 1);
 player.isConnected = false;
 detachWatcher.callback();
+assert.equal(captured.getAudioTracks().length, 1, "a temporary detach during search must not release recording audio");
+assert.equal(detachTimers.size, 1);
+player.isConnected = true;
+player.parentNode = { parentNode: null };
+detachWatcher.callback();
+assert.equal(detachTimers.size, 0, "reattaching the mini player cancels disposal");
+assert.equal(getVideoStream(player).getAudioTracks()[0].readyState, "live");
+player.isConnected = false;
+detachWatcher.callback();
+const recheck = detachTimers.get(1);
+detachWatcher.callback();
+assert.equal(detachTimers.get(1), recheck, "other DOM mutations must not postpone disposal indefinitely");
+player.isConnected = true;
+recheck();
+assert.equal(detachTimers.size, 0, "the deadline also detects reattachment outside watched parents");
+assert.equal(captured.getAudioTracks().length, 1);
+player.isConnected = false;
+detachWatcher.callback();
+const dispose = detachTimers.get(1);
+detachTimers.clear();
+dispose();
 assert.equal(detachWatcher.connected, false, "stop watching after the player is detached");
 assert.equal(captured.getTracks().length, 0, "detach releases the reusable audio connection");
 const detachedAudio = track("audio");
@@ -222,6 +244,7 @@ const startup = new Function(`
     const player = { muted: false, volume: 1 }; refs.video = new WeakRef(player); return player;
   };
   const waitForCurrentVideoFrame = async () => true;
+  const prepareRecordingEncoder = async () => {};
   const computeDirectCropFromSelection = () => ({});
   const computeDirectLayout = () => ({ output: { width: 1920, height: 1080 }, placements: [] });
   const selectDirectMimeType = () => ({ mimeType: 'video/webm', extension: 'webm' });
@@ -249,3 +272,29 @@ assert.equal(startup.refs.canvas.deref(), undefined, "pending completion must no
 assert.equal(startup.refs.video.deref(), undefined, "pending completion must not retain the source player through a closure");
 startup.finish();
 console.log("recording pending-save collection checks passed");
+
+const encoderSource = fs.readFileSync(new URL("../src/shared/recording_encoder.ts", import.meta.url), "utf8");
+for (const scenario of ["ready", "unavailable", "error", "timeout"]) {
+  const timers = new Map();
+  let finishDiscovery, settled = false;
+  const encoder = scenario === "unavailable" ? undefined : {
+    isConfigSupported(config) {
+      assert.equal(config.hardwareAcceleration, "prefer-hardware");
+      return new Promise((resolve, reject) => { finishDiscovery = () => scenario === "error" ? reject(new Error("discovery failed")) : resolve({ supported: false }); });
+    },
+  };
+  const prepare = new Function("VideoEncoder", "window", `${ts.transpile(encoderSource)}; return prepareRecordingEncoder;`)(encoder, {
+    setTimeout(fn) { timers.set(1, fn); return 1; }, clearTimeout(id) { timers.delete(id); },
+  });
+  const pending = prepare().finally(() => { settled = true; });
+  if (scenario !== "unavailable") {
+    await Promise.resolve();
+    assert.equal(settled, false, "recording must wait for encoder discovery");
+    if (scenario === "timeout") timers.get(1)();
+    else finishDiscovery();
+  }
+  if (["error", "timeout"].includes(scenario)) await assert.rejects(pending);
+  else await pending;
+  assert.equal(timers.size, 0, "encoder preparation must release its deadline on every exit");
+}
+console.log("recording encoder preparation checks passed");
