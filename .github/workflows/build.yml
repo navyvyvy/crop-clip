@@ -36,6 +36,7 @@ jobs:
       - run: node scripts/check-recording-cleanup.mjs
       - run: node scripts/check-recording-backpressure.mjs
       - run: node scripts/check-recording-navigation.mjs
+      - run: node scripts/check-player-input.mjs
       - run: node scripts/check-release-notes.mjs
       - run: npm run build
       - run: node scripts/check-time-range.mjs

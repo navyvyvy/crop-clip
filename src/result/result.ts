@@ -968,7 +968,7 @@ function getSplitPresetValue(button: HTMLButtonElement): number {
   if (Number.isFinite(ratio) && ratio > 0) {
     const duration = getFullSourceDuration();
     const range = getSelectedTimeRange(duration);
-    return Math.max(1, Math.ceil(roundTrimTime(range.end - range.start) * ratio));
+    return Math.max(1, Math.ceil((range.end - range.start) * ratio));
   }
 
   return Number(button.dataset.splitValue);

@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import ts from "typescript";
 import { bytesToMegabytes, estimateRangeSize, floorTimeToStep, getExpectedSplitCount, getNextSizeSplitSeconds, isFullTimeRange, megabytesToBytes, normalizeTimeRange, parseSegmentTimeList, parseTimeInput, snapTimeRangeValue, updateTimeRangeHandle } from "../dist/shared/time_range.js";
 
 assert.deepEqual(normalizeTimeRange(-5, 80, 50), { start: 0, end: 50 });
@@ -34,3 +36,22 @@ assert.equal(snapTimeRangeValue(0.02, 3.143), 0);
 assert.equal(snapTimeRangeValue(8.7, 20), 8.7);
 
 console.log("time range checks passed");
+
+const source = ts.createSourceFile("result.ts", fs.readFileSync(new URL("../src/result/result.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
+const preset = source.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "getSplitPresetValue");
+const presetValue = new Function("duration", `
+  const TIME_STEP_SECONDS = 0.1, TIME_DECIMAL_PLACES = 1;
+  const getFullSourceDuration = () => duration;
+  const getSelectedTimeRange = () => ({ start: 0, end: duration });
+  const roundTrimTime = seconds => Math.round(seconds * 10) / 10;
+  ${ts.transpile(preset.getText(source), { target: ts.ScriptTarget.ES2022 })}
+  return getSplitPresetValue;
+`);
+for (const duration of [9, 10, 10.03, 10.049, 30.001]) {
+  for (const count of [2, 3, 4]) {
+    const dataset = count === 2 ? { splitRatio: "0.5" } : { splitCount: String(count) };
+    const seconds = presetValue(duration)({ dataset });
+    assert.equal(getExpectedSplitCount(duration, seconds), count, `${duration}s / ${count}: rounded duration must not create an extra segment`);
+  }
+}
+console.log("split preset checks passed");

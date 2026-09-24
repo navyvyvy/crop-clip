@@ -79,7 +79,6 @@ assert.match(resultText, /window\.addEventListener\("pageshow"/);
 assert.doesNotMatch(resultText, /createDurationSplitWithRecorder/);
 assert.match(resultText, /"-break_non_keyframes", "1"/);
 assert.match(resultText, /function getSplitPresetValue\(/);
-assert.match(resultText, /Math\.ceil\(roundTrimTime\(range\.end - range\.start\) \* ratio\)/);
 assert.match(resultText, /querySelectorAll<HTMLButtonElement>\("\[data-split-mode\]"\)/);
 assert.match(resultText, /빠른 변환을 지원하지 않아 실시간으로 처리 중입니다/);
 assert.match(settingsText, /enableAutoDownloadRecording: false/);

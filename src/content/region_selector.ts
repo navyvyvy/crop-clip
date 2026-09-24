@@ -52,7 +52,6 @@ const SECONDS_PER_HOUR = 3_600;
 const STANDARD_RECORDING_FRAME_RATE = 30;
 const HIGH_RECORDING_FRAME_RATE = 60;
 const VIDEO_FRAME_READY_TIMEOUT_MS = 3_000;
-const POINTER_CLICK_DEDUP_MS = 500;
 const CHZZK_TOOL_DISCOVERY_INTERVAL_MS = 500;
 const SEEK_FEEDBACK_DURATION_MS = 650;
 const CROP_ACCENT = "#5bd6bf";
@@ -182,15 +181,14 @@ let removeSelectionHandlers: (() => void) | null = null;
 let removeBorderHandlers: (() => void) | null = null;
 let currentRecordingState: LocalRecordingState = { status: RECORDING_STATUS.idle };
 let directSession: DirectRecordingSession | null = null;
-let recordingCommandInFlight = false;
+type RecordingControlCommand = "START_RECORDING" | "START_FULL_RECORDING" | "STOP_RECORDING" | "CANCEL_RECORDING";
+let recordingCommandInFlight: RecordingControlCommand | null = null;
+let pendingRecordingTerminalCommand: "STOP_RECORDING" | "CANCEL_RECORDING" | null = null;
 let chzzkToolObserver: MutationObserver | null = null;
 let chzzkToolDiscoveryTimerId: number | null = null;
 let chzzkToolSyncFrame: number | null = null;
 let chzzkRecordTimerId: number | null = null;
 let seekFeedbackTimerId: number | null = null;
-let lastRecordPointerActivationAt = 0;
-let lastScreenshotPointerActivationAt = 0;
-let lastCancelPointerActivationAt = 0;
 let regionLayoutObserver: ResizeObserver | null = null;
 let regionLayoutVideo: HTMLVideoElement | null = null;
 let regionLayoutSyncFrame: number | null = null;
@@ -276,6 +274,7 @@ function getVideoStream(video: HTMLVideoElement): MediaStream | null {
       detachObserver.disconnect();
       parents = [];
       playerCaptureStreams.delete(video);
+      if (regionLayoutVideo === video) stopRegionLayoutWatch();
       if (directSession?.video === video) stopDirectRecordingAfterSourceChange(directSession);
       captured.getTracks().forEach(prepareTrack);
     };
@@ -1094,64 +1093,57 @@ async function captureFullScreenshot(alertOnError = true): Promise<MessageRespon
   return await captureScreenshot(getPlayerRegionGeometry(), "스크린샷을 찍을 비디오 영역을 찾지 못했습니다.", alertOnError);
 }
 
-async function toggleRegionRecording(): Promise<void> {
+async function runRecordingCommand(type: RecordingControlCommand): Promise<void> {
   if (recordingCommandInFlight) {
+    const starting = recordingCommandInFlight === "START_RECORDING" || recordingCommandInFlight === "START_FULL_RECORDING";
+    if (starting && (type === recordingCommandInFlight || type === "STOP_RECORDING" || type === "CANCEL_RECORDING")) {
+      // Keep one terminal request; repeated inputs must never queue a new recording.
+      pendingRecordingTerminalCommand = type === "CANCEL_RECORDING" ? type : pendingRecordingTerminalCommand ?? "STOP_RECORDING";
+      showPlayerFeedback(pendingRecordingTerminalCommand === "CANCEL_RECORDING" ? "녹화 시작 후 취소합니다." : "녹화 시작 후 정지합니다.");
+    } else {
+      showPlayerFeedback("녹화 명령을 처리 중입니다. 잠시 후 다시 눌러 주세요.");
+    }
     return;
   }
 
+  recordingCommandInFlight = type;
+  let succeeded = false;
+  try {
+    showPlayerFeedback(type === "STOP_RECORDING" ? "녹화를 종료하고 저장 중입니다."
+      : type === "CANCEL_RECORDING" ? "녹화를 취소 중입니다." : "녹화를 시작 중입니다.");
+    const response = await sendRuntimeMessage({ type });
+    if (!response.ok) throw new Error(response.error);
+    succeeded = true;
+  } finally {
+    const pending = pendingRecordingTerminalCommand;
+    pendingRecordingTerminalCommand = null;
+    recordingCommandInFlight = null;
+    if (succeeded && pending) await runRecordingCommand(pending);
+  }
+}
+
+async function toggleRegionRecording(): Promise<void> {
   if (currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode === RECORDING_MODE.full) {
     window.alert("전체 녹화 중에는 영역 녹화를 시작할 수 없습니다.");
     return;
   }
 
   const type = currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode !== RECORDING_MODE.full ? "STOP_RECORDING" : "START_RECORDING";
-  recordingCommandInFlight = true;
-  try {
-    const response = await sendRuntimeMessage({ type });
-    if (!response.ok) {
-      window.alert(response.error);
-    }
-  } finally {
-    recordingCommandInFlight = false;
-  }
+  await runRecordingCommand(type);
 }
 
 async function toggleFullRecording(): Promise<void> {
-  if (recordingCommandInFlight) {
-    return;
-  }
-
   if (currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode !== RECORDING_MODE.full) {
     window.alert("영역 녹화 중에는 전체 녹화를 시작할 수 없습니다.");
     return;
   }
 
   const type = currentRecordingState.status === RECORDING_STATUS.recording ? "STOP_RECORDING" : "START_FULL_RECORDING";
-  recordingCommandInFlight = true;
-  try {
-    const response = await sendRuntimeMessage({ type });
-    if (!response.ok) {
-      window.alert(response.error);
-    }
-  } finally {
-    recordingCommandInFlight = false;
-  }
+  await runRecordingCommand(type);
 }
 
 async function cancelRecording(): Promise<void> {
-  if (recordingCommandInFlight) {
-    return;
-  }
-
-  recordingCommandInFlight = true;
-  try {
-    const response = await sendRuntimeMessage({ type: "CANCEL_RECORDING" });
-    if (!response.ok) {
-      throw new Error(response.error);
-    }
-  } finally {
-    recordingCommandInFlight = false;
-  }
+  await runRecordingCommand("CANCEL_RECORDING");
 }
 
 function sendRuntimeMessage<T = undefined>(message: Record<string, unknown>): Promise<MessageResponse & { data?: T }> {
@@ -2027,43 +2019,8 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
   const onRecord = (event: MouseEvent) => {
     event.preventDefault();
     event.stopPropagation();
-    if (currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode === RECORDING_MODE.full) {
-      return;
-    }
-    if (recordingCommandInFlight) {
-      return;
-    }
-
-    const type = currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode !== RECORDING_MODE.full ? "STOP_RECORDING" : "START_RECORDING";
-    const previousRecordingState = currentRecordingState;
-    if (type === "STOP_RECORDING") {
-      currentRecordingState = { status: RECORDING_STATUS.idle };
-      updateRecordButton();
-    }
-
-    recordingCommandInFlight = true;
-    void sendRuntimeMessage({ type }).then((response) => {
-      if (response.ok) {
-        if (type === "START_RECORDING") {
-          currentRecordingState = { status: RECORDING_STATUS.recording, startedAt: Date.now(), mode: RECORDING_MODE.region };
-          updateRecordButton();
-        }
-        return;
-      }
-      if (type === "STOP_RECORDING") {
-        currentRecordingState = previousRecordingState;
-        updateRecordButton();
-      }
-      window.alert(response.error);
-    }).catch((error: Error) => {
-      if (type === "STOP_RECORDING") {
-        currentRecordingState = previousRecordingState;
-        updateRecordButton();
-      }
-      window.alert(error.message);
-    }).finally(() => {
-      recordingCommandInFlight = false;
-    });
+    // Storage changes rebuild the controls; late replies must not update this border.
+    void toggleRegionRecording().catch((error: Error) => window.alert(error.message));
   };
 
   updateRecordButton();
@@ -2072,14 +2029,7 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
   const onCancelRecording = (event: MouseEvent) => {
     event.preventDefault();
     event.stopPropagation();
-    const previousRecordingState = currentRecordingState;
-    currentRecordingState = { status: RECORDING_STATUS.idle };
-    updateRecordButton();
-    void cancelRecording().catch((error: Error) => {
-      currentRecordingState = previousRecordingState;
-      updateRecordButton();
-      window.alert(error.message);
-    });
+    void cancelRecording().catch((error: Error) => window.alert(error.message));
   };
 
   bindClick(cancelButton, onCancelRecording);
@@ -2906,16 +2856,6 @@ function handlePlayerScreenshotActivation(event: MouseEvent): void {
     return;
   }
 
-  const now = Date.now();
-  if (event.type === "click" && now - lastScreenshotPointerActivationAt < POINTER_CLICK_DEDUP_MS) {
-    event.preventDefault();
-    event.stopPropagation();
-    return;
-  }
-  if (event.type === "pointerdown") {
-    lastScreenshotPointerActivationAt = now;
-  }
-
   event.preventDefault();
   event.stopPropagation();
   void captureFullScreenshot();
@@ -2950,77 +2890,17 @@ function handlePlayerRecordActivation(event: MouseEvent): void {
     return;
   }
 
-  const now = Date.now();
-  if (event.type === "click" && now - lastRecordPointerActivationAt < POINTER_CLICK_DEDUP_MS) {
-    event.preventDefault();
-    event.stopPropagation();
-    return;
-  }
-  if (event.type === "pointerdown") {
-    lastRecordPointerActivationAt = now;
-  }
-
   event.preventDefault();
   event.stopPropagation();
   if (currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode !== RECORDING_MODE.full) {
     return;
   }
-  if (recordingCommandInFlight) {
-    return;
-  }
-
-  const type = currentRecordingState.status === RECORDING_STATUS.recording ? "STOP_RECORDING" : "START_FULL_RECORDING";
-  const previousRecordingState = currentRecordingState;
-  if (type === "STOP_RECORDING") {
-    currentRecordingState = { status: RECORDING_STATUS.idle };
-    requestChzzkToolSync();
-    syncChzzkRecordTimer();
-  }
-
-  recordingCommandInFlight = true;
-  void sendRuntimeMessage({ type })
-    .then((response) => {
-      if (response.ok) {
-        if (type === "START_FULL_RECORDING") {
-          currentRecordingState = { status: RECORDING_STATUS.recording, startedAt: Date.now(), mode: RECORDING_MODE.full };
-          requestChzzkToolSync();
-          syncChzzkRecordTimer();
-        }
-        return;
-      }
-      if (type === "STOP_RECORDING") {
-        currentRecordingState = previousRecordingState;
-        requestChzzkToolSync();
-        syncChzzkRecordTimer();
-      }
-      window.alert(response.error);
-    })
-    .catch((error: Error) => {
-      if (type === "STOP_RECORDING") {
-        currentRecordingState = previousRecordingState;
-        requestChzzkToolSync();
-        syncChzzkRecordTimer();
-      }
-      window.alert(error.message);
-    })
-    .finally(() => {
-      recordingCommandInFlight = false;
-    });
+  void toggleFullRecording().catch((error: Error) => window.alert(error.message));
 }
 
 function handlePlayerCancelActivation(event: MouseEvent): void {
   if (event.button !== 0) {
     return;
-  }
-
-  const now = Date.now();
-  if (event.type === "click" && now - lastCancelPointerActivationAt < POINTER_CLICK_DEDUP_MS) {
-    event.preventDefault();
-    event.stopPropagation();
-    return;
-  }
-  if (event.type === "pointerdown") {
-    lastCancelPointerActivationAt = now;
   }
 
   event.preventDefault();
@@ -3029,18 +2909,7 @@ function handlePlayerCancelActivation(event: MouseEvent): void {
     return;
   }
 
-  const previousRecordingState = currentRecordingState;
-  currentRecordingState = { status: RECORDING_STATUS.idle };
-  requestChzzkToolSync();
-  syncChzzkRecordTimer();
-
-  void cancelRecording()
-    .catch((error: Error) => {
-      currentRecordingState = previousRecordingState;
-      requestChzzkToolSync();
-      syncChzzkRecordTimer();
-      window.alert(error.message);
-    });
+  void cancelRecording().catch((error: Error) => window.alert(error.message));
 }
 
 function bindDirectPlayerActivation(button: HTMLElement, handler: (event: MouseEvent) => void): void {
@@ -3050,7 +2919,14 @@ function bindDirectPlayerActivation(button: HTMLElement, handler: (event: MouseE
 
   button.dataset.cropClipBound = "true";
   button.addEventListener("pointerdown", handler);
-  button.addEventListener("click", handler);
+  button.addEventListener("click", (event) => {
+    // Pointer activation already ran on pointerdown, regardless of click delay.
+    if (event.detail === 0) handler(event);
+    else {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  });
 }
 
 function isVisibleElement(element: HTMLElement): boolean {
@@ -3452,7 +3328,9 @@ function handleShortcut(event: KeyboardEvent): void {
     return;
   }
 
-  const key = event.key.toLowerCase();
+  const key = /^[a-z0-9]$/i.test(event.key) || !/^(Key[A-Z]|Digit[0-9])$/.test(event.code)
+    ? event.key.toLowerCase()
+    : event.code.slice(-1).toLowerCase();
   if (multiRegionEnabled && /^[1-4]$/.test(key)) {
     const nextIndex = Number(key) - 1;
     if (nextIndex < getActiveRegionLimit() && currentRegions[nextIndex]) {

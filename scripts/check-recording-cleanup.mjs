@@ -15,17 +15,42 @@ const file = ts.createSourceFile("region_selector.ts", text, ts.ScriptTarget.Lat
 const functions = [];
 const startupFunctions = [];
 let drawFrameSource;
+let borderControlsSource;
+let toggleRegionRecordingSource;
+let runRecordingCommandSource;
+let selectDirectMimeTypeSource;
 function visit(node) {
+  if (ts.isFunctionDeclaration(node) && node.name?.text === "runRecordingCommand") runRecordingCommandSource = node.getText(file);
+  if (ts.isFunctionDeclaration(node) && node.name?.text === "selectDirectMimeType") selectDirectMimeTypeSource = node.getText(file);
+  if (ts.isFunctionDeclaration(node) && node.name?.text === "toggleRegionRecording") toggleRegionRecordingSource = node.getText(file);
+  if (ts.isFunctionDeclaration(node) && node.name?.text === "attachBorderControls") borderControlsSource = node.getText(file);
   if (ts.isFunctionDeclaration(node) && ["startDirectRecording", "ignoreRecordingRejection", "releaseDirectRecordingCapture", "stopRecordingStream"].includes(node.name?.text)) startupFunctions.push(node.getText(file));
   if (ts.isVariableDeclaration(node) && node.name.getText(file) === "drawFrame") drawFrameSource = node.initializer.getText(file);
-  if (ts.isFunctionDeclaration(node) && ["getVideoStream", "stopRecordingStream", "releaseDirectRecordingCapture", "cleanupDirectRecordingSession", "startDirectPart", "finalizeDirectRecording", "cancelDirectRecordingSession", "abortDirectRecordingSession", "failDirectRecordingSession", "finishDirectRecording", "requestDirectPartStop"].includes(node.name?.text)) {
+  if (ts.isFunctionDeclaration(node) && ["getVideoStream", "stopRegionLayoutWatch", "stopRecordingStream", "releaseDirectRecordingCapture", "cleanupDirectRecordingSession", "startDirectPart", "finalizeDirectRecording", "cancelDirectRecordingSession", "abortDirectRecordingSession", "failDirectRecordingSession", "finishDirectRecording", "requestDirectPartStop"].includes(node.name?.text)) {
     functions.push(node.getText(file));
   }
   ts.forEachChild(node, visit);
 }
 visit(file);
-const { cleanup, getVideoStream, startDirectPart, messages, observers, detachTimers } = new Function("MediaStream", `
+const selectMime = new Function("MediaRecorder", `
+  const RECORDING_FORMAT = { webm: 'webm', mp4: 'mp4' };
+  ${ts.transpile(selectDirectMimeTypeSource, { target: ts.ScriptTarget.ES2022 })}
+  return selectDirectMimeType;
+`);
+assert.equal(selectMime({ isTypeSupported: () => true })({ outputFormat: "webm" }).mimeType,
+  "video/webm;codecs=avc1", "prefer H.264 to preserve fast MP4 splitting without re-encoding");
+assert.equal(selectMime({ isTypeSupported: type => type.includes("vp8") })({ outputFormat: "webm" }).mimeType,
+  "video/webm;codecs=vp8,opus");
+assert.equal(selectMime({ isTypeSupported: type => type.includes("vp9") })({ outputFormat: "webm" }).mimeType,
+  "video/webm;codecs=vp9,opus");
+assert.match(selectMime({ isTypeSupported: () => true })({ outputFormat: "mp4" }).mimeType, /^video\/mp4/);
+assert.throws(() => selectMime({ isTypeSupported: () => false })({ outputFormat: "webm" }), /WebM/);
+console.log("recording codec selection checks passed");
+const { cleanup, getVideoStream, startDirectPart, messages, observers, detachTimers, layoutWatch } = new Function("MediaStream", `
   let directSession = null;
+  let regionLayoutVideo = null, regionLayoutObserver = null, regionLayoutSyncFrame = null;
+  const layoutWatch = { disconnected: false, get video() { return regionLayoutVideo; },
+    watch(video) { regionLayoutVideo = video; regionLayoutObserver = { disconnect() { layoutWatch.disconnected = true; } }; } };
   const playerCaptureStreams = new WeakMap();
   const detachTimers = new Map();
   const window = { clearInterval() {}, setTimeout(fn) { detachTimers.set(1, fn); return 1; }, clearTimeout(id) { detachTimers.delete(id); } };
@@ -45,7 +70,7 @@ const { cleanup, getVideoStream, startDirectPart, messages, observers, detachTim
     stop() { this.state = 'inactive'; }
   }
   ${ts.transpile(functions.join("\n"), { target: ts.ScriptTarget.ES2022 })}
-  return { cleanup: cleanupDirectRecordingSession, getVideoStream, startDirectPart, messages, observers, detachTimers };
+  return { cleanup: cleanupDirectRecordingSession, getVideoStream, startDirectPart, messages, observers, detachTimers, layoutWatch };
 `)(Stream);
 function track(kind = "video") { return { kind, enabled: true, readyState: "live", clone() { return track(this.kind); }, stop() { this.readyState = "ended"; } }; }
 function Stream(tracks) { return new FakeStream(tracks); }
@@ -109,6 +134,7 @@ for (let recording = 0; recording < 3; recording++) {
 }
 
 const detachWatcher = observers[0];
+layoutWatch.watch(player);
 assert.equal(observers.length, 1, "reuse the player removal watcher across recordings");
 player.parentNode = { parentNode: { parentNode: null } };
 detachWatcher.callback();
@@ -122,6 +148,7 @@ player.isConnected = true;
 player.parentNode = { parentNode: null };
 detachWatcher.callback();
 assert.equal(detachTimers.size, 0, "reattaching the mini player cancels disposal");
+assert.equal(layoutWatch.video, player, "temporary detachment must preserve the layout watcher");
 assert.equal(getVideoStream(player).getAudioTracks()[0].readyState, "live");
 player.isConnected = false;
 detachWatcher.callback();
@@ -139,6 +166,8 @@ detachTimers.clear();
 dispose();
 assert.equal(detachWatcher.connected, false, "stop watching after the player is detached");
 assert.equal(captured.getTracks().length, 0, "detach releases the reusable audio connection");
+assert.equal(layoutWatch.video, null, "a removed player must not stay alive through the region layout watcher");
+assert.equal(layoutWatch.disconnected, true);
 const detachedAudio = track("audio");
 captured.addTrack(detachedAudio);
 assert.equal(detachedAudio.readyState, "ended", "late source events cannot restart a detached player capture");
@@ -225,6 +254,46 @@ video.frame++;
 draw();
 assert.equal(paints, 2, "do not draw a frame while the player is loading");
 console.log("recording frame checks passed");
+
+// Starting a recording rebuilds the border before its message response arrives.
+// A late response must not restart the disposed border's display timer.
+for (const outcome of ["success", "failure", "rejection"]) {
+  const timers = new Map();
+  let nextTimer = 0, respond, reject;
+  const makeBorder = () => {
+    const button = Object.assign(new EventTarget(), { dataset: {}, setAttribute() {} });
+    return { button, border: Object.assign(new EventTarget(), {
+      dataset: {}, querySelector: selector => selector === ".record-region" ? button : null, querySelectorAll: () => [],
+    }) };
+  };
+  const { attach, setState } = new Function("window", "sendRuntimeMessage", `
+    const RECORDING_STATUS = { idle: 'idle', recording: 'recording' }, RECORDING_MODE = { full: 'full', region: 'region' };
+    const MILLISECONDS_PER_SECOND = 1000, activeRegionIndex = 0;
+    let currentRecordingState = { status: 'idle' }, recordingCommandInFlight = null, pendingRecordingTerminalCommand = null;
+    const showPlayerFeedback = () => {};
+    const isRegionRecordingActive = () => currentRecordingState.status === 'recording';
+    const withShortcut = label => label, getRecordIconSvg = () => '';
+    ${ts.transpile(runRecordingCommandSource, { target: ts.ScriptTarget.ES2022 })}
+    ${ts.transpile(toggleRegionRecordingSource, { target: ts.ScriptTarget.ES2022 })}
+    ${ts.transpile(borderControlsSource, { target: ts.ScriptTarget.ES2022 })}
+    return { attach: attachBorderControls, setState(state) { currentRecordingState = state; } };
+  `)({ setInterval(fn) { const id = ++nextTimer; timers.set(id, fn); return id; }, clearInterval(id) { timers.delete(id); }, alert() {} },
+    () => new Promise((resolve, fail) => { respond = resolve; reject = fail; }));
+  const { border, button } = makeBorder();
+  const dispose = attach(border, 0);
+  button.dispatchEvent(new Event("click"));
+  dispose();
+  setState({ status: "recording", mode: "region" });
+  const disposeCurrent = attach(makeBorder().border, 0);
+  assert.equal(timers.size, 1, "the current border still shows recording time");
+  if (outcome === "rejection") reject(new Error("message failed"));
+  else respond({ ok: outcome === "success", error: "recording failed" });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(timers.size, 1, "late recording responses must not revive a removed border timer");
+  disposeCurrent();
+  assert.equal(timers.size, 0);
+}
+console.log("recording border timer cleanup checks passed");
 
 // Exercise the real startup scope: clearing session fields alone cannot detect
 // a pending Promise handler that still retains the drawing closure.
