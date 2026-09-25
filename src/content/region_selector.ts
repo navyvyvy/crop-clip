@@ -1,5 +1,8 @@
+import { normalizeSettings, normalizeRegion, normalizeRegions } from "../shared/normalize.js";
+import { RECORDING_FORMAT, RECORDING_STATUS, RECORDING_MODE, DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, STANDARD_RECORDING_FRAME_RATE, HIGH_RECORDING_FRAME_RATE, DEFAULT_SHORTCUT_KEYS as DEFAULT_CONTENT_SHORTCUT_KEYS } from "../shared/types.js";
+
 (() => {
-  // This file is emitted as a classic content script, so runtime imports are intentionally avoided.
+  // The build bundles shared imports into one classic content script.
   const isChzzkClipEditorPage = (): boolean =>
     (location.hostname === "chzzk.naver.com" || location.hostname.endsWith(".chzzk.naver.com"))
     && location.pathname.startsWith("/clip-editor");
@@ -13,20 +16,6 @@
   contentScriptGlobal[CONTENT_SCRIPT_BOOT_KEY] = true;
   document.getElementById("crop-clip-style")?.remove();
 
-const RECORDING_FORMAT = {
-  webm: "webm",
-  mp4: "mp4",
-} as const;
-const RECORDING_STATUS = {
-  idle: "idle",
-  recording: "recording",
-  completed: "completed",
-  error: "error",
-} as const;
-const RECORDING_MODE = {
-  region: "region",
-  full: "full",
-} as const;
 const OVERLAY_ID = "crop-clip-overlay";
 const BORDER_ID = "crop-clip-border";
 const BORDER_CLASS = "crop-clip-border";
@@ -44,13 +33,11 @@ const SNAP_DISTANCE = 10;
 const MIN_ACTIVE_REGIONS = 2;
 const MAX_ACTIVE_REGIONS = 4;
 const MIN_GROUPED_LAYOUT_REGIONS = 3;
-const DEFAULT_MULTI_REGION_COUNT = 2;
-const DEFAULT_SEEK_SECONDS = 5;
+
 const MILLISECONDS_PER_SECOND = 1_000;
 const SECONDS_PER_MINUTE = 60;
 const SECONDS_PER_HOUR = 3_600;
-const STANDARD_RECORDING_FRAME_RATE = 30;
-const HIGH_RECORDING_FRAME_RATE = 60;
+
 const VIDEO_FRAME_READY_TIMEOUT_MS = 3_000;
 const CHZZK_TOOL_DISCOVERY_INTERVAL_MS = 500;
 const SEEK_FEEDBACK_DURATION_MS = 650;
@@ -85,16 +72,6 @@ const CHZZK_BUTTON_HOST_SELECTOR = [
   "[class*='pzp'][class*='control'][class*='right']",
 ].join(",");
 const PLAYER_TOOL_LABEL = "녹화 영역 선택";
-const DEFAULT_CONTENT_SHORTCUT_KEYS: ShortcutKeys = {
-  selectRegion: "a",
-  clearRegion: "x",
-  clearAllRegions: "z",
-  regionRecord: "r",
-  cancelRecording: "c",
-  regionScreenshot: "s",
-  fullRecord: "e",
-  fullScreenshot: "d",
-};
 
 type ContentCommand = import("../shared/messages.js").ContentCommand;
 type MessageResponse<T = undefined> = import("../shared/messages.js").MessageResponse<T>;
@@ -184,6 +161,7 @@ let directSession: DirectRecordingSession | null = null;
 type RecordingControlCommand = "START_RECORDING" | "START_FULL_RECORDING" | "STOP_RECORDING" | "CANCEL_RECORDING";
 let recordingCommandInFlight: RecordingControlCommand | null = null;
 let pendingRecordingTerminalCommand: "STOP_RECORDING" | "CANCEL_RECORDING" | null = null;
+let storedStateRevision = 0;
 let chzzkToolObserver: MutationObserver | null = null;
 let chzzkToolDiscoveryTimerId: number | null = null;
 let chzzkToolSyncFrame: number | null = null;
@@ -192,7 +170,6 @@ let seekFeedbackTimerId: number | null = null;
 let regionLayoutObserver: ResizeObserver | null = null;
 let regionLayoutVideo: HTMLVideoElement | null = null;
 let regionLayoutSyncFrame: number | null = null;
-
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -493,14 +470,6 @@ function regionsOverlap(a: RegionSelection, b: RegionSelection): boolean {
 
 function collidesWithOtherRegion(region: RegionSelection, index: number, renderedRect: DOMRect | null = getVideoRenderedViewportRect()): boolean {
   return currentRegions.some((item, itemIndex) => itemIndex !== index && regionsOverlap(resolveRegionToViewport(item, renderedRect), region));
-}
-
-function normalizeRegions(raw: unknown, fallback?: RegionSelection | null): RegionSelection[] {
-  const source = Array.isArray(raw) ? raw : fallback ? [fallback] : [];
-  return source
-    .map((item) => normalizeRegion(item))
-    .filter((item): item is RegionSelection => item !== null)
-    .slice(0, MAX_ACTIVE_REGIONS);
 }
 
 function getActiveRegion(): RegionSelection | null {
@@ -1099,6 +1068,7 @@ async function runRecordingCommand(type: RecordingControlCommand): Promise<void>
     if (starting && (type === recordingCommandInFlight || type === "STOP_RECORDING" || type === "CANCEL_RECORDING")) {
       // Keep one terminal request; repeated inputs must never queue a new recording.
       pendingRecordingTerminalCommand = type === "CANCEL_RECORDING" ? type : pendingRecordingTerminalCommand ?? "STOP_RECORDING";
+      syncRecordingCommandButtons();
       showPlayerFeedback(pendingRecordingTerminalCommand === "CANCEL_RECORDING" ? "녹화 시작 후 취소합니다." : "녹화 시작 후 정지합니다.");
     } else {
       showPlayerFeedback("녹화 명령을 처리 중입니다. 잠시 후 다시 눌러 주세요.");
@@ -1109,6 +1079,7 @@ async function runRecordingCommand(type: RecordingControlCommand): Promise<void>
   recordingCommandInFlight = type;
   let succeeded = false;
   try {
+    syncRecordingCommandButtons();
     showPlayerFeedback(type === "STOP_RECORDING" ? "녹화를 종료하고 저장 중입니다."
       : type === "CANCEL_RECORDING" ? "녹화를 취소 중입니다." : "녹화를 시작 중입니다.");
     const response = await sendRuntimeMessage({ type });
@@ -1119,26 +1090,18 @@ async function runRecordingCommand(type: RecordingControlCommand): Promise<void>
     pendingRecordingTerminalCommand = null;
     recordingCommandInFlight = null;
     if (succeeded && pending) await runRecordingCommand(pending);
+    else syncRecordingCommandButtons();
   }
 }
 
-async function toggleRegionRecording(): Promise<void> {
-  if (currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode === RECORDING_MODE.full) {
-    window.alert("전체 녹화 중에는 영역 녹화를 시작할 수 없습니다.");
+async function toggleRecording(full = false): Promise<void> {
+  const recording = currentRecordingState.status === RECORDING_STATUS.recording;
+  if (recording && (currentRecordingState.mode === RECORDING_MODE.full) !== full) {
+    window.alert(full ? "영역 녹화 중에는 전체 녹화를 시작할 수 없습니다." : "전체 녹화 중에는 영역 녹화를 시작할 수 없습니다.");
     return;
   }
 
-  const type = currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode !== RECORDING_MODE.full ? "STOP_RECORDING" : "START_RECORDING";
-  await runRecordingCommand(type);
-}
-
-async function toggleFullRecording(): Promise<void> {
-  if (currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode !== RECORDING_MODE.full) {
-    window.alert("영역 녹화 중에는 전체 녹화를 시작할 수 없습니다.");
-    return;
-  }
-
-  const type = currentRecordingState.status === RECORDING_STATUS.recording ? "STOP_RECORDING" : "START_FULL_RECORDING";
+  const type = recording ? "STOP_RECORDING" : full ? "START_FULL_RECORDING" : "START_RECORDING";
   await runRecordingCommand(type);
 }
 
@@ -1431,8 +1394,14 @@ async function startDirectPart(session: DirectRecordingSession): Promise<void> {
 // A handler created inside startDirectRecording retains its canvas/video scope until saving finishes.
 function ignoreRecordingRejection(): void {}
 
+async function prepareDirectRecordingEncoder(settings: Settings): Promise<{ mimeType: string; extension: "webm" | "mp4" }> {
+  const mime = selectDirectMimeType(settings);
+  if (mime.extension === "mp4" || mime.mimeType.includes("avc1")) await prepareRecordingEncoder();
+  return mime;
+}
+
 async function startDirectRecording(command: Extract<ContentCommand, { type: "START_DIRECT_RECORDING" }>): Promise<MessageResponse> {
-  if (command.settings.outputFormat === "mp4") await prepareRecordingEncoder();
+  const mime = await prepareDirectRecordingEncoder(command.settings);
   if (directSession) {
     cancelDirectRecordingSession(directSession);
   }
@@ -1460,7 +1429,6 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
 
   const layout = computeDirectLayout(crops);
   const output = layout.output;
-  const mime = selectDirectMimeType(command.settings);
 
   const canvas = document.createElement("canvas");
   canvas.width = output.width;
@@ -1689,6 +1657,8 @@ function syncRegionLayoutGeometry(): void {
     return;
   }
 
+  const video = findPrimaryVideoElement();
+  if (video && video !== regionLayoutVideo) startRegionLayoutWatch();
   const renderedRect = getVideoRenderedViewportRect();
   currentRegions.forEach((region, index) => {
     const border = currentBorders.get(index);
@@ -1735,6 +1705,10 @@ function startRegionLayoutWatch(): void {
 }
 
 function applyBorderGeometry(border: HTMLDivElement, region: RegionSelection, renderedRect: DOMRect | null = getVideoRenderedViewportRect()): void {
+  if (!renderedRect || renderedRect.width <= 0 || renderedRect.height <= 0) {
+    border.style.display = "none";
+    return;
+  }
   const displayRegion = resolveRegionToViewport(region, renderedRect);
   const visibleLeft = Math.max(displayRegion.x, 0);
   const visibleTop = Math.max(displayRegion.y, 0);
@@ -1746,14 +1720,10 @@ function applyBorderGeometry(border: HTMLDivElement, region: RegionSelection, re
   }
 
   border.style.display = "";
-  const left = clamp(displayRegion.x, 0, Math.max(0, window.innerWidth - 1));
-  const top = clamp(displayRegion.y, 0, Math.max(0, window.innerHeight - 1));
-  const width = Math.min(displayRegion.width, Math.max(1, window.innerWidth - left));
-  const height = Math.min(displayRegion.height, Math.max(1, window.innerHeight - top));
-  border.style.left = `${left}px`;
-  border.style.top = `${top}px`;
-  border.style.width = `${width}px`;
-  border.style.height = `${height}px`;
+  border.style.left = `${visibleLeft}px`;
+  border.style.top = `${visibleTop}px`;
+  border.style.width = `${visibleRight - visibleLeft}px`;
+  border.style.height = `${visibleBottom - visibleTop}px`;
 }
 
 function getRegionAccent(index: number): string {
@@ -1954,17 +1924,8 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
     }
 
     const isRegionRecording = isRegionRecordingActive();
-    const isFullRecording = currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode === RECORDING_MODE.full;
-    const label = withShortcut(isRegionRecording ? "녹화 중지" : "녹화 시작", "regionRecord");
     recordButton.hidden = index !== activeRegionIndex;
-    const iconState = isRegionRecording ? "recording" : "idle";
-    if (recordButton.dataset.iconState !== iconState) {
-      recordButton.dataset.iconState = iconState;
-      recordButton.innerHTML = getRecordIconSvg(isRegionRecording);
-    }
-    recordButton.setAttribute("aria-label", label);
-    recordButton.title = label;
-    recordButton.disabled = isFullRecording;
+    setRecordButtonContent(recordButton);
     if (cancelButton) {
       const cancelLabel = withShortcut("녹화 취소", "cancelRecording");
       cancelButton.hidden = index !== activeRegionIndex || !isRegionRecording;
@@ -1983,10 +1944,8 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
       clearButton.title = clearLabel;
     }
     if (isRegionRecording) {
-      recordButton.dataset.recording = "true";
       border.dataset.recording = "true";
     } else {
-      delete recordButton.dataset.recording;
       delete border.dataset.recording;
     }
     if (clearButton) {
@@ -2020,7 +1979,7 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
     event.preventDefault();
     event.stopPropagation();
     // Storage changes rebuild the controls; late replies must not update this border.
-    void toggleRegionRecording().catch((error: Error) => window.alert(error.message));
+    void toggleRecording().catch((error: Error) => window.alert(error.message));
   };
 
   updateRecordButton();
@@ -2257,95 +2216,34 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
 }
 
 async function loadState(): Promise<{ region: RegionSelection | null; regions: RegionSelection[]; recordingState: LocalRecordingState; multiRegionEnabled: boolean; multiRegionMaxCount: number; fullRecordButtonEnabled: boolean; fullScreenshotButtonEnabled: boolean; seekEnabled: boolean; seekSeconds: number; streamerFilenameEnabled: boolean; shortcutsEnabled: boolean; shortcutKeys: ShortcutKeys }> {
-  if (!isExtensionContextAvailable()) {
-    return {
-      region: null,
-      regions: [],
-      recordingState: { status: RECORDING_STATUS.idle },
-      multiRegionEnabled: false,
-      multiRegionMaxCount: DEFAULT_MULTI_REGION_COUNT,
-      fullRecordButtonEnabled: false,
-      fullScreenshotButtonEnabled: false,
-      seekEnabled: false,
-      seekSeconds: DEFAULT_SEEK_SECONDS,
-      streamerFilenameEnabled: false,
-      shortcutsEnabled: false,
-      shortcutKeys: DEFAULT_CONTENT_SHORTCUT_KEYS,
-    };
+  let result: { region?: unknown; regions?: unknown; recordingState?: unknown; settings?: unknown } = {};
+  if (isExtensionContextAvailable()) {
+    try {
+      let revision: number;
+      do {
+        revision = storedStateRevision;
+        result = await chrome.storage.local.get({ region: null, regions: [], recordingState: { status: RECORDING_STATUS.idle }, settings: {} });
+      } while (revision !== storedStateRevision);
+    } catch {
+      // Reloaded extensions fall back to the same normalized defaults.
+      result = {};
+    }
   }
-
-  let result: { region?: unknown; regions?: unknown; recordingState?: unknown; settings?: Partial<Settings> };
-  try {
-    result = await chrome.storage.local.get({
-      region: null,
-      regions: [],
-      recordingState: { status: RECORDING_STATUS.idle },
-      settings: {},
-    });
-  } catch {
-    return {
-      region: null,
-      regions: [],
-      recordingState: { status: RECORDING_STATUS.idle },
-      multiRegionEnabled: false,
-      multiRegionMaxCount: DEFAULT_MULTI_REGION_COUNT,
-      fullRecordButtonEnabled: false,
-      fullScreenshotButtonEnabled: false,
-      seekEnabled: false,
-      seekSeconds: DEFAULT_SEEK_SECONDS,
-      streamerFilenameEnabled: false,
-      shortcutsEnabled: false,
-      shortcutKeys: DEFAULT_CONTENT_SHORTCUT_KEYS,
-    };
-  }
-
+  const settings = normalizeSettings(result.settings);
   const region = normalizeRegion(result.region);
   return {
     region,
     regions: normalizeRegions(result.regions, region),
     recordingState: normalizeRecordingState(result.recordingState, directSession?.recordingId),
-    multiRegionEnabled: Boolean(result.settings?.enableMultiRegion),
-    multiRegionMaxCount: getMultiRegionLimit(result.settings),
-    fullRecordButtonEnabled: Boolean(result.settings?.enableFullRecordButton),
-    fullScreenshotButtonEnabled: Boolean(result.settings?.enableFullScreenshotButton),
-    seekEnabled: Boolean(result.settings?.enableSeek ?? (result.settings as Partial<Settings> & { enableSeekButtons?: boolean } | undefined)?.enableSeekButtons),
-    seekSeconds: Number.isFinite(result.settings?.seekSeconds) ? Number(result.settings?.seekSeconds) : DEFAULT_SEEK_SECONDS,
-    streamerFilenameEnabled: Boolean(result.settings?.enableStreamerFilename),
-    shortcutsEnabled: Boolean(result.settings?.enableShortcuts),
-    shortcutKeys: normalizeShortcutKeys(result.settings?.shortcutKeys),
-  };
-}
-
-function normalizeRegion(raw: unknown): RegionSelection | null {
-  if (!raw || typeof raw !== "object") {
-    return null;
-  }
-
-  const value = raw as Partial<RegionSelection>;
-  const fields = [value.x, value.y, value.width, value.height];
-  if (fields.some((item) => !Number.isFinite(Number(item))) || Number(value.width) <= 0 || Number(value.height) <= 0) {
-    return null;
-  }
-  const relative = value.videoRelative;
-  const videoRelative =
-    relative &&
-    [relative.x, relative.y, relative.width, relative.height].every((item) => Number.isFinite(Number(item))) &&
-    Number(relative.width) > 0 &&
-    Number(relative.height) > 0
-      ? {
-          x: Number(relative.x),
-          y: Number(relative.y),
-          width: Number(relative.width),
-          height: Number(relative.height),
-        }
-      : undefined;
-
-  return {
-    x: Number(value.x),
-    y: Number(value.y),
-    width: Number(value.width),
-    height: Number(value.height),
-    ...(videoRelative ? { videoRelative } : {}),
+    multiRegionEnabled: settings.enableMultiRegion,
+    multiRegionMaxCount: settings.multiRegionMaxCount,
+    fullRecordButtonEnabled: settings.enableFullRecordButton,
+    fullScreenshotButtonEnabled: settings.enableFullScreenshotButton,
+    seekEnabled: settings.enableSeek,
+    seekSeconds: settings.seekSeconds,
+    streamerFilenameEnabled: settings.enableStreamerFilename,
+    shortcutsEnabled: settings.enableShortcuts,
+    shortcutKeys: settings.shortcutKeys,
   };
 }
 
@@ -2363,17 +2261,6 @@ function normalizeRecordingState(raw: unknown, activeRecordingId?: string): Loca
   }
 
   return { status: RECORDING_STATUS.idle };
-}
-
-function normalizeShortcutKeys(raw: Partial<ShortcutKeys> | undefined): ShortcutKeys {
-  const normalized = { ...DEFAULT_CONTENT_SHORTCUT_KEYS };
-  for (const action of Object.keys(normalized) as ShortcutAction[]) {
-    const key = raw?.[action]?.toLowerCase();
-    if (key && /^[a-z0-9]$/.test(key)) {
-      normalized[action] = key;
-    }
-  }
-  return normalized;
 }
 
 function trimRegionsToLimit(): void {
@@ -2758,7 +2645,12 @@ function getCropIconSvg(): string {
   `;
 }
 
-function getRecordIconSvg(recording = false): string {
+function getRecordIconSvg(recording = false, pending = false): string {
+  if (pending) return `
+    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" aria-hidden="true" focusable="false">
+      <path d="M11 8h14M11 28h14M12 8v5l12 10v5M24 8v5L12 23v5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  `;
   return recording
     ? `
       <svg width="36" height="36" viewBox="0 0 36 36" fill="none" aria-hidden="true" focusable="false">
@@ -2797,15 +2689,40 @@ function setChzzkButtonPresentation(button: HTMLElement, contentKey: string, lab
   `);
 }
 
-function setChzzkRecordButtonContent(button: HTMLElement): void {
-  const isFullRecording = currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode === RECORDING_MODE.full;
-  const isRegionRecording = currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode !== RECORDING_MODE.full;
-  const label = withShortcut(isFullRecording ? "전체 녹화 정지" : "전체 녹화 시작", "fullRecord");
-  button.toggleAttribute("data-recording", isFullRecording);
+function setRecordButtonContent(button: HTMLElement, full = false): void {
+  const recording = currentRecordingState.status === RECORDING_STATUS.recording;
+  const ownRecording = recording && (currentRecordingState.mode === RECORDING_MODE.full) === full;
+  const command = recordingCommandInFlight;
+  const starting = command === (full ? "START_FULL_RECORDING" : "START_RECORDING");
+  const pending = starting || command === "STOP_RECORDING" || command === "CANCEL_RECORDING";
+  const pendingLabel = starting
+    ? pendingRecordingTerminalCommand === "CANCEL_RECORDING" ? "시작 후 취소 예정" : pendingRecordingTerminalCommand ? "시작 후 정지 예정" : "시작 중 · 다시 누르면 정지"
+    : command === "CANCEL_RECORDING" ? "취소 중" : "저장 중";
+  const label = withShortcut(`${full ? "전체 " : ""}녹화 ${pending ? pendingLabel : ownRecording ? "정지" : "시작"}`, full ? "fullRecord" : "regionRecord");
+  button.toggleAttribute("data-recording", ownRecording);
+  button.setAttribute("aria-busy", String(pending));
   if (button instanceof HTMLButtonElement) {
-    button.disabled = isRegionRecording;
+    button.disabled = recording && !ownRecording;
   }
-  setChzzkButtonPresentation(button, `record:${label}:${isFullRecording}`, label, getRecordIconSvg(isFullRecording));
+  const icon = getRecordIconSvg(ownRecording, pending);
+  if (full) {
+    setChzzkButtonPresentation(button, `record:${label}:${ownRecording}`, label, icon);
+  } else {
+    button.setAttribute("aria-label", label);
+    button.title = label;
+    const iconState = pending ? "pending" : ownRecording ? "recording" : "idle";
+    if (button.dataset.iconState !== iconState) {
+      button.dataset.iconState = iconState;
+      button.innerHTML = icon;
+    }
+  }
+}
+
+function syncRecordingCommandButtons(): void {
+  // Update live buttons without rebuilding borders or touching disposed controls.
+  document.querySelectorAll<HTMLElement>(".crop-clip-border .record-region").forEach(button => setRecordButtonContent(button));
+  const fullButton = document.getElementById(CHZZK_RECORD_BUTTON_ID);
+  if (fullButton) setRecordButtonContent(fullButton, true);
 }
 
 function setChzzkCancelButtonContent(button: HTMLElement): void {
@@ -2895,7 +2812,7 @@ function handlePlayerRecordActivation(event: MouseEvent): void {
   if (currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode !== RECORDING_MODE.full) {
     return;
   }
-  void toggleFullRecording().catch((error: Error) => window.alert(error.message));
+  void toggleRecording(true).catch((error: Error) => window.alert(error.message));
 }
 
 function handlePlayerCancelActivation(event: MouseEvent): void {
@@ -3059,7 +2976,7 @@ function syncChzzkToolButton(target: HTMLElement | null = findChzzkButtonHost())
     recordButton.id = CHZZK_RECORD_BUTTON_ID;
     recordButton.className = CHZZK_TOOL_BUTTON_CLASS;
     recordButton.type = "button";
-    setChzzkRecordButtonContent(recordButton);
+    setRecordButtonContent(recordButton, true);
     bindDirectPlayerActivation(recordButton, handlePlayerRecordActivation);
   }
 
@@ -3373,7 +3290,7 @@ function handleShortcut(event: KeyboardEvent): void {
     void clearRegion();
   } else if (key === shortcutKeys.regionRecord) {
     event.preventDefault();
-    void toggleRegionRecording().catch((error: Error) => window.alert(error.message));
+    void toggleRecording().catch((error: Error) => window.alert(error.message));
   } else if (key === shortcutKeys.cancelRecording) {
     event.preventDefault();
     void cancelRecording().catch((error: Error) => window.alert(error.message));
@@ -3382,7 +3299,7 @@ function handleShortcut(event: KeyboardEvent): void {
     void captureRegionScreenshot();
   } else if (key === shortcutKeys.fullRecord && fullRecordButtonEnabled) {
     event.preventDefault();
-    void toggleFullRecording().catch((error: Error) => window.alert(error.message));
+    void toggleRecording(true).catch((error: Error) => window.alert(error.message));
   } else if (key === shortcutKeys.fullScreenshot && fullScreenshotButtonEnabled) {
     event.preventDefault();
     void captureFullScreenshot();
@@ -3429,7 +3346,7 @@ function findPrimaryVideoElement(): HTMLVideoElement | null {
 if (isExtensionContextAvailable()) {
   chrome.runtime.onMessage.addListener((message: ContentCommand, _sender, sendResponse: (response: MessageResponse | MessageResponse<boolean> | RegionGeometryResponse | RegionGeometriesResponse) => void) => {
     if (message.type === "PREPARE_DIRECT_RECORDING") {
-      void prepareRecordingEncoder()
+      void prepareDirectRecordingEncoder(message.settings)
         .then(() => sendResponse({ ok: true }))
         .catch((error: Error) => sendResponse({ ok: false, error: error.message }));
       return true;
@@ -3535,6 +3452,9 @@ if (isExtensionContextAvailable()) {
     if (areaName !== "local") {
       return;
     }
+    if (changes.region || changes.regions || changes.recordingState || changes.settings) {
+      storedStateRevision++;
+    }
 
     if (isChzzkClipEditorPage()) {
       suspendPlayerTools();
@@ -3565,22 +3485,22 @@ if (isExtensionContextAvailable()) {
     }
 
     if (changes.settings) {
-      const settings = changes.settings.newValue as Partial<Settings> | undefined;
-      multiRegionEnabled = Boolean(settings?.enableMultiRegion);
-      multiRegionMaxCount = getMultiRegionLimit(settings);
+      const settings = normalizeSettings(changes.settings.newValue);
+      multiRegionEnabled = settings.enableMultiRegion;
+      multiRegionMaxCount = settings.multiRegionMaxCount;
       if (!multiRegionEnabled && currentRegions.length > 1) {
         currentRegions = currentRegions.slice(0, 1);
         void saveRegions(currentRegions);
         showSelectionBorders(currentRegions);
       }
       trimRegionsToLimit();
-      fullRecordButtonEnabled = Boolean(settings?.enableFullRecordButton);
-      fullScreenshotButtonEnabled = Boolean(settings?.enableFullScreenshotButton);
-      seekEnabled = Boolean(settings?.enableSeek ?? (settings as Partial<Settings> & { enableSeekButtons?: boolean } | undefined)?.enableSeekButtons);
-      seekSeconds = Number.isFinite(settings?.seekSeconds) ? Number(settings?.seekSeconds) : DEFAULT_SEEK_SECONDS;
-      streamerFilenameEnabled = Boolean(settings?.enableStreamerFilename);
-      shortcutsEnabled = Boolean(settings?.enableShortcuts);
-      shortcutKeys = normalizeShortcutKeys(settings?.shortcutKeys);
+      fullRecordButtonEnabled = settings.enableFullRecordButton;
+      fullScreenshotButtonEnabled = settings.enableFullScreenshotButton;
+      seekEnabled = settings.enableSeek;
+      seekSeconds = settings.seekSeconds;
+      streamerFilenameEnabled = settings.enableStreamerFilename;
+      shortcutsEnabled = settings.enableShortcuts;
+      shortcutKeys = settings.shortcutKeys;
       requestChzzkToolSync();
       syncChzzkRecordTimer();
     }

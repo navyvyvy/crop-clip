@@ -10,7 +10,7 @@ export type PopupCommand =
   | { type: "CANCEL_RECORDING" };
 
 export type ContentCommand =
-  | { type: "PREPARE_DIRECT_RECORDING" }
+  | { type: "PREPARE_DIRECT_RECORDING"; settings: Settings }
   | { type: "START_SELECTION" }
   | { type: "CLEAR_REGION" }
   | { type: "GET_REGION_GEOMETRY" }

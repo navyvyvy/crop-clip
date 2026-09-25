@@ -1226,6 +1226,7 @@ async function createDurationSplitWithFfmpeg(
   if (segmentSeconds >= selectedDuration) {
     throw new Error("나누기 시간은 선택 구간보다 짧아야 합니다.");
   }
+  const expectedCount = getExpectedSplitCount(selectedDuration, segmentSeconds);
 
   const ffmpeg = await loadFfmpeg();
   const inputName = `input.${part.extension}`;
@@ -1241,14 +1242,17 @@ async function createDurationSplitWithFfmpeg(
     const pattern = `output%03d.${outputFormat}`;
     const segmentListName = "output.csv";
     const code = await ffmpeg.exec([
-      ...(range ? ["-ss", String(selectedRange.start)] : []),
+      ...(range ? ["-copyts", "-start_at_zero", "-ss", String(selectedRange.start)] : []),
       "-i", inputName,
-      ...(range ? ["-t", String(selectedDuration)] : []),
+      ...(range ? ["-to", String(selectedRange.end)] : []),
       "-map", "0",
       "-c", "copy",
       "-f", "segment",
       "-segment_format", outputFormat === RECORDING_FORMAT.webm ? "matroska" : "mp4",
-      "-segment_time", String(segmentSeconds),
+      // Stream copy keeps preceding keyframe data; split on the original timeline.
+      ...(range && expectedCount > 1 ? ["-segment_times", Array.from({ length: expectedCount - 1 },
+        (_, index) => selectedRange.start + (index + 1) * segmentSeconds).join(",")]
+        : ["-segment_time", String(segmentSeconds)]),
       "-break_non_keyframes", "1",
       "-segment_list", segmentListName,
       "-segment_list_type", "csv",
@@ -1265,7 +1269,6 @@ async function createDurationSplitWithFfmpeg(
     if (files.length === 0) {
       throw new Error("나눈 파일이 생성되지 않았습니다.");
     }
-    const expectedCount = getExpectedSplitCount(selectedDuration, segmentSeconds);
     if (files.length !== expectedCount) {
       throw new Error(`파일 나누기 결과가 올바르지 않습니다. ${expectedCount}개가 필요하지만 ${files.length}개가 생성되었습니다.`);
     }
@@ -1277,8 +1280,8 @@ async function createDurationSplitWithFfmpeg(
     const segments: SplitSegment[] = [];
     for (let index = 0; index < files.length; index += 1) {
       const actualTime = actualTimes[index];
-      const start = selectedRange.start + (actualTime?.start ?? index * segmentSeconds);
-      const end = Math.min(selectedRange.end, selectedRange.start + (actualTime?.end ?? (index + 1) * segmentSeconds));
+      const start = actualTime?.start ?? selectedRange.start + index * segmentSeconds;
+      const end = Math.min(selectedRange.end, actualTime?.end ?? selectedRange.start + (index + 1) * segmentSeconds);
       const blob = await readFfmpegBlob(ffmpeg, files[index].name, `video/${outputFormat}`);
       await deleteFfmpegFile(ffmpeg, files[index].name, true);
       segments.push({

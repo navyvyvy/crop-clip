@@ -1,5 +1,6 @@
 import { DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, DEFAULT_SETTINGS, DEFAULT_SHORTCUT_KEYS, FPS_WARNING_VIDEO_BITS_PER_SECOND, MAX_MULTI_REGION_COUNT, MAX_SEEK_SECONDS, MAX_VIDEO_BITS_PER_SECOND, MIN_MULTI_REGION_COUNT, MIN_SEEK_SECONDS, MIN_VIDEO_BITS_PER_SECOND, RECORDING_FORMAT, RECORDING_MODE, RECORDING_STATUS, type AppState, type RecordingFormat, type Settings, type ShortcutAction } from "../shared/types.js";
-import { loadAppState, normalizeRecordingState, normalizeRegion, normalizeRegions, normalizeSettings, saveSettings } from "../shared/storage.js";
+import { loadAppState, saveSettings } from "../shared/storage.js";
+import { normalizeRecordingState, normalizeRegion, normalizeRegions, normalizeSettings } from "../shared/normalize.js";
 import type { MessageResponse, PopupCommand } from "../shared/messages.js";
 import { MILLISECONDS_PER_SECOND, SECONDS_PER_HOUR, SECONDS_PER_MINUTE } from "../shared/time_range.js";
 
@@ -602,7 +603,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 
   if (changes.settings) {
-    appState.settings = normalizeSettings(changes.settings.newValue as Partial<Settings> | undefined);
+    appState.settings = normalizeSettings(changes.settings.newValue);
     if (document.activeElement !== elements.customVideoBitrateInput) {
       syncPresetUi(appState.settings);
     } else {

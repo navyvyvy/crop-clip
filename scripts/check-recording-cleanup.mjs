@@ -16,15 +16,15 @@ const functions = [];
 const startupFunctions = [];
 let drawFrameSource;
 let borderControlsSource;
-let toggleRegionRecordingSource;
+let toggleRecordingSource;
 let runRecordingCommandSource;
 let selectDirectMimeTypeSource;
 function visit(node) {
   if (ts.isFunctionDeclaration(node) && node.name?.text === "runRecordingCommand") runRecordingCommandSource = node.getText(file);
   if (ts.isFunctionDeclaration(node) && node.name?.text === "selectDirectMimeType") selectDirectMimeTypeSource = node.getText(file);
-  if (ts.isFunctionDeclaration(node) && node.name?.text === "toggleRegionRecording") toggleRegionRecordingSource = node.getText(file);
+  if (ts.isFunctionDeclaration(node) && node.name?.text === "toggleRecording") toggleRecordingSource = node.getText(file);
   if (ts.isFunctionDeclaration(node) && node.name?.text === "attachBorderControls") borderControlsSource = node.getText(file);
-  if (ts.isFunctionDeclaration(node) && ["startDirectRecording", "ignoreRecordingRejection", "releaseDirectRecordingCapture", "stopRecordingStream"].includes(node.name?.text)) startupFunctions.push(node.getText(file));
+  if (ts.isFunctionDeclaration(node) && ["startDirectRecording", "prepareDirectRecordingEncoder", "ignoreRecordingRejection", "releaseDirectRecordingCapture", "stopRecordingStream"].includes(node.name?.text)) startupFunctions.push(node.getText(file));
   if (ts.isVariableDeclaration(node) && node.name.getText(file) === "drawFrame") drawFrameSource = node.initializer.getText(file);
   if (ts.isFunctionDeclaration(node) && ["getVideoStream", "stopRegionLayoutWatch", "stopRecordingStream", "releaseDirectRecordingCapture", "cleanupDirectRecordingSession", "startDirectPart", "finalizeDirectRecording", "cancelDirectRecordingSession", "abortDirectRecordingSession", "failDirectRecordingSession", "finishDirectRecording", "requestDirectPartStop"].includes(node.name?.text)) {
     functions.push(node.getText(file));
@@ -270,11 +270,11 @@ for (const outcome of ["success", "failure", "rejection"]) {
     const RECORDING_STATUS = { idle: 'idle', recording: 'recording' }, RECORDING_MODE = { full: 'full', region: 'region' };
     const MILLISECONDS_PER_SECOND = 1000, activeRegionIndex = 0;
     let currentRecordingState = { status: 'idle' }, recordingCommandInFlight = null, pendingRecordingTerminalCommand = null;
-    const showPlayerFeedback = () => {};
+    const showPlayerFeedback = () => {}, syncRecordingCommandButtons = () => {}, setRecordButtonContent = () => {};
     const isRegionRecordingActive = () => currentRecordingState.status === 'recording';
     const withShortcut = label => label, getRecordIconSvg = () => '';
     ${ts.transpile(runRecordingCommandSource, { target: ts.ScriptTarget.ES2022 })}
-    ${ts.transpile(toggleRegionRecordingSource, { target: ts.ScriptTarget.ES2022 })}
+    ${ts.transpile(toggleRecordingSource, { target: ts.ScriptTarget.ES2022 })}
     ${ts.transpile(borderControlsSource, { target: ts.ScriptTarget.ES2022 })}
     return { attach: attachBorderControls, setState(state) { currentRecordingState = state; } };
   `)({ setInterval(fn) { const id = ++nextTimer; timers.set(id, fn); return id; }, clearInterval(id) { timers.delete(id); }, alert() {} },
@@ -297,7 +297,7 @@ console.log("recording border timer cleanup checks passed");
 
 // Exercise the real startup scope: clearing session fields alone cannot detect
 // a pending Promise handler that still retains the drawing closure.
-const createStartup = new Function("playerState", `
+const createStartup = new Function("playerState", "mimeType", `
   let directSession = null, currentRecordingState;
   const currentRegions = [], timers = new Map(), refs = {};
   const window = { setInterval(fn) { timers.set(1, fn); return 1; }, clearInterval(id) { timers.delete(id); } };
@@ -313,10 +313,10 @@ const createStartup = new Function("playerState", `
     const player = { ...playerState }; refs.video = new WeakRef(player); return player;
   };
   const waitForCurrentVideoFrame = async () => true;
-  const prepareRecordingEncoder = async () => {};
+  const prepareRecordingEncoder = async () => { refs.encoderPreparations = (refs.encoderPreparations ?? 0) + 1; };
   const computeDirectCropFromSelection = () => ({});
   const computeDirectLayout = () => ({ output: { width: 1920, height: 1080 }, placements: [] });
-  const selectDirectMimeType = () => ({ mimeType: 'video/webm', extension: 'webm' });
+  const selectDirectMimeType = () => ({ mimeType: mimeType ?? 'video/webm', extension: mimeType?.startsWith('video/mp4') ? 'mp4' : 'webm' });
   const getVideoStream = () => new MediaStream();
   const getCropLayoutKey = () => '', buildBaseName = () => 'recording';
   const startDirectPart = async () => {};
@@ -339,6 +339,12 @@ for (const allowMutedRecording of [undefined, false, true]) {
     if (allowed) { recording.stop(); recording.finish(); }
     assert.equal(recording.timers.size, 0);
   }
+}
+for (const mime of ['video/webm;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus']) {
+  const recording = createStartup({ muted: false, volume: 1 }, mime);
+  await recording.start({ recordingId: 'codec-preparation', region: {}, settings: { outputFormat: mime.startsWith('video/mp4') ? 'mp4' : 'webm' } });
+  assert.equal(recording.refs.encoderPreparations ?? 0, /vp[89]/.test(mime) ? 0 : 1, 'H.264 preparation must depend on the codec, including WebM');
+  recording.stop(); recording.finish();
 }
 const startup = createStartup({ muted: false, volume: 1 });
 assert.deepEqual(await startup.start({ recordingId: "pending-save", region: {}, settings: {} }), { ok: true });

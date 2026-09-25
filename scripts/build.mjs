@@ -3,6 +3,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import process from "node:process";
 import { deflateRawSync } from "node:zlib";
+import { build } from "esbuild";
 
 const root = process.cwd();
 const srcDir = path.join(root, "src");
@@ -21,6 +22,14 @@ await mkdir(distDir, { recursive: true });
 const tscBin = path.join(root, "node_modules", "typescript", "bin", "tsc");
 
 execFileSync(process.execPath, [tscBin, "-p", "tsconfig.json"], { stdio: "inherit" });
+await build({
+  entryPoints: [path.join(srcDir, "content", "region_selector.ts")],
+  outfile: path.join(distDir, "content", "region_selector.js"),
+  bundle: true,
+  format: "iife",
+  platform: "browser",
+  target: "chrome116",
+});
 
 async function copyStaticFiles(fromDir, toDir) {
   const entries = await readdir(fromDir, { withFileTypes: true });

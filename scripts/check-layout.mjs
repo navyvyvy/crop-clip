@@ -1,3 +1,4 @@
+import { normalizeRegion } from "../dist/shared/normalize.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import ts from "typescript";
@@ -9,7 +10,6 @@ const serviceWorkerText = fs.readFileSync(new URL("../src/background/service_wor
 const serviceWorkerFile = ts.createSourceFile("service_worker.ts", serviceWorkerText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 const resultText = fs.readFileSync(new URL("../src/result/result.ts", import.meta.url), "utf8");
 const settingsText = fs.readFileSync(new URL("../src/shared/types.ts", import.meta.url), "utf8");
-const storageText = fs.readFileSync(new URL("../src/shared/storage.ts", import.meta.url), "utf8");
 const messagesText = fs.readFileSync(new URL("../src/shared/messages.ts", import.meta.url), "utf8");
 const idbText = fs.readFileSync(new URL("../src/shared/idb.ts", import.meta.url), "utf8");
 const manifest = JSON.parse(fs.readFileSync(new URL("../manifest.json", import.meta.url), "utf8"));
@@ -84,9 +84,6 @@ assert.match(resultText, /빠른 변환을 지원하지 않아 실시간으로 �
 assert.match(settingsText, /enableAutoDownloadRecording: false/);
 assert.match(settingsText, /enableAutoDownloadSplit: false/);
 assert.match(settingsText, /const DEFAULT_VIDEO_BITS_PER_SECOND = 6_000_000/);
-assert.match(storageText, /enableAutoDownloadRecording: Boolean\(raw\?\.enableAutoDownloadRecording\)/);
-assert.match(storageText, /enableAutoDownloadSplit: Boolean\(raw\?\.enableAutoDownloadSplit\)/);
-assert.match(storageText, /resultTabId: Number\.isFinite\(raw\?\.resultTabId as number\)/);
 assert.match(serviceWorkerText, /autoDownload=1/);
 assert.match(serviceWorkerText, /active: settings\.autoFocusResult && !settings\.enableAutoDownloadRecording/);
 assert.match(messagesText, /AUTO_DOWNLOAD_HANDLED/);
@@ -214,9 +211,16 @@ const functionNames = new Set([
   "getRecordingChunkSliceRanges",
   "runRecordingTerminalOperation",
   "normalizeRecordingState",
-  "normalizeRegion",
   "regionEdges",
   "clamp",
+  "applyBorderGeometry",
+  "resolveRegionToViewport",
+  "buildRegionSelection",
+  "getVideoSelectionRect",
+  "clampRegionToRect",
+  "syncRegionLayoutGeometry",
+  "startRegionLayoutWatch",
+  "stopRegionLayoutWatch",
 ]);
 const selectedStatements = [];
 function collectStatements(node, file) {
@@ -229,10 +233,49 @@ function collectStatements(node, file) {
 collectStatements(sourceFile, sourceFile);
 collectStatements(serviceWorkerFile, serviceWorkerFile);
 const statements = selectedStatements.join("\n");
-const runtime = ts.transpileModule(`const recordingTerminalOperations = new Map();\nconst RECORDING_STATUS = { idle: "idle", recording: "recording", completed: "completed", error: "error" };\nconst RECORDING_MODE = { region: "region", full: "full" };\nconst MILLISECONDS_PER_SECOND = 1_000;\nconst SECONDS_PER_MINUTE = 60;\nconst SECONDS_PER_HOUR = 3_600;\nconst MIN_GROUPED_LAYOUT_REGIONS = 3;\nconst MAX_ACTIVE_REGIONS = 4;\n${statements}\nreturn { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, getRecordingChunkSliceRanges, runRecordingTerminalOperation, normalizeRecordingState, normalizeRegion };`, {
+const observed = [], disconnected = [];
+const replacement = { closest: () => null };
+const layoutWatch = new Function('replacement', 'observed', 'disconnected', `
+  let regionLayoutVideo = {}, regionLayoutObserver = { disconnect() { disconnected.push('old'); } }, regionLayoutSyncFrame = 7;
+  let currentRegions = [{}];
+  const currentBorders = new Map(), SCREENSHOT_STACK_ID = 'stack';
+  const window = { cancelAnimationFrame() {} }, document = { getElementById: () => null };
+  const findPrimaryVideoElement = () => replacement, getVideoRenderedViewportRect = () => null, requestRegionLayoutSync = () => {};
+  class ResizeObserver { observe(video) { observed.push(video); } disconnect() { disconnected.push('new'); } }
+  ${ts.transpile(statements, { target: ts.ScriptTarget.ES2022 })}
+  return { sync: syncRegionLayoutGeometry, clear() { currentRegions = []; syncRegionLayoutGeometry(); } };
+`)(replacement, observed, disconnected);
+layoutWatch.sync();
+assert.deepEqual(observed, [replacement], 'after replacing a video, observe its future size changes');
+assert.deepEqual(disconnected, ['old'], 'release the removed video observer');
+layoutWatch.sync();
+assert.equal(observed.length, 1, 'unchanged players must not create duplicate observers');
+layoutWatch.clear();
+assert.deepEqual(disconnected, ['old', 'new'], 'clearing regions releases the replacement observer');
+const applyBorder = new Function("window", ts.transpile(`${statements}\nreturn applyBorderGeometry;`, { target: ts.ScriptTarget.ES2022 }))({ innerWidth: 1000, innerHeight: 700 });
+const border = { style: {} };
+const selection = { x: 100, y: 100, width: 400, height: 200, videoRelative: { x: 0.125, y: 0.25, width: 0.5, height: 0.5 } };
+for (const [left, top, width, height, expected] of [
+  [0, 0, 800, 400, [100, 100, 400, 200]],
+  [0, -200, 800, 400, [100, 0, 400, 100]],
+  [-300, 0, 800, 400, [0, 100, 200, 200]],
+  [800, 550, 320, 180, [840, 595, 160, 90]],
+  [900, 600, 320, 180, [940, 645, 60, 55]],
+]) {
+  applyBorder(border, selection, { left, top, width, height });
+  assert.equal(border.style.display, '');
+  assert.deepEqual(['left', 'top', 'width', 'height'].map(key => parseFloat(border.style[key])), expected, 'scrolling and mini-player placement must only show the visible intersection');
+}
+applyBorder(border, selection, { left: 0, top: -500, width: 800, height: 400 });
+assert.equal(border.style.display, 'none');
+applyBorder(border, selection, null);
+assert.equal(border.style.display, 'none', 'a temporarily detached player must not leave a stale border');
+applyBorder(border, selection, { left: 0, top: 0, width: 800, height: 400 });
+assert.equal(border.style.display, '', 'reattaching the player must restore the border');
+const runtime = ts.transpileModule(`const recordingTerminalOperations = new Map();\nconst RECORDING_STATUS = { idle: "idle", recording: "recording", completed: "completed", error: "error" };\nconst RECORDING_MODE = { region: "region", full: "full" };\nconst MILLISECONDS_PER_SECOND = 1_000;\nconst SECONDS_PER_MINUTE = 60;\nconst SECONDS_PER_HOUR = 3_600;\nconst MIN_GROUPED_LAYOUT_REGIONS = 3;\nconst MAX_ACTIVE_REGIONS = 4;\n${statements}\nreturn { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, getRecordingChunkSliceRanges, runRecordingTerminalOperation, normalizeRecordingState };`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
 }).outputText;
-const { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, getRecordingChunkSliceRanges, runRecordingTerminalOperation, normalizeRecordingState, normalizeRegion } = new Function(runtime)();
+const { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, getRecordingChunkSliceRanges, runRecordingTerminalOperation, normalizeRecordingState } = new Function(runtime)();
 
 assert.equal(getStreamerNameFromTitle("치지직 게임 - CHZZK"), "치지직 게임");
 assert.equal(getStreamerNameFromTitle("치지직 스포츠 - CHZZK"), "치지직 스포츠");

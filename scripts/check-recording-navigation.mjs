@@ -46,6 +46,31 @@ for (const scenario of ["search", "back", "player-saving", "new-document", "clos
 }
 console.log("recording navigation checks passed");
 
+const startSource = file.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "startRecordingSession");
+for (const outputFormat of ['webm', 'mp4']) for (const prepared of [true, false]) {
+  const order = [];
+  const start = new Function('outputFormat', 'prepared', 'order', `
+    const RECORDING_STATUS = { recording: 'recording', completed: 'completed' }, RECORDING_MODE = { full: 'full', region: 'region' };
+    const settings = { outputFormat }, crypto = { randomUUID: () => 'new-recording' };
+    const ok = data => ({ ok: true, data }), fail = error => ({ ok: false, error });
+    const getActiveRecordableTab = async () => ({ id: 7 });
+    const loadAppState = async () => ({ region: {}, recordingState: { status: 'idle' }, settings });
+    const sendCommandToContentScript = async (tabId, message) => {
+      order.push(message);
+      return prepared ? ok() : fail('encoder preparation failed');
+    };
+    const saveRecordingState = async () => { order.push('recording'); };
+    const getPlayerRegionGeometry = async () => ok({});
+    const loadRecordingState = async () => ({ status: 'recording', recordingId: 'new-recording' });
+    const startDirectRecording = async () => { order.push('start'); return ok(); };
+    ${ts.transpile(startSource.getText(file), { target: ts.ScriptTarget.ES2022 })}
+    return startRecordingSession;
+  `)(outputFormat, prepared, order);
+  assert.equal((await start(true)).ok, prepared);
+  assert.deepEqual(order, [{ type: 'PREPARE_DIRECT_RECORDING', settings: { outputFormat } }, ...(prepared ? ['recording', 'start'] : [])], 'prepare either container before setting recording state; a failed preparation must not start capture');
+}
+console.log('recording startup preparation checks passed');
+
 const openSource = file.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "openCompletedRecordingResult");
 for (const autoFocusResult of [true, false]) {
   for (const enableAutoDownloadRecording of [true, false]) {

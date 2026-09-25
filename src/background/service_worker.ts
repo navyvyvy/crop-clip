@@ -287,10 +287,8 @@ async function startRecordingSession(fullPlayer: boolean): Promise<MessageRespon
   }
 
   // Keep the timer and recording state idle until GPU discovery is complete.
-  if (state.settings.outputFormat === "mp4") {
-    const prepared = await sendCommandToContentScript(tabId, { type: "PREPARE_DIRECT_RECORDING" });
-    if (!prepared.ok) return prepared;
-  }
+  const prepared = await sendCommandToContentScript(tabId, { type: "PREPARE_DIRECT_RECORDING", settings: state.settings });
+  if (!prepared.ok) return prepared;
 
   const settings = state.settings;
   const recordingId = crypto.randomUUID();
