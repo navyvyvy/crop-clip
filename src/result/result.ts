@@ -1,3 +1,6 @@
+import { MEDIA_SEEK_TOLERANCE_SECONDS, createObjectUrlSource, releaseVideoSource, getPartSource, getSourceBytes, pickRecorderMimeType, waitForMediaEvent, hydratePart, loadVideoForPart, seekVideo, recordVideoRange, type LoadedPart } from "./media.js";
+import { downloadSource, downloadSourcesSequentially, downloadSourcesAndConfirm } from "./downloads.js";
+import { loadFfmpeg, releaseFfmpeg, deleteFfmpegFile, clearFfmpegOutputs, readFfmpegBlob, type FfmpegLike } from "./ffmpeg.js";
 import { getPartsByRecordingId, getRecording, putPart, putRecording } from "../shared/idb.js";
 import type { AutoDownloadHandledMessage, DeletionScheduleRequest, MessageResponse } from "../shared/messages.js";
 import { loadAppState } from "../shared/storage.js";
@@ -21,7 +24,7 @@ import {
   type TimeRange,
   type TimeRangeHandle,
 } from "../shared/time_range.js";
-import { HIGH_RECORDING_FRAME_RATE, RECORDING_FORMAT, STANDARD_RECORDING_FRAME_RATE, type RecordingFormat, type RecordingPartRecord, type RecordingRecord } from "../shared/types.js";
+import { HIGH_RECORDING_FRAME_RATE, RECORDING_FORMAT, STANDARD_RECORDING_FRAME_RATE, type RecordingFormat, type RecordingRecord } from "../shared/types.js";
 
 const params = new URLSearchParams(location.search);
 const recordingId = params.get("id") ?? "";
@@ -98,7 +101,6 @@ const elements = {
 };
 
 let recording: RecordingRecord | null = null;
-type LoadedPart = RecordingPartRecord & ({ blob: Blob } | { objectUrl: string });
 
 let parts: LoadedPart[] = [];
 let splitSegments: SplitSegment[] = [];
@@ -106,7 +108,6 @@ let previewUrl: string | null = null;
 let recordingDurationSeconds = 0;
 let sourceDurationSeconds = 0;
 let sourceSizeBytes = 0;
-let ffmpegLoadPromise: Promise<FfmpegLike> | null = null;
 let ffmpegProgressBase = 0;
 let trimStartSeconds = 0;
 let trimEndSeconds = 0;
@@ -125,36 +126,9 @@ interface SplitSegment {
   startSeconds: number;
   endSeconds: number;
 }
-
-interface FfmpegLike {
-  terminate(): void;
-  on(event: "progress", callback: (event: { progress?: number; time?: number }) => void): void;
-  load(options: { coreURL: string; wasmURL: string }): Promise<unknown>;
-  writeFile(path: string, data: Uint8Array): Promise<unknown>;
-  exec(args: string[]): Promise<number>;
-  readFile(path: string): Promise<Uint8Array | string>;
-  listDir(path: string): Promise<Array<{ name: string; isDir: boolean }>>;
-  deleteFile(path: string): Promise<unknown>;
-}
-
-const MP4_MIME_CANDIDATES = [
-  'video/mp4;codecs="avc1.42E01E,mp4a.40.2"',
-  'video/mp4;codecs="avc1,mp4a.40.2"',
-  "video/mp4",
-];
-
-const WEBM_MIME_CANDIDATES = [
-  "video/webm;codecs=avc1",
-  "video/webm;codecs=vp8,opus",
-  "video/webm;codecs=vp9,opus",
-  "video/webm",
-];
 const RESULT_LOAD_MAX_ATTEMPTS = 120;
 const RESULT_LOAD_RETRY_MS = 500;
-const DOWNLOAD_URL_REVOKE_DELAY_MS = 1_000;
-const SEQUENTIAL_DOWNLOAD_DELAY_MS = 350;
 const SEEK_METADATA_VERSION = 1;
-const MEDIA_EVENT_TIMEOUT_MS = 15_000;
 const FFMPEG_LOAD_START_PERCENT = 3;
 const FFMPEG_READY_PERCENT = 8;
 const FFMPEG_SOURCE_READ_PERCENT = 10;
@@ -166,7 +140,6 @@ const PROGRESS_PREPARING_PERCENT = 6;
 const PROGRESS_FINALIZING_PERCENT = 96;
 const PERCENT_SCALE = 100;
 const DISPLAY_SIZE_UNIT = 1_000;
-const MEDIA_SEEK_TOLERANCE_SECONDS = TIME_STEP_SECONDS / 2;
 const MEDIA_SEEK_EPSILON_SECONDS = 0.001;
 const TRIM_PREVIEW_OFFSET_SECONDS = 0.01;
 const DEFAULT_PLAYBACK_SPEED = 1;
@@ -181,7 +154,6 @@ const TIMELINE_THUMBNAIL_WIDTH = 160;
 const TIMELINE_THUMBNAIL_HEIGHT = 90;
 const TIMELINE_FALLBACK_WIDTH = 720;
 const TIMELINE_THUMBNAIL_JPEG_QUALITY = 0.72;
-const DURATION_PROBE_DELAY_MS = 500;
 const SPLIT_FILE_INDEX_DIGITS = 3;
 const PLAYBACK_END_TOLERANCE_SECONDS = 0.02;
 const TRIM_DRAG_THRESHOLD_PX = 3;
@@ -270,89 +242,6 @@ function getStreamerNameFromFilename(): string {
   return name && name !== "cropClip" ? name : "";
 }
 
-function createObjectUrlSource(source: Blob | string): { url: string; revoke: boolean } {
-  return typeof source === "string"
-    ? { url: source, revoke: false }
-    : { url: URL.createObjectURL(source), revoke: true };
-}
-
-function releaseVideoSource(video: HTMLVideoElement, url: string, revoke: boolean): void {
-  video.pause();
-  video.removeAttribute("src");
-  video.load();
-  video.remove();
-  if (revoke) {
-    URL.revokeObjectURL(url);
-  }
-}
-
-function downloadSource(source: Blob | string, filename: string): void {
-  const { url, revoke } = createObjectUrlSource(source);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.rel = "noopener";
-  anchor.click();
-  if (revoke) {
-    window.setTimeout(() => URL.revokeObjectURL(url), DOWNLOAD_URL_REVOKE_DELAY_MS);
-  }
-}
-
-function waitForDownloadCompletion(downloadId: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const finish = (error?: Error) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      chrome.downloads.onChanged.removeListener(onChanged);
-      error ? reject(error) : resolve();
-    };
-    const checkState = (state?: string, error?: string) => {
-      if (state === "complete") {
-        finish();
-      } else if (state === "interrupted") {
-        finish(new Error(`다운로드가 중단되었습니다${error ? `: ${error}` : "."}`));
-      }
-    };
-    const onChanged = (delta: chrome.downloads.DownloadDelta) => {
-      if (delta.id === downloadId) {
-        checkState(delta.state?.current, delta.error?.current);
-      }
-    };
-
-    chrome.downloads.onChanged.addListener(onChanged);
-    void chrome.downloads.search({ id: downloadId }).then(([item]) => {
-      if (!item) {
-        finish(new Error("시작한 다운로드를 찾지 못했습니다."));
-        return;
-      }
-      checkState(item.state, item.error);
-    }, (error: unknown) => {
-      finish(error instanceof Error ? error : new Error("다운로드 상태를 확인하지 못했습니다."));
-    });
-  });
-}
-
-async function beginConfirmedDownload(source: Blob | string, filename: string): Promise<{ completion: Promise<void> }> {
-  const { url, revoke } = createObjectUrlSource(source);
-  try {
-    const downloadId = await chrome.downloads.download({ url, filename, conflictAction: "uniquify", saveAs: false });
-    const completion = waitForDownloadCompletion(downloadId).finally(() => {
-      if (revoke) {
-        URL.revokeObjectURL(url);
-      }
-    });
-    return { completion };
-  } catch (error) {
-    if (revoke) {
-      URL.revokeObjectURL(url);
-    }
-    throw error;
-  }
-}
-
 function clearFramePreview(): void {
   if (framePreviewUrl) {
     URL.revokeObjectURL(framePreviewUrl);
@@ -373,16 +262,6 @@ function showFramePreview(blob: Blob, filename: string): void {
   elements.framePreviewCard.hidden = false;
 }
 
-function getPartSource(part: LoadedPart): Blob | string {
-  if (part.blob instanceof Blob) {
-    return part.blob;
-  }
-  if (!part.objectUrl) {
-    throw new Error("녹화 파일 URL이 비어 있습니다.");
-  }
-  return part.objectUrl;
-}
-
 function getDownloadIconSvg(): string {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -390,13 +269,6 @@ function getDownloadIconSvg(): string {
       <path d="M5 17.5v1.2c0 .7.6 1.3 1.3 1.3h11.4c.7 0 1.3-.6 1.3-1.3v-1.2" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
     </svg>
   `;
-}
-
-async function getSourceBytes(source: Blob | string): Promise<Uint8Array> {
-  const data = source instanceof Blob
-    ? await source.arrayBuffer()
-    : await (await fetch(source)).arrayBuffer();
-  return new Uint8Array(data);
 }
 
 function setProgressPercent(percent: number): void {
@@ -415,99 +287,33 @@ function setFfmpegProgressBase(percent: number): void {
   setProgressPercent(percent);
 }
 
-async function loadFfmpeg(): Promise<FfmpegLike> {
-  if (!ffmpegLoadPromise) {
-    ffmpegLoadPromise = (async () => {
-      setWorkStatus("변환 엔진을 불러오는 중입니다.");
-      setFfmpegProgressBase(FFMPEG_LOAD_START_PERCENT);
-      const module = await import(chrome.runtime.getURL("vendor/ffmpeg/ffmpeg/index.js")) as { FFmpeg: new () => FfmpegLike };
-      const ffmpeg = new module.FFmpeg();
-      ffmpeg.on("progress", ({ progress }) => {
-        if (typeof progress === "number" && Number.isFinite(progress)) {
-          setProgressPercent(ffmpegProgressBase + progress * (FFMPEG_EXEC_PROGRESS_MAX - ffmpegProgressBase));
-        }
-      });
-      try {
-        await ffmpeg.load({
-          coreURL: chrome.runtime.getURL("vendor/ffmpeg/core/ffmpeg-core.js"),
-          wasmURL: chrome.runtime.getURL("vendor/ffmpeg/core/ffmpeg-core.wasm"),
-        });
-      } catch (error) {
-        ffmpeg.terminate();
-        throw error;
-      }
-      setFfmpegProgressBase(FFMPEG_READY_PERCENT);
-      return ffmpeg;
-    })().catch((error) => {
-      ffmpegLoadPromise = null;
-      throw error;
-    });
-  }
-
-  return ffmpegLoadPromise;
-}
-
-async function releaseFfmpeg(): Promise<void> {
-  const pending = ffmpegLoadPromise;
-  ffmpegLoadPromise = null;
-  const ffmpeg = await pending?.catch(() => null);
-  ffmpeg?.terminate();
-}
-
-async function deleteFfmpegFile(ffmpeg: FfmpegLike, name: string, bestEffort = false): Promise<void> {
-  try {
-    await ffmpeg.deleteFile(name);
-  } catch (error) {
-    if (!bestEffort) {
-      throw error;
-    }
-  }
-}
-
-async function clearFfmpegOutputs(ffmpeg: FfmpegLike, bestEffort = false): Promise<void> {
-  try {
-    const files = await ffmpeg.listDir(".");
-    await Promise.all(files
-      .filter((file) => !file.isDir && (file.name === "input.webm" || file.name === "input.mp4" || file.name.startsWith("output")))
-      .map((file) => deleteFfmpegFile(ffmpeg, file.name, bestEffort)));
-  } catch (error) {
-    if (!bestEffort) {
-      throw error;
-    }
-  }
-}
-
-async function readFfmpegBlob(ffmpeg: FfmpegLike, filename: string, mimeType: string): Promise<Blob> {
-  const data = await ffmpeg.readFile(filename);
-  if (typeof data === "string") {
-    return new Blob([data], { type: mimeType });
-  }
-
-  const buffer = data.buffer instanceof ArrayBuffer
-    ? data.byteOffset === 0 && data.byteLength === data.buffer.byteLength
-      ? data.buffer
-      : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
-    : data.slice().buffer;
-  return new Blob([buffer], { type: mimeType });
-}
-
 function getConvertedMimeType(format: ConvertFormat): string {
   return format === "gif" ? "image/gif" : `video/${format}`;
 }
 
-async function convertPartWithFfmpeg(part: LoadedPart, outputFormat: ConvertFormat, optimizeSeeking = false, range?: TimeRange): Promise<{ source: Blob; filename: string }> {
-  const ffmpeg = await loadFfmpeg();
+async function withFfmpegInput<T>(part: LoadedPart, operation: (ffmpeg: FfmpegLike, inputName: string) => Promise<T>, message = "원본 파일을 준비하는 중입니다."): Promise<T> {
+  setWorkStatus("변환 엔진을 불러오는 중입니다.");
+  setFfmpegProgressBase(FFMPEG_LOAD_START_PERCENT);
+  const ffmpeg = await loadFfmpeg(progress => setProgressPercent(ffmpegProgressBase + progress * (FFMPEG_EXEC_PROGRESS_MAX - ffmpegProgressBase)));
   const inputName = `input.${part.extension}`;
-  const outputName = `output.${outputFormat}`;
-  setFfmpegProgressBase(FFMPEG_READY_PERCENT);
-  await clearFfmpegOutputs(ffmpeg);
   try {
-    setWorkStatus("원본 파일을 준비하는 중입니다.");
+    setFfmpegProgressBase(FFMPEG_READY_PERCENT);
+    await clearFfmpegOutputs(ffmpeg);
+    setWorkStatus(message);
     setFfmpegProgressBase(FFMPEG_SOURCE_READ_PERCENT);
     const sourceBytes = await getSourceBytes(getPartSource(part));
     setFfmpegProgressBase(FFMPEG_SOURCE_LOADED_PERCENT);
     await ffmpeg.writeFile(inputName, sourceBytes);
     setFfmpegProgressBase(FFMPEG_TRANSCODE_START_PERCENT);
+    return await operation(ffmpeg, inputName);
+  } finally {
+    await clearFfmpegOutputs(ffmpeg, true);
+  }
+}
+
+async function convertPartWithFfmpeg(part: LoadedPart, outputFormat: ConvertFormat, optimizeSeeking = false, range?: TimeRange): Promise<{ source: Blob; filename: string }> {
+  return withFfmpegInput(part, async (ffmpeg, inputName) => {
+    const outputName = `output.${outputFormat}`;
     const seekArgs = range ? ["-ss", String(range.start)] : [];
     const durationArgs = range ? ["-t", String(range.end - range.start)] : [];
     const args = outputFormat === "gif"
@@ -530,24 +336,12 @@ async function convertPartWithFfmpeg(part: LoadedPart, outputFormat: ConvertForm
     const blob = await readFfmpegBlob(ffmpeg, outputName, getConvertedMimeType(outputFormat));
     setProgressPercent(PROGRESS_FINALIZING_PERCENT);
     return { source: blob, filename: getRangeFilename(part, outputFormat, range) };
-  } finally {
-    await clearFfmpegOutputs(ffmpeg, true);
-  }
+  });
 }
 
 async function convertPartAtSpeed(part: LoadedPart, speed: number, range?: TimeRange): Promise<{ source: Blob; filename: string }> {
-  const ffmpeg = await loadFfmpeg();
-  const inputName = `input.${part.extension}`;
-  const outputName = "output-speed.mp4";
-  setFfmpegProgressBase(FFMPEG_READY_PERCENT);
-  await clearFfmpegOutputs(ffmpeg);
-  try {
-    setWorkStatus("배속 파일을 준비하는 중입니다.");
-    setFfmpegProgressBase(FFMPEG_SOURCE_READ_PERCENT);
-    const sourceBytes = await getSourceBytes(getPartSource(part));
-    setFfmpegProgressBase(FFMPEG_SOURCE_LOADED_PERCENT);
-    await ffmpeg.writeFile(inputName, sourceBytes);
-    setFfmpegProgressBase(FFMPEG_TRANSCODE_START_PERCENT);
+  return withFfmpegInput(part, async (ffmpeg, inputName) => {
+    const outputName = "output-speed.mp4";
     const seekArgs = range ? ["-ss", String(range.start)] : [];
     const durationArgs = range ? ["-t", String(range.end - range.start)] : [];
     const speedText = String(speed);
@@ -575,82 +369,15 @@ async function convertPartAtSpeed(part: LoadedPart, speed: number, range?: TimeR
     const blob = await readFfmpegBlob(ffmpeg, outputName, "video/mp4");
     setProgressPercent(PROGRESS_FINALIZING_PERCENT);
     return { source: blob, filename: getSpeedFilename(part, speed, range) };
-  } finally {
-    await clearFfmpegOutputs(ffmpeg, true);
-  }
+  }, "배속 파일을 준비하는 중입니다.");
 }
 
 function getFilenameBase(filename: string): string {
   return filename.replace(/\.[^.]+$/, "");
 }
 
-function pickRecorderMimeType(format: OutputFormat, preferred = ""): string {
-  const preferredCandidates = preferred.includes(format) ? [preferred] : [];
-  const candidates = format === RECORDING_FORMAT.mp4
-    ? [...preferredCandidates, ...MP4_MIME_CANDIDATES]
-    : [...preferredCandidates, ...WEBM_MIME_CANDIDATES];
-
-  for (const candidate of candidates) {
-    if (MediaRecorder.isTypeSupported(candidate)) {
-      return candidate;
-    }
-  }
-
-  throw new Error(format === RECORDING_FORMAT.mp4
-    ? "이 브라우저에서는 MP4 다운로드를 지원하지 않습니다."
-    : "이 브라우저에서는 WebM 다운로드를 지원하지 않습니다.");
-}
-
-function waitForMediaEvent(video: HTMLVideoElement, eventName: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timeoutId = window.setTimeout(() => {
-      cleanup();
-      reject(new Error("영상 파일 응답을 기다리는 시간이 초과되었습니다."));
-    }, MEDIA_EVENT_TIMEOUT_MS);
-    const cleanup = () => {
-      window.clearTimeout(timeoutId);
-      video.removeEventListener(eventName, onEvent);
-      video.removeEventListener("error", onError);
-    };
-    const onEvent = () => {
-      cleanup();
-      resolve();
-    };
-    const onError = () => {
-      cleanup();
-      reject(new Error("영상 파일을 읽지 못했습니다."));
-    };
-    video.addEventListener(eventName, onEvent, { once: true });
-    video.addEventListener("error", onError, { once: true });
-  });
-}
-
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
-function waitForVideoMetadata(video: HTMLVideoElement): Promise<void> {
-  if (video.readyState >= HTMLMediaElement.HAVE_METADATA) {
-    return Promise.resolve();
-  }
-
-  return waitForMediaEvent(video, "loadedmetadata");
-}
-
-async function resolveVideoDuration(video: HTMLVideoElement): Promise<number> {
-  if (Number.isFinite(video.duration) && video.duration > 0) {
-    return video.duration;
-  }
-
-  try {
-    video.currentTime = Number.MAX_SAFE_INTEGER;
-    await delay(DURATION_PROBE_DELAY_MS);
-    video.currentTime = 0;
-  } catch {
-    // Some recorded WebM files do not expose duration until after a seek attempt.
-  }
-
-  return Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
 }
 
 function getRecordingDurationFallback(): number {
@@ -660,50 +387,6 @@ function getRecordingDurationFallback(): number {
 
   const seconds = (recording.endedAt - recording.createdAt) / MILLISECONDS_PER_SECOND;
   return Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
-}
-
-async function hydratePart(part: RecordingPartRecord): Promise<LoadedPart> {
-  if (part.blob instanceof Blob) {
-    return part as LoadedPart;
-  }
-
-  if (part.objectUrl) {
-    const response = await fetch(part.objectUrl);
-    if (!response.ok) {
-      throw new Error("녹화 파일을 불러오지 못했습니다.");
-    }
-
-    const blob = await response.blob();
-    const { objectUrl, ...storedPart } = part;
-    const hydrated = { ...storedPart, blob } as LoadedPart;
-    try {
-      await putPart(hydrated);
-      URL.revokeObjectURL(objectUrl);
-    } catch {
-      // Keep the source URL alive if the durable Blob copy could not be stored.
-    }
-    return hydrated;
-  }
-
-  const match = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(part.dataUrl ?? "");
-  if (!match) {
-    throw new Error("녹화 파일 데이터가 비어 있습니다.");
-  }
-
-  const mimeType = match[1] || part.mimeType;
-  const body = match[2] ? atob(match[3]) : decodeURIComponent(match[3]);
-  const bytes = new Uint8Array(body.length);
-  for (let index = 0; index < body.length; index += 1) {
-    bytes[index] = body.charCodeAt(index);
-  }
-
-  const { dataUrl: _dataUrl, ...storedPart } = part;
-  const hydrated = {
-    ...storedPart,
-    blob: new Blob([bytes], { type: mimeType }),
-  } satisfies LoadedPart;
-  await putPart(hydrated).catch(() => {});
-  return hydrated;
 }
 
 async function makeWebmSeekable(part: LoadedPart): Promise<LoadedPart> {
@@ -1022,44 +705,6 @@ function updateSplitDefaultValues(part: LoadedPart | undefined = getSelectedSour
   applySplitValueDefault();
 }
 
-async function loadVideoForPart(part: LoadedPart): Promise<{ video: HTMLVideoElement; url: string; revoke: boolean; duration: number }> {
-  const { url, revoke } = createObjectUrlSource(getPartSource(part));
-  const video = document.createElement("video");
-  video.muted = true;
-  video.playsInline = true;
-  video.preload = "auto";
-  video.src = url;
-  video.style.position = "fixed";
-  video.style.left = "-9999px";
-  video.style.top = "0";
-  video.style.width = "1px";
-  video.style.height = "1px";
-  document.body.appendChild(video);
-
-  try {
-    await waitForVideoMetadata(video);
-    const duration = await resolveVideoDuration(video) || getRecordingDurationFallback();
-    if (!Number.isFinite(duration) || duration <= 0) {
-      throw new Error("영상 길이를 확인할 수 없습니다.");
-    }
-
-    return { video, url, revoke, duration };
-  } catch (error) {
-    releaseVideoSource(video, url, revoke);
-    throw error;
-  }
-}
-
-async function seekVideo(video: HTMLVideoElement, seconds: number): Promise<void> {
-  const target = Math.max(0, seconds);
-  if (Math.abs(video.currentTime - target) < MEDIA_SEEK_TOLERANCE_SECONDS) {
-    return;
-  }
-
-  video.currentTime = target;
-  await waitForMediaEvent(video, "seeked");
-}
-
 function clearTimelineThumbnails(): void {
   thumbnailRequestId += 1;
   for (const url of thumbnailUrls) {
@@ -1101,7 +746,7 @@ async function renderTimelineThumbnails(part: LoadedPart | undefined): Promise<v
   elements.trimThumbnails.setAttribute("data-loading", "");
   let loaded: Awaited<ReturnType<typeof loadVideoForPart>> | null = null;
   try {
-    loaded = await loadVideoForPart(part);
+    loaded = await loadVideoForPart(part, getRecordingDurationFallback());
     const { duration, video } = loaded;
   const widthCount = Math.ceil((elements.trimThumbnails.clientWidth || TIMELINE_FALLBACK_WIDTH) / TIMELINE_THUMBNAIL_DISPLAY_WIDTH);
     const durationCount = Math.ceil(duration / TIMELINE_THUMBNAIL_INTERVAL_SECONDS);
@@ -1154,72 +799,13 @@ async function renderTimelineThumbnails(part: LoadedPart | undefined): Promise<v
   }
 }
 
-async function recordVideoRange(video: HTMLVideoElement, startSeconds: number, endSeconds: number, mimeType: string): Promise<Blob> {
-  if (mimeType.startsWith("video/mp4")) await prepareRecordingEncoder();
-  await seekVideo(video, startSeconds);
-  const streamSource = video as HTMLVideoElement & { captureStream?: () => MediaStream; mozCaptureStream?: () => MediaStream };
-  const stream = streamSource.captureStream?.() ?? streamSource.mozCaptureStream?.();
-  if (!stream) {
-    throw new Error("브라우저가 결과 영상 분할을 지원하지 않습니다.");
-  }
-
-  let recorder: MediaRecorder | undefined;
-  let cleanupPlayback = () => {};
-  try {
-    const activeRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-    recorder = activeRecorder;
-    const blob = await new Promise<Blob>((resolve, reject) => {
-      const chunks: BlobPart[] = [];
-      let timeoutId = 0;
-      const check = () => {
-        if (video.currentTime >= endSeconds || video.ended) {
-          video.pause();
-          if (activeRecorder.state !== "inactive") activeRecorder.stop();
-        }
-      };
-      const onError = () => reject(new Error("영상 파일을 재생하지 못했습니다."));
-      cleanupPlayback = () => {
-        video.removeEventListener("timeupdate", check);
-        video.removeEventListener("error", onError);
-        window.clearTimeout(timeoutId);
-      };
-      activeRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) chunks.push(event.data);
-      };
-      activeRecorder.onstop = () => resolve(new Blob(chunks, { type: mimeType || "video/webm" }));
-      activeRecorder.onerror = () => reject(new Error("영상 파일을 만드는 중 녹화 오류가 발생했습니다."));
-      video.addEventListener("timeupdate", check);
-      video.addEventListener("error", onError, { once: true });
-      activeRecorder.start(MILLISECONDS_PER_SECOND);
-      timeoutId = window.setTimeout(() => {
-        reject(new Error("영상 구간 처리 시간이 초과되었습니다."));
-      }, Math.max(MEDIA_EVENT_TIMEOUT_MS, (endSeconds - startSeconds) * MILLISECONDS_PER_SECOND + MEDIA_EVENT_TIMEOUT_MS));
-      void video.play().then(check, reject);
-    });
-    if (blob.size <= 0) {
-      throw new Error("변환된 영상 데이터가 비어 있습니다.");
-    }
-    return blob;
-  } finally {
-    cleanupPlayback();
-    video.pause();
-    if (recorder) {
-      recorder.ondataavailable = null;
-      recorder.onstop = null;
-      recorder.onerror = null;
-      if (recorder.state !== "inactive") recorder.stop();
-    }
-    stream.getTracks().forEach((track) => track.stop());
-  }
-}
-
 async function createDurationSplitWithFfmpeg(
   part: LoadedPart,
   segmentSeconds: number,
   outputFormat: OutputFormat,
   range?: TimeRange,
 ): Promise<SplitSegment[]> {
-  const { video, url, revoke, duration } = await loadVideoForPart(part);
+  const { video, url, revoke, duration } = await loadVideoForPart(part, getRecordingDurationFallback());
   releaseVideoSource(video, url, revoke);
   const selectedRange = range ? normalizeTimeRange(range.start, range.end, duration) : { start: 0, end: duration };
   const selectedDuration = selectedRange.end - selectedRange.start;
@@ -1228,17 +814,7 @@ async function createDurationSplitWithFfmpeg(
   }
   const expectedCount = getExpectedSplitCount(selectedDuration, segmentSeconds);
 
-  const ffmpeg = await loadFfmpeg();
-  const inputName = `input.${part.extension}`;
-  setFfmpegProgressBase(FFMPEG_READY_PERCENT);
-  await clearFfmpegOutputs(ffmpeg);
-  try {
-    setWorkStatus("원본 파일을 준비하는 중입니다.");
-    setFfmpegProgressBase(FFMPEG_SOURCE_READ_PERCENT);
-    const sourceBytes = await getSourceBytes(getPartSource(part));
-    setFfmpegProgressBase(FFMPEG_SOURCE_LOADED_PERCENT);
-    await ffmpeg.writeFile(inputName, sourceBytes);
-    setFfmpegProgressBase(FFMPEG_TRANSCODE_START_PERCENT);
+  return withFfmpegInput(part, async (ffmpeg, inputName) => {
     const pattern = `output%03d.${outputFormat}`;
     const segmentListName = "output.csv";
     const code = await ffmpeg.exec([
@@ -1294,13 +870,11 @@ async function createDurationSplitWithFfmpeg(
       setProgressPercent(FFMPEG_EXEC_PROGRESS_MAX + (index + 1) / files.length * (PERCENT_SCALE - FFMPEG_EXEC_PROGRESS_MAX));
     }
     return segments;
-  } finally {
-    await clearFfmpegOutputs(ffmpeg, true);
-  }
+  });
 }
 
 async function createSizeSplit(part: LoadedPart, maxMegabytes: number, outputFormat: OutputFormat, range?: TimeRange): Promise<SplitSegment[]> {
-  const { video, url, revoke, duration } = await loadVideoForPart(part);
+  const { video, url, revoke, duration } = await loadVideoForPart(part, getRecordingDurationFallback());
   releaseVideoSource(video, url, revoke);
 
   const maxBytes = megabytesToBytes(maxMegabytes);
@@ -1338,7 +912,7 @@ async function convertPartWithRecorder(part: LoadedPart, outputFormat: OutputFor
     return { source: getPartSource(part), filename: part.filename };
   }
 
-  const { video, url, revoke, duration } = await loadVideoForPart(part);
+  const { video, url, revoke, duration } = await loadVideoForPart(part, getRecordingDurationFallback());
   try {
     const mimeType = pickRecorderMimeType(outputFormat, part.mimeType);
     const selectedRange = range ? normalizeTimeRange(range.start, range.end, duration) : { start: 0, end: duration };
@@ -1360,6 +934,7 @@ async function convertPart(part: LoadedPart, outputFormat: ConvertFormat, range?
     if (outputFormat === "gif") {
       throw new Error(`${outputFormat.toUpperCase()} 변환에 실패했습니다.`);
     }
+    await releaseFfmpeg();
     setWorkStatus("빠른 변환을 지원하지 않아 실시간으로 처리 중입니다.");
     return await convertPartWithRecorder(part, outputFormat, range);
   }
@@ -1494,29 +1069,6 @@ function renderParts(): void {
   updateSplitDefaultValues(parts[0]);
   renderSplitDownloads();
   setSplitBusy(false);
-}
-
-async function downloadSourcesSequentially(items: Array<{ source: Blob | string; filename: string }>): Promise<void> {
-  for (const item of [...items].sort((a, b) => a.filename.localeCompare(b.filename, undefined, { numeric: true }))) {
-    downloadSource(item.source, item.filename);
-    await delay(SEQUENTIAL_DOWNLOAD_DELAY_MS);
-  }
-}
-
-async function downloadSourcesAndConfirm(items: Array<{ source: Blob | string; filename: string }>): Promise<void> {
-  const completions: Array<Promise<Error | null>> = [];
-  for (const item of [...items].sort((a, b) => a.filename.localeCompare(b.filename, undefined, { numeric: true }))) {
-    const { completion } = await beginConfirmedDownload(item.source, item.filename);
-    completions.push(completion.then(
-      () => null,
-      (error: unknown) => error instanceof Error ? error : new Error("다운로드를 완료하지 못했습니다."),
-    ));
-    await delay(SEQUENTIAL_DOWNLOAD_DELAY_MS);
-  }
-  const error = (await Promise.all(completions)).find((result): result is Error => result !== null);
-  if (error) {
-    throw error;
-  }
 }
 
 async function scheduleRecordingDeletion(): Promise<void> {

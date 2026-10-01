@@ -268,7 +268,14 @@ async function startRecordingSession(fullPlayer: boolean): Promise<MessageRespon
   if (typeof tabId !== "number") {
     return fail("녹화할 수 있는 웹 탭에서만 사용할 수 있습니다.");
   }
-  const state = await loadAppState();
+  let state = await loadAppState();
+  if (state.recordingState.status === RECORDING_STATUS.error && state.recordingState.recordingId
+    && (await getChunksByRecordingId(state.recordingState.recordingId)).length > 0) {
+    if (!await recoverRecording(state.recordingState.recordingId, Date.now())) {
+      return fail("이전 녹화 데이터를 보존하고 있습니다. 저장 공간을 확보한 뒤 다시 시도하거나 녹화 취소 단축키로 삭제하세요.");
+    }
+    state = await loadAppState();
+  }
   const storedRegion = state.region;
 
   if (!fullPlayer && !storedRegion) {
@@ -386,7 +393,7 @@ async function stopRecording(): Promise<MessageResponse> {
 
 async function cancelRecording(): Promise<MessageResponse> {
   const initialState = await loadRecordingState();
-  if (initialState.status !== RECORDING_STATUS.recording) {
+  if (initialState.status !== RECORDING_STATUS.recording && initialState.status !== RECORDING_STATUS.error) {
     return ok();
   }
 
@@ -401,7 +408,7 @@ async function cancelRecording(): Promise<MessageResponse> {
   const recordingId = initialState.recordingId;
   return await runRecordingTerminalOperation(recordingId, async () => {
     const state = await loadRecordingState();
-    if (state.status !== RECORDING_STATUS.recording || state.recordingId !== recordingId) {
+    if ((state.status !== RECORDING_STATUS.recording && state.status !== RECORDING_STATUS.error) || state.recordingId !== recordingId) {
       return ok();
     }
 
@@ -421,7 +428,7 @@ async function completeRecording(recording: RecordingRecord): Promise<MessageRes
     await ensureCompletedRecordingResult();
     return ok();
   }
-  if (previousState.status !== RECORDING_STATUS.recording || previousState.recordingId !== recording.id) {
+  if ((previousState.status !== RECORDING_STATUS.recording && previousState.status !== RECORDING_STATUS.error) || previousState.recordingId !== recording.id) {
     await deleteRecordingEventually(recording.id);
     return ok();
   }
@@ -447,42 +454,45 @@ async function openCompletedRecordingResult(): Promise<boolean> {
     return true;
   }
 
-  if (typeof recordingState.resultTabId === "number") {
-    try {
-      await chrome.tabs.get(recordingState.resultTabId);
-      await chrome.alarms.clear(RESULT_TAB_RETRY_ALARM);
-      return true;
-    } catch {
-      await saveRecordingState({ ...recordingState, resultTabId: undefined });
-    }
-  }
-
   const source = typeof recordingState.tabId === "number" ? `&sourceTabId=${recordingState.tabId}` : "";
   const autoDownload = settings.enableAutoDownloadRecording ? "&autoDownload=1" : "";
-  const url = chrome.runtime.getURL(`result/result.html?id=${encodeURIComponent(recordingState.recordingId)}${source}${autoDownload}`);
+  const resultPage = chrome.runtime.getURL("result/result.html");
+  const url = `${resultPage}?id=${encodeURIComponent(recordingState.recordingId)}${source}${autoDownload}`;
 
-  for (let attempt = 0; attempt < RESULT_TAB_CREATE_ATTEMPTS; attempt += 1) {
-    try {
-      const resultTab = await chrome.tabs.create({ url, active: settings.autoFocusResult && !settings.enableAutoDownloadRecording });
-      await chrome.alarms.clear(RESULT_TAB_RETRY_ALARM);
-      if (settings.enableAutoDownloadRecording) {
-        const latestState = await loadRecordingState();
-        if (latestState.status === RECORDING_STATUS.completed && latestState.recordingId === recordingState.recordingId) {
-          await saveRecordingState({ ...latestState, resultTabId: resultTab.id });
+  try {
+    // State persistence can fail after creation. Find the actual result across retries
+    // and worker restarts, and ignore tabs that have navigated away from this recording.
+    let resultTabId = (await chrome.runtime.getContexts({ contextTypes: [chrome.runtime.ContextType.TAB] })).find((context) => {
+      const candidate = context.documentUrl;
+      return candidate?.startsWith(`${resultPage}?`) && new URL(candidate).searchParams.get("id") === recordingState.recordingId;
+    })?.tabId;
+    for (let attempt = 0; resultTabId === undefined && attempt < RESULT_TAB_CREATE_ATTEMPTS; attempt += 1) {
+      try {
+        resultTabId = (await chrome.tabs.create({ url, active: settings.autoFocusResult && !settings.enableAutoDownloadRecording })).id;
+      } catch {
+        if (attempt + 1 < RESULT_TAB_CREATE_ATTEMPTS) {
+          await delay(RESULT_TAB_RETRY_DELAY_MS * (attempt + 1));
         }
-      } else {
-        await saveRecordingState({ status: RECORDING_STATUS.idle });
-        await scheduleRecordingDeletion(recordingState.recordingId).catch(() => {});
-      }
-      return true;
-    } catch {
-      if (attempt + 1 < RESULT_TAB_CREATE_ATTEMPTS) {
-        await delay(RESULT_TAB_RETRY_DELAY_MS * (attempt + 1));
       }
     }
+    if (resultTabId !== undefined) {
+      const latestState = await loadRecordingState();
+      if (latestState.status === RECORDING_STATUS.completed && latestState.recordingId === recordingState.recordingId) {
+        if (settings.enableAutoDownloadRecording) {
+          await saveRecordingState({ ...latestState, resultTabId });
+        } else {
+          await saveRecordingState({ status: RECORDING_STATUS.idle });
+          await scheduleRecordingDeletion(recordingState.recordingId).catch(() => {});
+        }
+      }
+      await chrome.alarms.clear(RESULT_TAB_RETRY_ALARM);
+      return true;
+    }
+  } catch {
+    // Retry result delivery without treating a state/alarms failure as tab creation failure.
   }
 
-      await chrome.alarms.create(RESULT_TAB_RETRY_ALARM, { delayInMinutes: RESULT_TAB_RETRY_ALARM_DELAY_MINUTES });
+  await chrome.alarms.create(RESULT_TAB_RETRY_ALARM, { delayInMinutes: RESULT_TAB_RETRY_ALARM_DELAY_MINUTES });
   return false;
 }
 
@@ -508,8 +518,8 @@ async function handleAutoDownloadHandled(message: AutoDownloadHandledMessage): P
 }
 
 async function handleRecordingError(message: RecordingErrorMessage): Promise<MessageResponse> {
-  await discardRecordingIfCurrent(message.recordingId);
-  return ok();
+  if (!message.recordingId) return fail(message.error);
+  return await recoverRecording(message.recordingId, Date.now()) ? ok() : fail(message.error);
 }
 
 function storeRecordingChunk(message: StoreRecordingChunkMessage): Promise<MessageResponse> {
@@ -546,14 +556,24 @@ function storeRecordingChunk(message: StoreRecordingChunkMessage): Promise<Messa
     });
 }
 
-async function finalizeRecordingFromChunksUnlocked(recordingId: string, endedAt: number): Promise<MessageResponse> {
+async function finalizeRecordingFromChunksUnlocked(recordingId: string, endedAt: number, recoverPartial = false): Promise<MessageResponse<boolean>> {
   const state = await loadRecordingState();
-  if (state.status !== RECORDING_STATUS.recording || state.recordingId !== recordingId) {
-    return ok();
+  if ((state.status !== RECORDING_STATUS.recording && !(recoverPartial && state.status === RECORDING_STATUS.error)) || state.recordingId !== recordingId) {
+    return ok(false);
   }
 
-  await checkpointStores.get(recordingId);
-  const chunks = await getChunksByRecordingId(recordingId);
+  // A failed last write must not hide earlier committed checkpoints from recovery.
+  await checkpointStores.get(recordingId)?.catch((error: unknown) => { if (!recoverPartial) throw error; });
+  let chunks = await getChunksByRecordingId(recordingId);
+  if (recoverPartial) {
+    let completeCount = 0;
+    for (const [index, chunk] of chunks.entries()) {
+      if (chunk.index !== index + 1 || chunk.mimeType !== chunks[0].mimeType) break;
+      if (chunk.completesBlob !== false) completeCount = index + 1;
+    }
+    // Keep the longest contiguous prefix ending at a complete MediaRecorder blob.
+    chunks = chunks.slice(0, completeCount);
+  }
   const first = chunks[0];
   if (!first) {
     return fail("저장된 녹화 데이터가 없습니다.");
@@ -584,16 +604,17 @@ async function finalizeRecordingFromChunksUnlocked(recordingId: string, endedAt:
     createdAt: actualEndedAt,
   });
 
-  return await completeRecording({
+  const response = await completeRecording({
     id: recordingId,
     createdAt: first.createdAt,
     endedAt: actualEndedAt,
     totalSize: blob.size,
     actualExtension: first.extension,
   });
+  return response.ok ? ok(true) : response;
 }
 
-function finalizeRecordingFromChunks(recordingId: string, endedAt: number): Promise<MessageResponse> {
+function finalizeRecordingFromChunks(recordingId: string, endedAt: number): Promise<MessageResponse<boolean>> {
   return runRecordingTerminalOperation(recordingId, () => finalizeRecordingFromChunksUnlocked(recordingId, endedAt));
 }
 
@@ -601,7 +622,9 @@ async function recoverRecording(recordingId: string, endedAt: number): Promise<b
   return await runRecordingTerminalOperation(recordingId, async () => {
     for (let attempt = 0; attempt < RECOVERY_FINALIZE_ATTEMPTS; attempt += 1) {
       try {
-        await finalizeRecordingFromChunksUnlocked(recordingId, endedAt);
+        const response = await finalizeRecordingFromChunksUnlocked(recordingId, endedAt, true);
+        // Opening the result may already have reset global state to idle.
+        if (response.ok && response.data) return true;
       } catch {
         // A late checkpoint or a transient IndexedDB failure may succeed on retry.
       }
@@ -610,7 +633,7 @@ async function recoverRecording(recordingId: string, endedAt: number): Promise<b
       if (state.status === RECORDING_STATUS.completed && state.recordingId === recordingId) {
         return true;
       }
-      if (state.status !== RECORDING_STATUS.recording || state.recordingId !== recordingId) {
+      if ((state.status !== RECORDING_STATUS.recording && state.status !== RECORDING_STATUS.error) || state.recordingId !== recordingId) {
         return false;
       }
       if (attempt + 1 < RECOVERY_FINALIZE_ATTEMPTS) {
@@ -618,7 +641,8 @@ async function recoverRecording(recordingId: string, endedAt: number): Promise<b
       }
     }
 
-    await discardRecordingIfCurrentUnlocked(recordingId);
+    // Preserve checkpoints if storage is still unavailable; retry on restart or next start.
+    await markRecordingErrorIfCurrent(recordingId);
     return false;
   });
 }
@@ -657,7 +681,7 @@ async function recoverInterruptedRecording(): Promise<void> {
     await ensureCompletedRecordingResult();
     return;
   }
-  if (state.status !== RECORDING_STATUS.recording || !state.recordingId) {
+  if ((state.status !== RECORDING_STATUS.recording && state.status !== RECORDING_STATUS.error) || !state.recordingId) {
     return;
   }
 

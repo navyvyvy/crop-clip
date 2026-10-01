@@ -1,3 +1,6 @@
+import { getVideoStream } from "./player_capture.js";
+import { computeDirectLayout, scaleLayout, type DirectCrop, type DirectCropPlacement } from "./crop_layout.js";
+import { formatElapsed, MILLISECONDS_PER_SECOND } from "../shared/time_range.js";
 import { normalizeSettings, normalizeRegion, normalizeRegions } from "../shared/normalize.js";
 import { RECORDING_FORMAT, RECORDING_STATUS, RECORDING_MODE, DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, STANDARD_RECORDING_FRAME_RATE, HIGH_RECORDING_FRAME_RATE, DEFAULT_SHORTCUT_KEYS as DEFAULT_CONTENT_SHORTCUT_KEYS } from "../shared/types.js";
 
@@ -32,11 +35,7 @@ const RESIZE_MAGNIFIER_SAMPLE_HEIGHT = 21;
 const SNAP_DISTANCE = 10;
 const MIN_ACTIVE_REGIONS = 2;
 const MAX_ACTIVE_REGIONS = 4;
-const MIN_GROUPED_LAYOUT_REGIONS = 3;
 
-const MILLISECONDS_PER_SECOND = 1_000;
-const SECONDS_PER_MINUTE = 60;
-const SECONDS_PER_HOUR = 3_600;
 
 const VIDEO_FRAME_READY_TIMEOUT_MS = 3_000;
 const CHZZK_TOOL_DISCOVERY_INTERVAL_MS = 500;
@@ -85,26 +84,6 @@ type LocalRecordingState = Pick<RecordingState, "status" | "startedAt" | "mode">
 type GuideSide = "n" | "s" | "w" | "e";
 type RegionGeometryResponse = MessageResponse<RegionSelection>;
 type RegionGeometriesResponse = MessageResponse<RegionSelection[]>;
-
-interface DirectCropPlacement {
-  crop: DirectCrop;
-  dx: number;
-  dy: number;
-  dw: number;
-  dh: number;
-}
-
-interface DirectCrop {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-interface DirectLayout {
-  output: { width: number; height: number };
-  placements: DirectCropPlacement[];
-}
 
 interface DirectRecordingSession {
   recordingId: string;
@@ -175,17 +154,6 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-function formatElapsed(ms: number): string {
-  const totalSeconds = Math.max(0, Math.floor(ms / MILLISECONDS_PER_SECOND));
-  const hours = Math.floor(totalSeconds / SECONDS_PER_HOUR);
-  const minutes = Math.floor((totalSeconds % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE);
-  const seconds = totalSeconds % SECONDS_PER_MINUTE;
-  if (hours > 0) {
-    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-  }
-  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-}
-
 function isExtensionContextAvailable(): boolean {
   try {
     return Boolean(chrome.runtime?.id);
@@ -194,77 +162,9 @@ function isExtensionContextAvailable(): boolean {
   }
 }
 
-const playerCaptureStreams = new WeakMap<HTMLVideoElement, MediaStream>();
-
-function getVideoStream(video: HTMLVideoElement): MediaStream | null {
-  const source = video as HTMLVideoElement & { captureStream?: () => MediaStream; mozCaptureStream?: () => MediaStream };
-  let stream = playerCaptureStreams.get(video);
-  if (!stream) {
-    stream = source.captureStream?.() ?? source.mozCaptureStream?.();
-    if (!stream) return null;
-    const captured = stream;
-    let released = false;
-    // Chrome retains native captures on the player. Reuse one disabled audio source;
-    // only per-recording clones output audio, and no original video is needed.
-    const prepareTrack = (track: MediaStreamTrack) => {
-      if (!captured.getTracks().includes(track)) return;
-      if (released || track.kind === "video") {
-        track.stop();
-        captured.removeTrack(track);
-      } else {
-        track.enabled = false;
-        for (const previous of captured.getAudioTracks()) {
-          if (previous !== track) {
-            previous.stop();
-            captured.removeTrack(previous);
-          }
-        }
-      }
-    };
-    captured.getTracks().forEach(prepareTrack);
-    captured.addEventListener("addtrack", (event) => prepareTrack(event.track));
-    playerCaptureStreams.set(video, captured);
-    let parents: Node[] = [];
-    let detachTimer = 0;
-    const watchParents = () => {
-      const next: Node[] = [];
-      for (let parent = video.parentNode; parent; parent = parent.parentNode) next.push(parent);
-      if (next.length === parents.length && next.every((parent, index) => parent === parents[index])) return;
-      detachObserver.disconnect();
-      next.forEach(parent => detachObserver.observe(parent, { childList: true }));
-      parents = next;
-    };
-    const checkAttachment = () => {
-      if (video.isConnected) {
-        window.clearTimeout(detachTimer);
-        detachTimer = 0;
-        watchParents();
-        return;
-      }
-      // SPA layouts may detach the playing element before mounting the mini player.
-      // Allow one second for reattachment, then release a genuinely removed player.
-      if (!detachTimer) {
-        detachTimer = window.setTimeout(checkAttachment, 1000);
-        return;
-      }
-      released = true;
-      detachObserver.disconnect();
-      parents = [];
-      playerCaptureStreams.delete(video);
-      if (regionLayoutVideo === video) stopRegionLayoutWatch();
-      if (directSession?.video === video) stopDirectRecordingAfterSourceChange(directSession);
-      captured.getTracks().forEach(prepareTrack);
-    };
-    const detachObserver = new MutationObserver(() => {
-      if (video.isConnected || !detachTimer) checkAttachment();
-    });
-    watchParents();
-  }
-  return new MediaStream(stream.getAudioTracks().filter(track => track.readyState === "live").map(track => {
-    const clone = track.clone();
-    clone.enabled = true;
-    return clone;
-  }));
+function handleDetachedPlayer(video: HTMLVideoElement): void {
+  if (regionLayoutVideo === video) stopRegionLayoutWatch();
+  if (directSession?.video === video) stopDirectRecordingAfterSourceChange(directSession);
 }
 
 function waitForCurrentVideoFrame(video: HTMLVideoElement): Promise<boolean> {
@@ -533,13 +433,6 @@ function getCropLayoutKey(crops: DirectCrop[]): string {
   return crops.map((crop) => `${crop.x}:${crop.y}:${crop.width}:${crop.height}`).join("|");
 }
 
-function computeDirectOutput(crop: { width: number; height: number }): { width: number; height: number } {
-  return {
-    width: Math.max(1, Math.round(crop.width)),
-    height: Math.max(1, Math.round(crop.height)),
-  };
-}
-
 function getMultiRegionLimit(settings?: Partial<Settings>): number {
   const value = settings?.multiRegionMaxCount ?? multiRegionMaxCount;
   return clamp(Math.round(Number(value) || DEFAULT_MULTI_REGION_COUNT), MIN_ACTIVE_REGIONS, MAX_ACTIVE_REGIONS);
@@ -547,185 +440,6 @@ function getMultiRegionLimit(settings?: Partial<Settings>): number {
 
 function getActiveRegionLimit(): number {
   return multiRegionEnabled ? getMultiRegionLimit() : 1;
-}
-
-function scaleLayout(layout: DirectLayout, scale: number, dx: number, dy: number): DirectCropPlacement[] {
-  return layout.placements.map((placement) => {
-    const left = Math.round(placement.dx * scale);
-    const top = Math.round(placement.dy * scale);
-    const right = Math.round((placement.dx + placement.dw) * scale);
-    const bottom = Math.round((placement.dy + placement.dh) * scale);
-    return {
-      crop: placement.crop,
-      dx: dx + left,
-      dy: dy + top,
-      dw: Math.max(1, right - left),
-      dh: Math.max(1, bottom - top),
-    };
-  });
-}
-
-function composeHorizontal(layouts: DirectLayout[]): DirectLayout {
-  const height = Math.max(1, Math.round(Math.max(...layouts.map((layout) => layout.output.height))));
-  let x = 0;
-  const placements: DirectCropPlacement[] = [];
-  for (const layout of layouts) {
-    const scale = height / layout.output.height;
-    placements.push(...scaleLayout(layout, scale, x, 0));
-    x += Math.max(1, Math.round(layout.output.width * scale));
-  }
-  return { output: { width: Math.max(1, x), height }, placements };
-}
-
-function composeVertical(layouts: DirectLayout[]): DirectLayout {
-  const width = Math.max(1, Math.round(Math.max(...layouts.map((layout) => layout.output.width))));
-  let y = 0;
-  const placements: DirectCropPlacement[] = [];
-  for (const layout of layouts) {
-    const scale = width / layout.output.width;
-    placements.push(...scaleLayout(layout, scale, 0, y));
-    y += Math.max(1, Math.round(layout.output.height * scale));
-  }
-  return { output: { width, height: Math.max(1, y) }, placements };
-}
-
-function getPairLayoutDirection(crops: DirectCrop[]): "horizontal" | "vertical" | null {
-  if (crops.length !== 2) {
-    return null;
-  }
-
-  const [first, second] = crops;
-  const separatedX = first.x + first.width <= second.x || second.x + second.width <= first.x;
-  const separatedY = first.y + first.height <= second.y || second.y + second.height <= first.y;
-  if (separatedX !== separatedY) {
-    return separatedX ? "horizontal" : "vertical";
-  }
-
-  const centerDistanceX = Math.abs((first.x + first.width / 2) - (second.x + second.width / 2));
-  const centerDistanceY = Math.abs((first.y + first.height / 2) - (second.y + second.height / 2));
-  const normalizedX = centerDistanceX / Math.max(1, (first.width + second.width) / 2);
-  const normalizedY = centerDistanceY / Math.max(1, (first.height + second.height) / 2);
-  return normalizedX >= normalizedY ? "horizontal" : "vertical";
-}
-
-function getGroupedLayout(crops: DirectCrop[]): DirectLayout | null {
-  if (crops.length < MIN_GROUPED_LAYOUT_REGIONS || crops.length > MAX_ACTIVE_REGIONS) {
-    return null;
-  }
-
-  const fullMask = (1 << crops.length) - 1;
-  let best: { score: number; horizontal: boolean; layout: DirectLayout } | null = null;
-  for (let mask = 1; mask < fullMask; mask += 1) {
-    if ((mask & 1) === 0) {
-      continue;
-    }
-    const first: number[] = [];
-    const second: number[] = [];
-    for (let index = 0; index < crops.length; index += 1) {
-      ((mask & (1 << index)) === 0 ? second : first).push(index);
-    }
-    const groups = [first, second].map((indices) => indices.map((index) => crops[index]));
-    const bounds = groups.map((group) => ({
-      left: Math.min(...group.map((crop) => crop.x)),
-      top: Math.min(...group.map((crop) => crop.y)),
-      right: Math.max(...group.map((crop) => crop.x + crop.width)),
-      bottom: Math.max(...group.map((crop) => crop.y + crop.height)),
-    }));
-    const horizontalOrder = bounds[0].right <= bounds[1].left ? [0, 1] : bounds[1].right <= bounds[0].left ? [1, 0] : null;
-    const verticalOrder = bounds[0].bottom <= bounds[1].top ? [0, 1] : bounds[1].bottom <= bounds[0].top ? [1, 0] : null;
-    if (!horizontalOrder && !verticalOrder) {
-      continue;
-    }
-    const layouts = groups.map((group) => computeDirectLayout(group));
-
-    if (horizontalOrder) {
-      const gap = bounds[horizontalOrder[1]].left - bounds[horizontalOrder[0]].right;
-      const score = gap / Math.max(1, Math.max(bounds[0].right, bounds[1].right) - Math.min(bounds[0].left, bounds[1].left));
-      if (!best || score > best.score || (score === best.score && !best.horizontal)) {
-        best = { score, horizontal: true, layout: composeHorizontal(horizontalOrder.map((index) => layouts[index])) };
-      }
-    }
-
-    if (verticalOrder) {
-      const gap = bounds[verticalOrder[1]].top - bounds[verticalOrder[0]].bottom;
-      const score = gap / Math.max(1, Math.max(bounds[0].bottom, bounds[1].bottom) - Math.min(bounds[0].top, bounds[1].top));
-      if (!best || score > best.score) {
-        best = { score, horizontal: false, layout: composeVertical(verticalOrder.map((index) => layouts[index])) };
-      }
-    }
-  }
-
-  return best?.layout ?? null;
-}
-
-function computeDirectLayout(crops: DirectCrop[]): DirectLayout {
-  if (crops.length <= 1) {
-    const crop = crops[0];
-    return {
-      output: computeDirectOutput(crop),
-      placements: [{ crop, dx: 0, dy: 0, dw: crop.width, dh: crop.height }],
-    };
-  }
-
-  const left = Math.min(...crops.map((crop) => crop.x));
-  const top = Math.min(...crops.map((crop) => crop.y));
-  const right = Math.max(...crops.map((crop) => crop.x + crop.width));
-  const bottom = Math.max(...crops.map((crop) => crop.y + crop.height));
-  const pairDirection = getPairLayoutDirection(crops);
-  const horizontal = pairDirection ? pairDirection === "horizontal" : right - left >= bottom - top;
-
-  if (crops.length > 2) {
-    const groupedLayout = getGroupedLayout(crops);
-    if (groupedLayout) {
-      return groupedLayout;
-    }
-
-    if (horizontal) {
-      const ordered = [...crops].sort((a, b) => (a.x + a.width / 2) - (b.x + b.width / 2));
-      const split = Math.ceil(ordered.length / 2);
-      return composeHorizontal([
-        composeVertical(ordered.slice(0, split).sort((a, b) => a.y - b.y).map((crop) => computeDirectLayout([crop]))),
-        composeVertical(ordered.slice(split).sort((a, b) => a.y - b.y).map((crop) => computeDirectLayout([crop]))),
-      ]);
-    }
-
-    const ordered = [...crops].sort((a, b) => (a.y + a.height / 2) - (b.y + b.height / 2));
-    const split = Math.ceil(ordered.length / 2);
-    return composeVertical([
-      composeHorizontal(ordered.slice(0, split).sort((a, b) => a.x - b.x).map((crop) => computeDirectLayout([crop]))),
-      composeHorizontal(ordered.slice(split).sort((a, b) => a.x - b.x).map((crop) => computeDirectLayout([crop]))),
-    ]);
-  }
-
-  const ordered = [...crops].sort((a, b) => horizontal ? a.x - b.x : a.y - b.y);
-
-  if (horizontal) {
-    const height = Math.max(1, Math.round(Math.max(...ordered.map((crop) => crop.height))));
-    let x = 0;
-    const placements = ordered.map((crop) => {
-      const width = Math.max(1, Math.round(crop.width * (height / crop.height)));
-      const placement = { crop, dx: x, dy: 0, dw: width, dh: height };
-      x += width;
-      return placement;
-    });
-    return {
-      output: { width: Math.max(1, x), height },
-      placements,
-    };
-  }
-
-  const width = Math.max(1, Math.round(Math.max(...ordered.map((crop) => crop.width))));
-  let y = 0;
-  const placements = ordered.map((crop) => {
-    const height = Math.max(1, Math.round(crop.height * (width / crop.width)));
-    const placement = { crop, dx: 0, dy: y, dw: width, dh: height };
-    y += height;
-    return placement;
-  });
-  return {
-    output: { width, height: Math.max(1, y) },
-    placements,
-  };
 }
 
 function selectDirectMimeType(settings: Settings): { mimeType: string; extension: "webm" | "mp4" } {
@@ -1271,20 +985,16 @@ function cleanupDirectRecordingSession(session: DirectRecordingSession): void {
 
 async function finalizeDirectRecording(session: DirectRecordingSession): Promise<void> {
   cleanupDirectRecordingSession(session);
-
-  try {
-    const response = await sendRuntimeMessage({
-      type: "FINALIZE_RECORDING",
-      recordingId: session.recordingId,
-      endedAt: session.endedAt ?? Date.now(),
-    });
-    if (!response.ok) {
-      throw new Error(response.error);
-    }
-    session.resolveFinish();
-  } catch (error) {
-    session.rejectFinish(error instanceof Error ? error : new Error("녹화 결과를 저장하지 못했습니다."));
+  const response = await sendRuntimeMessage({
+    type: "FINALIZE_RECORDING",
+    recordingId: session.recordingId,
+    endedAt: session.endedAt ?? Date.now(),
+  });
+  if (!response.ok) {
+    // Let finishDirectRecording route this failure through checkpoint recovery too.
+    throw new Error(response.error);
   }
+  session.resolveFinish();
 }
 
 function abortDirectRecordingSession(session: DirectRecordingSession): void {
@@ -1360,7 +1070,7 @@ function requestDirectPartStop(session: DirectRecordingSession): void {
   session.closingPart = true;
   session.endedAt ??= Date.now();
   try {
-    session.recorder.requestData();
+    if (!session.cancelRequested) session.recorder.requestData();
   } catch {
     // Some browsers throw if data is not ready yet.
   }
@@ -1458,7 +1168,7 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
 
   let sourceStream: MediaStream | null = null;
   try {
-    sourceStream = getVideoStream(video);
+    sourceStream = getVideoStream(video, handleDetachedPlayer);
   } catch {
     stopRecordingStream(canvasStream);
     return { ok: false, error: "이 브라우저에서는 현재 영상 녹화를 지원하지 않습니다." };

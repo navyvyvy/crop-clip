@@ -1,7 +1,7 @@
 {
   "name": "crop-clip",
   "private": true,
-  "version": "0.3.10",
+  "version": "0.3.11",
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
@@ -9,7 +9,7 @@
     "check:range": "npm run build --silent && node scripts/check-time-range.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "check:browser": "playwright test",
-    "check:unit": "node scripts/check-state-normalization.mjs && node scripts/check-layout.mjs && node scripts/check-ffmpeg-lifecycle.mjs && node scripts/check-recording-cleanup.mjs && node scripts/check-recording-backpressure.mjs && node scripts/check-recording-navigation.mjs && node scripts/check-player-input.mjs && node scripts/check-release-notes.mjs && node scripts/check-time-range.mjs",
+    "check:unit": "node scripts/check-state-normalization.mjs && node scripts/check-layout.mjs && node scripts/check-ffmpeg-lifecycle.mjs && node scripts/check-recording-cleanup.mjs && node scripts/check-recording-backpressure.mjs && node scripts/check-recording-recovery.mjs && node scripts/check-recording-navigation.mjs && node scripts/check-player-input.mjs && node scripts/check-release-notes.mjs && node scripts/check-time-range.mjs",
     "check": "npm run build && npm run check:unit && npm run check:browser"
   },
   "devDependencies": {

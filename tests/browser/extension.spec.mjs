@@ -1,44 +1,82 @@
-import { test as base, expect, chromium } from '@playwright/test';
-import path from 'node:path';
+import { test, expect, prepareVideo, interceptDownloads, decodeDownloads, expectResultResourcesReleased } from './fixtures.mjs';
 
-const test = base.extend({
-  extension: async ({}, use, testInfo) => {
-    const directory = path.resolve('dist');
-    const context = await chromium.launchPersistentContext('', {
-      channel: process.env.CROPCLIP_TEST_BROWSER || 'chromium',
-      headless: true,
-      args: [`--load-extension=${directory}`, `--disable-extensions-except=${directory}`],
+test('MP4 recording, splitting, speed, GIF and frame exports work', async ({ extension }) => {
+  test.setTimeout(90_000);
+  const { context, worker, page } = extension;
+  await prepareVideo(page);
+  await worker.evaluate(() => chrome.storage.local.set({ settings: {
+    enableShortcuts: true, enableFullRecordButton: true, outputFormat: 'mp4',
+  } }));
+  await page.keyboard.press('e');
+  await expect.poll(() => worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState?.status)).toBe('recording');
+  await page.waitForTimeout(4000); // Produce real media for the split and decode checks.
+  const opened = context.waitForEvent('page');
+  await page.keyboard.press('e');
+  const result = await opened;
+  await expect(result.locator('#split-button')).toBeEnabled({ timeout: 30_000 });
+  await expect.poll(() => result.locator('#preview-video').evaluate(video => video.readyState >= 2 && video.duration > 3)).toBe(true);
+  await expect(result.locator('#trim-thumbnails')).not.toHaveAttribute('data-loading');
+  const retainedUrls = await result.evaluate(() => window.testObjectUrls.size);
+  await interceptDownloads(result);
+  for (const format of ['mp4', 'webm']) {
+    await result.locator('#split-format-select').selectOption(format);
+    await result.locator('[data-split-ratio="0.5"]').click();
+    await result.locator('#split-button').click();
+    await expect(result.locator('#split-result-summary')).toHaveText('나눈 파일 (2개)', { timeout: 30_000 });
+    await expect(result.locator('#split-button')).toBeEnabled();
+    for (const button of await result.locator('#split-files-list button').all()) await button.click();
+    expect(await decodeDownloads(result)).toEqual([true, true]);
+    await expectResultResourcesReleased(result, retainedUrls);
+  }
+  await result.locator('#speed-select').selectOption('2');
+  await result.locator('#speed-convert-button').click();
+  await expect.poll(() => result.evaluate(() => window.testDownloads.length), { timeout: 30_000 }).toBe(1);
+  await expect(result.locator('#speed-convert-button')).toBeEnabled();
+  expect(await decodeDownloads(result, 3)).toEqual([true]);
+  await expectResultResourcesReleased(result, retainedUrls);
+  await result.locator('#capture-frame-button').click();
+  await expect(result.locator('#frame-preview-image')).toBeVisible();
+  for (const [selector, header] of [
+    ['#frame-preview-download-button', [137, 80, 78, 71]],
+    ['[data-convert-format="gif"]', [71, 73, 70, 56]],
+  ]) {
+    await result.locator(selector).click();
+    await expect.poll(() => result.evaluate(() => window.testDownloads.length), { timeout: 30_000 }).toBe(1);
+    const bytes = await result.evaluate(async () => {
+      const [blob] = await Promise.all(window.testDownloads.splice(0));
+      return Array.from(new Uint8Array(await blob.slice(0, 4).arrayBuffer()));
     });
-    const errors = [];
-    context.on('page', page => page.on('pageerror', error => errors.push(error.message)));
-    await context.tracing.start({ screenshots: true, snapshots: true });
-    try {
-      const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
-      const page = await context.newPage();
-      await page.route('https://chzzk.naver.com/**', route => route.fulfill({
-        contentType: 'text/html',
-        body: `<body style="margin:0;height:2000px">
-          <div class="chzzk_player" style="width:800px;height:400px">
-            <video style="width:800px;height:400px;display:block"></video>
-            <div class="pzp-pc__bottom"><div class="pzp-pc__bottom-buttons-right"><button class="pzp-button">Native</button></div></div>
-          </div><input aria-label="chat">
-        </body>`,
-      }));
-      await page.goto('https://chzzk.naver.com/extension-test');
-      await expect(page.locator('#crop-clip-chzzk-tool-button')).toBeAttached();
-      await worker.evaluate(() => chrome.storage.local.set({ settings: { enableShortcuts: true, enableFullRecordButton: true } }));
-      await expect(page.locator('#crop-clip-chzzk-record-button')).toBeVisible();
-      await use({ context, worker, page });
-      expect(errors, 'uncaught extension/page exceptions').toEqual([]);
-    } finally {
-      if (testInfo.status !== testInfo.expectedStatus) {
-        const trace = testInfo.outputPath('trace.zip');
-        await context.tracing.stop({ path: trace });
-        await testInfo.attach('trace', { path: trace, contentType: 'application/zip' });
-      } else await context.tracing.stop();
-      await context.close();
-    }
-  },
+    expect(bytes).toEqual(header);
+  }
+  await result.locator('#frame-preview-close-button').click();
+  await expectResultResourcesReleased(result, retainedUrls);
+
+  // Keep real engines; replace one EXEC command with an invalid codec.
+  await result.evaluate(() => {
+    const post = Worker.prototype.postMessage;
+    Worker.prototype.postMessage = function (message, ...args) {
+      if (message?.type === 'EXEC') {
+        Worker.prototype.postMessage = post;
+        message = { ...message, data: { ...message.data,
+          args: ['-i', 'input.mp4', '-c:v', 'cropclip-test-invalid-codec', 'output.mp4'],
+        } };
+      }
+      return post.call(this, message, ...args);
+    };
+  });
+  await result.locator('#trim-start-input').fill('0.2');
+  await result.locator('#trim-start-input').press('Tab');
+  const engineStarted = result.waitForEvent('worker');
+  await result.locator('#download-current-button').click();
+  await engineStarted;
+  await expect(result.locator('#split-status')).toContainText('실시간');
+  await expect.poll(async () => ({ workers: result.workers().length,
+    stillConverting: await result.locator('#download-current-button').isDisabled(),
+  })).toEqual({ workers: 0, stillConverting: true });
+  await expect.poll(() => result.evaluate(() => window.testDownloads.length), { timeout: 30_000 }).toBe(1);
+  await expect(result.locator('#download-current-button')).toBeEnabled();
+  expect(await decodeDownloads(result)).toEqual([true]);
+  await expectResultResourcesReleased(result, retainedUrls);
 });
 
 test('missing and malformed settings recover in the popup and player', async ({ extension }) => {
@@ -59,6 +97,29 @@ test('missing and malformed settings recover in the popup and player', async ({ 
   await page.reload(); // Initial state and storage updates use the same normalization.
   await expect(page.locator('#crop-clip-chzzk-record-button')).toBeVisible();
   await expect(popup.locator('#custom-video-bitrate-input')).toHaveValue('6');
+});
+
+test('result delivery reuses its tab after a failed state write', async ({ extension }) => {
+  const { context, worker } = extension;
+  await worker.evaluate(async () => {
+    await chrome.storage.local.set({ recordingState: { status: 'completed', recordingId: 'delivery-test' } });
+    const set = chrome.storage.local.set.bind(chrome.storage.local);
+    chrome.storage.local.set = items => {
+      if (items.recordingState?.status === 'idle') {
+        chrome.storage.local.set = set;
+        return Promise.reject(new Error('Injected state write failure'));
+      }
+      return set(items);
+    };
+  });
+  const opened = context.waitForEvent('page');
+  await worker.evaluate(() => chrome.alarms.create('open-recording-result', { when: Date.now() }));
+  const result = await opened;
+  await expect(result).toHaveURL(/result\/result.html\?id=delivery-test/);
+  await expect.poll(() => worker.evaluate(async () => (await chrome.alarms.get('open-recording-result'))?.scheduledTime ?? 0)).toBeGreaterThan(Date.now() + 1000);
+  await worker.evaluate(() => chrome.alarms.create('open-recording-result', { when: Date.now() }));
+  await expect.poll(() => worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState.status)).toBe('idle');
+  expect(context.pages().filter(page => page.url().includes('result/result.html?id=delivery-test'))).toHaveLength(1);
 });
 
 test('delayed starts preserve stop/cancel intent and respond immediately', async ({ extension }) => {
@@ -159,7 +220,7 @@ test('borders follow scrolling, replacement videos and mini-player transitions',
   await expectAligned();
 });
 
-test('real repeated recordings survive mini-player moves and split into playable files', async ({ extension }) => {
+test('real recordings survive mini-player moves, split and recover a failed checkpoint', async ({ extension }) => {
   test.setTimeout(180_000);
   const { context, worker, page } = extension;
   const dialogs = [];
@@ -169,43 +230,7 @@ test('real repeated recordings survive mini-player moves and split into playable
   // Play a generated file like the site's media player. A srcObject capture shares
   // its input source in Chromium, so stopping its captured track also ends that source.
   // CropClip's recorder, checkpoint storage and FFmpeg are unmocked.
-  await page.getByRole('button', { name: 'Native', exact: true }).click();
-  await page.evaluate(async () => {
-    await VideoEncoder.isConfigSupported({ codec: 'vp8', width: 640, height: 360, hardwareAcceleration: 'prefer-hardware' });
-    const canvas = document.createElement('canvas');
-    canvas.width = 640; canvas.height = 360;
-    let painting = true;
-    const paint = () => {
-      const ctx = canvas.getContext('2d');
-      ctx.fillStyle = `hsl(${performance.now() / 20 % 360} 90% 50%)`;
-      ctx.fillRect(0, 0, 640, 360);
-      if (painting) requestAnimationFrame(paint);
-    };
-    paint();
-    const audio = new AudioContext();
-    await audio.resume();
-    const oscillator = audio.createOscillator();
-    const destination = audio.createMediaStreamDestination();
-    oscillator.connect(destination); oscillator.start();
-    const stream = canvas.captureStream(30);
-    stream.addTrack(destination.stream.getAudioTracks()[0]);
-    const chunks = [];
-    const recorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp8,opus' });
-    recorder.ondataavailable = event => chunks.push(event.data);
-    const stopped = new Promise(resolve => { recorder.onstop = resolve; });
-    recorder.start();
-    await new Promise(resolve => setTimeout(resolve, 3000));
-    recorder.stop();
-    await stopped;
-    painting = false;
-    stream.getTracks().forEach(track => track.stop());
-    oscillator.stop();
-    await audio.close();
-    const video = document.querySelector('video');
-    video.src = URL.createObjectURL(new Blob(chunks, { type: recorder.mimeType }));
-    video.loop = true;
-    await video.play().catch(error => { throw new Error(`${error.message}; source ${recorder.mimeType}, ${chunks.map(chunk => chunk.size)}`); });
-  });
+  await prepareVideo(page);
   await worker.evaluate(() => {
     const region = { x: 100, y: 100, width: 400, height: 200,
       videoRelative: { x: 0.125, y: 0.25, width: 0.5, height: 0.5 } };
@@ -242,12 +267,9 @@ test('real repeated recordings survive mini-player moves and split into playable
     if (index < 2) await result.close();
   }
   // Intercept only the final download, leaving the actual split output intact for decoding.
-  await result.evaluate(() => {
-    window.testDownloads = [];
-    HTMLAnchorElement.prototype.click = function () {
-      window.testDownloads.push(fetch(this.href).then(response => response.blob()));
-    };
-  });
+  await expect(result.locator('#trim-thumbnails')).not.toHaveAttribute('data-loading');
+  const retainedUrls = await result.evaluate(() => window.testObjectUrls.size);
+  await interceptDownloads(result);
   for (const trimmed of [false, true]) {
     if (trimmed) {
       await result.locator('#trim-start-input').fill('1.3');
@@ -262,21 +284,32 @@ test('real repeated recordings survive mini-player moves and split into playable
       await expect(result.locator('#split-result-summary')).toHaveText(`나눈 파일 (${count}개)`, { timeout: 30_000 });
       await expect(result.locator('#split-button')).toBeEnabled();
       for (const button of await result.locator('#split-files-list button').all()) await button.click();
-      const decoded = await result.evaluate(async () => {
-        const blobs = await Promise.all(window.testDownloads.splice(0));
-        return Promise.all(blobs.map(async blob => {
-          const video = document.createElement('video');
-          video.muted = true;
-          const url = URL.createObjectURL(blob);
-          video.src = url;
-          try {
-            await new Promise((resolve, reject) => { video.onloadeddata = resolve; video.onerror = () => reject(new Error('Split output cannot decode')); });
-            return blob.size > 0 && video.videoWidth > 0 && video.duration > 0;
-          } finally { video.removeAttribute('src'); video.load(); URL.revokeObjectURL(url); }
-        }));
-      });
+      const decoded = await decodeDownloads(result);
       expect(decoded).toEqual(Array(count).fill(true));
+      await expectResultResourcesReleased(result, retainedUrls);
       expect(dialogs).toEqual([]);
     }
   }
+  await result.close();
+  // Fail the third disk write after two complete MediaRecorder blobs were saved.
+  await worker.evaluate(() => {
+    const put = IDBObjectStore.prototype.put;
+    let writes = 0;
+    IDBObjectStore.prototype.put = function (...args) {
+      if (this.name === 'chunks' && ++writes === 3) {
+        IDBObjectStore.prototype.put = put;
+        throw new DOMException('Injected disk failure', 'QuotaExceededError');
+      }
+      return put.apply(this, args);
+    };
+  });
+  await page.bringToFront();
+  const recoveredPage = context.waitForEvent('page');
+  await page.keyboard.press('e');
+  const recovered = await recoveredPage;
+  await expect(recovered.locator('#split-button')).toBeEnabled({ timeout: 30_000 });
+  await expect.poll(() => recovered.locator('#preview-video').evaluate(video =>
+    video.readyState >= 2 && video.videoWidth > 0 && video.duration > 0 && video.duration < 6)).toBe(true);
+  expect(await worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState.status)).toBe('idle');
+  expect(dialogs).toEqual([]);
 });

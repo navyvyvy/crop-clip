@@ -2,7 +2,7 @@ import { DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, DEFAULT_SETTINGS, DEF
 import { loadAppState, saveSettings } from "../shared/storage.js";
 import { normalizeRecordingState, normalizeRegion, normalizeRegions, normalizeSettings } from "../shared/normalize.js";
 import type { MessageResponse, PopupCommand } from "../shared/messages.js";
-import { MILLISECONDS_PER_SECOND, SECONDS_PER_HOUR, SECONDS_PER_MINUTE } from "../shared/time_range.js";
+import { formatElapsed, MILLISECONDS_PER_SECOND } from "../shared/time_range.js";
 
 const elements = {
   versionBadge: document.getElementById("version-badge") as HTMLSpanElement,
@@ -75,19 +75,6 @@ let appState: AppState = {
 let sendingCommand = false;
 let recordingTimerId: number | null = null;
 let waitingShortcutAction: ShortcutAction | null = null;
-
-function formatElapsed(ms: number): string {
-  const totalSeconds = Math.max(0, Math.floor(ms / MILLISECONDS_PER_SECOND));
-  const hours = Math.floor(totalSeconds / SECONDS_PER_HOUR);
-  const minutes = Math.floor((totalSeconds % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE);
-  const seconds = totalSeconds % SECONDS_PER_MINUTE;
-
-  if (hours > 0) {
-    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-  }
-
-  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-}
 
 function updateRecordingTimer(): void {
   if (appState.recordingState.status !== RECORDING_STATUS.recording || !appState.recordingState.startedAt) {

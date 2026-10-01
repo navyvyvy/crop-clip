@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import ts from "typescript";
 
-const text = fs.readFileSync(new URL("../src/result/result.ts", import.meta.url), "utf8");
+const text = ["result.ts", "ffmpeg.ts", "media.ts"].map(name => fs.readFileSync(new URL(`../src/result/${name}`, import.meta.url), "utf8")).join("\n");
 const file = ts.createSourceFile("result.ts", text, ts.ScriptTarget.Latest, true);
-const compile = (code) => ts.transpile(code, { target: ts.ScriptTarget.ES2022 });
+const compile = (code) => ts.transpile(code.replace(/^export /gm, ""), { target: ts.ScriptTarget.ES2022 });
 const cleanupBlocks = [];
 function visit(node) {
   if (ts.isTryStatement(node) && node.finallyBlock?.getText(file).includes("hideSplitProgress();")) {
@@ -29,7 +29,7 @@ let failLoad = false;
 class FFmpeg {
   terminated = false;
   constructor() { instances.push(this); }
-  on() {}
+  on(_event, listener) { this.progress = listener; }
   async load() { if (failLoad) throw new Error("load failed"); }
   terminate() { this.terminated = true; }
 }
@@ -37,24 +37,26 @@ const code = compile(functions).replace(/import\(chrome\.runtime\.getURL\([^)]*\
 const api = new Function("FFmpeg", `
   let ffmpegLoadPromise = null;
   const chrome = { runtime: { getURL: x => x } };
-  const setWorkStatus = () => {}, setFfmpegProgressBase = () => {};
-  const FFMPEG_LOAD_START_PERCENT = 3, FFMPEG_READY_PERCENT = 8;
   ${code}
   return { loadFfmpeg, releaseFfmpeg };
 `)(FFmpeg);
-const first = await api.loadFfmpeg();
-assert.equal(await api.loadFfmpeg(), first, "reuse the engine within a batch");
+const progress = [];
+const first = await api.loadFfmpeg(value => progress.push(value));
+first.progress({ progress: 0.5 });
+first.progress({ progress: NaN });
+assert.deepEqual(progress, [0.5]);
+assert.equal(await api.loadFfmpeg(() => {}), first, "reuse the engine within a batch");
 await api.releaseFfmpeg();
 assert.equal(first.terminated, true);
-const second = await api.loadFfmpeg();
+const second = await api.loadFfmpeg(() => {});
 assert.notEqual(second, first, "next job can reload the engine");
 await api.releaseFfmpeg();
 await api.releaseFfmpeg();
 failLoad = true;
-await assert.rejects(api.loadFfmpeg(), /load failed/);
+await assert.rejects(api.loadFfmpeg(() => {}), /load failed/);
 assert.equal(instances.at(-1).terminated, true, "failed loads must release their worker");
 failLoad = false;
-await api.loadFfmpeg();
+await api.loadFfmpeg(() => {});
 await api.releaseFfmpeg();
 assert.ok(instances.every(instance => instance.terminated));
 const releaseSource = file.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "releaseVideoSource");
@@ -77,6 +79,57 @@ for (const ownsUrl of [false, true]) {
   assert.equal(revoked.length, Number(ownsUrl), "only revoke URLs owned by the temporary video");
 }
 console.log("FFmpeg lifecycle checks passed");
+
+// A failed fast conversion falls back to real-time playback. The abandoned
+// engine must be gone before that potentially long recording starts.
+const convertSource = file.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "convertPart");
+for (const outputFormat of ["mp4", "webm"]) {
+  let abandonedEngine;
+  const convert = new Function("convertPartWithFfmpeg", "convertPartWithRecorder", "releaseFfmpeg", `
+    const setWorkStatus = () => {};
+    ${compile(convertSource.getText(file))}
+    return convertPart;
+  `)(async () => {
+    abandonedEngine = await api.loadFfmpeg(() => {});
+    throw new Error("unsupported fast conversion");
+  }, async () => {
+    assert.equal(abandonedEngine.terminated, true, "do not retain FFmpeg memory during real-time fallback");
+    return { source: new Blob(["fallback"]), filename: `fallback.${outputFormat}` };
+  }, api.releaseFfmpeg);
+  assert.equal((await convert({ extension: "webm" }, outputFormat, { start: 1, end: 2 })).filename, `fallback.${outputFormat}`);
+  await api.releaseFfmpeg(); // The caller's final cleanup remains safe.
+}
+console.log("conversion fallback resource checks passed");
+
+const inputJob = file.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "withFfmpegInput");
+for (const failure of ["clear", "read", "write", "operation", "none"]) {
+  const events = [];
+  const ffmpeg = { writeFile: async () => { events.push("write"); if (failure === "write") throw new Error(failure); } };
+  const withInput = new Function("ffmpeg", "events", "failure", `
+    const loadFfmpeg = async () => ffmpeg, getPartSource = part => part.blob;
+    const setFfmpegProgressBase = () => {}, setWorkStatus = () => {};
+    const FFMPEG_LOAD_START_PERCENT = 3, FFMPEG_READY_PERCENT = 8, FFMPEG_SOURCE_READ_PERCENT = 10, FFMPEG_SOURCE_LOADED_PERCENT = 12, FFMPEG_TRANSCODE_START_PERCENT = 15;
+    const clearFfmpegOutputs = async (_, bestEffort) => {
+      events.push(bestEffort ? 'cleanup' : 'clear');
+      if (!bestEffort && failure === 'clear') throw new Error(failure);
+    };
+    const getSourceBytes = async () => { events.push('read'); if (failure === 'read') throw new Error(failure); return new Uint8Array([1]); };
+    ${compile(inputJob.getText(file))}
+    return withFfmpegInput;
+  `)(ffmpeg, events, failure);
+  const result = withInput({ extension: "webm", blob: new Blob(["video"]) }, async (engine, inputName) => {
+    assert.equal(engine, ffmpeg);
+    assert.equal(inputName, "input.webm");
+    events.push("operation");
+    if (failure === "operation") throw new Error(failure);
+    return "saved";
+  });
+  if (failure === "none") assert.equal(await result, "saved");
+  else await assert.rejects(result, new RegExp(failure));
+  assert.equal(events.at(-1), "cleanup", `${failure}: release temporary files on every exit`);
+  assert.equal(events.filter(event => event === "cleanup").length, 1);
+}
+console.log("FFmpeg input job cleanup checks passed");
 
 const rangeSource = file.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "recordVideoRange");
 for (const failure of ["constructor", "start", "play", "encoder", "video", "timeout", "none"]) {

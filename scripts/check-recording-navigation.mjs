@@ -82,7 +82,7 @@ for (const autoFocusResult of [true, false]) {
       const delay = async () => {}, scheduleRecordingDeletion = async () => {};
       ${ts.transpile(openSource.getText(file), { target: ts.ScriptTarget.ES2022 })}
       return openCompletedRecordingResult;
-    `)({ runtime: { getURL: path => path }, alarms: { clear: async () => {}, create: async () => {} },
+    `)({ runtime: { getURL: path => path, ContextType: { TAB: 'TAB' }, getContexts: async () => [] }, alarms: { clear: async () => {}, create: async () => {} },
       tabs: { create: async options => { created.push(options); if (created.length === 1) throw new Error("retry"); return { id: 9 }; } },
     }, async () => ({ recordingState: state, settings: { autoFocusResult, enableAutoDownloadRecording } }), async () => state, async value => { state = value; });
     assert.equal(await open(), true);

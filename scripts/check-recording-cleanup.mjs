@@ -10,7 +10,7 @@ if (!global.gc) {
   process.exit(result.status ?? 1);
 }
 
-const text = fs.readFileSync(new URL("../src/content/region_selector.ts", import.meta.url), "utf8");
+const text = ["region_selector.ts", "player_capture.ts"].map(name => fs.readFileSync(new URL(`../src/content/${name}`, import.meta.url), "utf8")).join("\n").replace(/^export /gm, "");
 const file = ts.createSourceFile("region_selector.ts", text, ts.ScriptTarget.Latest, true);
 const functions = [];
 const startupFunctions = [];
@@ -26,7 +26,7 @@ function visit(node) {
   if (ts.isFunctionDeclaration(node) && node.name?.text === "attachBorderControls") borderControlsSource = node.getText(file);
   if (ts.isFunctionDeclaration(node) && ["startDirectRecording", "prepareDirectRecordingEncoder", "ignoreRecordingRejection", "releaseDirectRecordingCapture", "stopRecordingStream"].includes(node.name?.text)) startupFunctions.push(node.getText(file));
   if (ts.isVariableDeclaration(node) && node.name.getText(file) === "drawFrame") drawFrameSource = node.initializer.getText(file);
-  if (ts.isFunctionDeclaration(node) && ["getVideoStream", "stopRegionLayoutWatch", "stopRecordingStream", "releaseDirectRecordingCapture", "cleanupDirectRecordingSession", "startDirectPart", "finalizeDirectRecording", "cancelDirectRecordingSession", "abortDirectRecordingSession", "failDirectRecordingSession", "finishDirectRecording", "requestDirectPartStop"].includes(node.name?.text)) {
+  if (ts.isFunctionDeclaration(node) && ["getVideoStream", "handleDetachedPlayer", "stopRegionLayoutWatch", "stopRecordingStream", "releaseDirectRecordingCapture", "cleanupDirectRecordingSession", "startDirectPart", "finalizeDirectRecording", "cancelDirectRecordingSession", "abortDirectRecordingSession", "failDirectRecordingSession", "finishDirectRecording", "requestDirectPartStop"].includes(node.name?.text)) {
     functions.push(node.getText(file));
   }
   ts.forEachChild(node, visit);
@@ -46,6 +46,19 @@ assert.equal(selectMime({ isTypeSupported: type => type.includes("vp9") })({ out
 assert.match(selectMime({ isTypeSupported: () => true })({ outputFormat: "mp4" }).mimeType, /^video\/mp4/);
 assert.throws(() => selectMime({ isTypeSupported: () => false })({ outputFormat: "webm" }), /WebM/);
 console.log("recording codec selection checks passed");
+const stopSource = functions.find(code => code.startsWith("function requestDirectPartStop("));
+const stopPart = new Function(`${ts.transpile(stopSource, { target: ts.ScriptTarget.ES2022 })}; return requestDirectPartStop;`)();
+for (const cancelRequested of [false, true]) {
+  let flushes = 0, stops = 0;
+  const session = { cancelRequested, recorder: {
+    state: "recording", requestData() { flushes++; }, stop() { stops++; this.state = "inactive"; },
+  } };
+  stopPart(session);
+  stopPart(session);
+  assert.equal(flushes, cancelRequested ? 0 : 1, "cancellation must not request an extra blob that will be discarded");
+  assert.equal(stops, 1, "stop the encoder exactly once");
+}
+console.log("recording cancellation flush checks passed");
 const { cleanup, getVideoStream, startDirectPart, messages, observers, detachTimers, layoutWatch } = new Function("MediaStream", `
   let directSession = null;
   let regionLayoutVideo = null, regionLayoutObserver = null, regionLayoutSyncFrame = null;
@@ -62,7 +75,14 @@ const { cleanup, getVideoStream, startDirectPart, messages, observers, detachTim
     observe() { this.connected = true; }
     disconnect() { this.connected = false; }
   }
-  const sendRuntimeMessage = async message => { messages.push(message); return { ok: true }; };
+  const sendRuntimeMessage = async message => {
+    messages.push(message);
+    if (message.type === 'FINALIZE_RECORDING' && ['finalize-response', 'finalize-rejection'].includes(message.recordingId)) {
+      if (message.recordingId === 'finalize-rejection') throw new Error('disk failed');
+      return { ok: false, error: 'disk failed' };
+    }
+    return { ok: true };
+  };
   class MediaRecorder {
     constructor() { this.state = 'inactive'; }
     start() { this.state = 'recording'; }
@@ -70,7 +90,7 @@ const { cleanup, getVideoStream, startDirectPart, messages, observers, detachTim
     stop() { this.state = 'inactive'; }
   }
   ${ts.transpile(functions.join("\n"), { target: ts.ScriptTarget.ES2022 })}
-  return { cleanup: cleanupDirectRecordingSession, getVideoStream, startDirectPart, messages, observers, detachTimers, layoutWatch };
+  return { cleanup: cleanupDirectRecordingSession, getVideoStream: video => getVideoStream(video, handleDetachedPlayer), startDirectPart, messages, observers, detachTimers, layoutWatch };
 `)(Stream);
 function track(kind = "video") { return { kind, enabled: true, readyState: "live", clone() { return track(this.kind); }, stop() { this.readyState = "ended"; } }; }
 function Stream(tracks) { return new FakeStream(tracks); }
@@ -204,7 +224,7 @@ for (const cancelWhileSaving of [false, true]) {
 }
 console.log("recording cleanup checks passed");
 
-for (const failure of ["encoder", "storage"]) {
+for (const failure of ["encoder", "storage", "finalize-response", "finalize-rejection"]) {
   let resolveFinish, rejectFinish;
   const finished = new Promise((resolve, reject) => { resolveFinish = resolve; rejectFinish = reject; });
   const session = {
@@ -218,7 +238,7 @@ for (const failure of ["encoder", "storage"]) {
   await startDirectPart(session);
   const recorder = session.recorder;
   if (failure === "encoder") recorder.onerror();
-  else session.checkpointError = new Error("disk failed");
+  else if (failure === "storage") session.checkpointError = new Error("disk failed");
   recorder.state = "inactive";
   recorder.onstop();
   await rejected;
@@ -317,7 +337,7 @@ const createStartup = new Function("playerState", "mimeType", `
   const computeDirectCropFromSelection = () => ({});
   const computeDirectLayout = () => ({ output: { width: 1920, height: 1080 }, placements: [] });
   const selectDirectMimeType = () => ({ mimeType: mimeType ?? 'video/webm', extension: mimeType?.startsWith('video/mp4') ? 'mp4' : 'webm' });
-  const getVideoStream = () => new MediaStream();
+  const getVideoStream = () => new MediaStream(), handleDetachedPlayer = () => {};
   const getCropLayoutKey = () => '', buildBaseName = () => 'recording';
   const startDirectPart = async () => {};
   const watchDirectRecordingSource = () => {}, showSelectionBorders = () => {};

@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import ts from "typescript";
-import { bytesToMegabytes, estimateRangeSize, floorTimeToStep, getExpectedSplitCount, getNextSizeSplitSeconds, isFullTimeRange, megabytesToBytes, normalizeTimeRange, parseSegmentTimeList, parseTimeInput, snapTimeRangeValue, updateTimeRangeHandle } from "../dist/shared/time_range.js";
+import { bytesToMegabytes, estimateRangeSize, floorTimeToStep, formatElapsed, getExpectedSplitCount, getNextSizeSplitSeconds, isFullTimeRange, megabytesToBytes, normalizeTimeRange, parseSegmentTimeList, parseTimeInput, snapTimeRangeValue, updateTimeRangeHandle } from "../dist/shared/time_range.js";
+
+for (const [ms, expected] of [[-1000, "00:00"], [59999, "00:59"], [60000, "01:00"], [3600000, "01:00:00"]]) {
+  assert.equal(formatElapsed(ms), expected);
+}
 
 assert.deepEqual(normalizeTimeRange(-5, 80, 50), { start: 0, end: 50 });
 assert.deepEqual(normalizeTimeRange(10, 40, 50), { start: 10, end: 40 });

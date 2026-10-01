@@ -1,3 +1,4 @@
+import { computeDirectLayout, scaleLayout } from "../dist/content/crop_layout.js";
 import { normalizeRegion } from "../dist/shared/normalize.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -8,7 +9,7 @@ const contentStyleText = fs.readFileSync(new URL("../src/content/region_selector
 const sourceFile = ts.createSourceFile("region_selector.ts", sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 const serviceWorkerText = fs.readFileSync(new URL("../src/background/service_worker.ts", import.meta.url), "utf8");
 const serviceWorkerFile = ts.createSourceFile("service_worker.ts", serviceWorkerText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-const resultText = fs.readFileSync(new URL("../src/result/result.ts", import.meta.url), "utf8");
+const resultText = ["result.ts", "downloads.ts"].map(name => fs.readFileSync(new URL(`../src/result/${name}`, import.meta.url), "utf8")).join("\n");
 const settingsText = fs.readFileSync(new URL("../src/shared/types.ts", import.meta.url), "utf8");
 const messagesText = fs.readFileSync(new URL("../src/shared/messages.ts", import.meta.url), "utf8");
 const idbText = fs.readFileSync(new URL("../src/shared/idb.ts", import.meta.url), "utf8");
@@ -64,7 +65,6 @@ assert.match(serviceWorkerText, /await checkpointStores\.get\(recordingId\)/);
 assert.match(serviceWorkerText, /async function recoverRecording\(recordingId: string, endedAt: number\): Promise<boolean>/);
 assert.match(serviceWorkerText, /state\.status === RECORDING_STATUS\.completed && state\.recordingId === recordingId/);
 assert.match(serviceWorkerText, /previousState\.status === RECORDING_STATUS\.completed && previousState\.recordingId === recording\.id/);
-assert.match(serviceWorkerText, /recordingState\.resultTabId/);
 assert.match(serviceWorkerText, /recoverResultAfterTabExit\(tabId, removeInfo\.isWindowClosing\)/);
 assert.match(serviceWorkerText, /state\.status === RECORDING_STATUS\.completed\) \{\s*await ensureCompletedRecordingResult/);
 assert.match(serviceWorkerText, /chunk\.index !== index \+ 1/);
@@ -195,13 +195,6 @@ for (const [mode, value] of [["size", "40"], ["duration", ""], ["duration", "NaN
 }
 
 const functionNames = new Set([
-  "computeDirectOutput",
-  "scaleLayout",
-  "composeHorizontal",
-  "composeVertical",
-  "getPairLayoutDirection",
-  "getGroupedLayout",
-  "computeDirectLayout",
   "computeResizedEdges",
   "getResizeFocusPoint",
   "getStreamerNameFromTitle",
@@ -272,10 +265,10 @@ applyBorder(border, selection, null);
 assert.equal(border.style.display, 'none', 'a temporarily detached player must not leave a stale border');
 applyBorder(border, selection, { left: 0, top: 0, width: 800, height: 400 });
 assert.equal(border.style.display, '', 'reattaching the player must restore the border');
-const runtime = ts.transpileModule(`const recordingTerminalOperations = new Map();\nconst RECORDING_STATUS = { idle: "idle", recording: "recording", completed: "completed", error: "error" };\nconst RECORDING_MODE = { region: "region", full: "full" };\nconst MILLISECONDS_PER_SECOND = 1_000;\nconst SECONDS_PER_MINUTE = 60;\nconst SECONDS_PER_HOUR = 3_600;\nconst MIN_GROUPED_LAYOUT_REGIONS = 3;\nconst MAX_ACTIVE_REGIONS = 4;\n${statements}\nreturn { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, getRecordingChunkSliceRanges, runRecordingTerminalOperation, normalizeRecordingState };`, {
+const runtime = ts.transpileModule(`const recordingTerminalOperations = new Map();\nconst RECORDING_STATUS = { idle: "idle", recording: "recording", completed: "completed", error: "error" };\nconst RECORDING_MODE = { region: "region", full: "full" };\nconst MILLISECONDS_PER_SECOND = 1_000;\nconst SECONDS_PER_MINUTE = 60;\nconst SECONDS_PER_HOUR = 3_600;\n${statements}\nreturn { computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, getRecordingChunkSliceRanges, runRecordingTerminalOperation, normalizeRecordingState };`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
 }).outputText;
-const { computeDirectLayout, scaleLayout, computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, getRecordingChunkSliceRanges, runRecordingTerminalOperation, normalizeRecordingState } = new Function(runtime)();
+const { computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, getRecordingChunkSliceRanges, runRecordingTerminalOperation, normalizeRecordingState } = new Function(runtime)();
 
 assert.equal(getStreamerNameFromTitle("치지직 게임 - CHZZK"), "치지직 게임");
 assert.equal(getStreamerNameFromTitle("치지직 스포츠 - CHZZK"), "치지직 스포츠");
