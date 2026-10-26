@@ -6,7 +6,7 @@ export type PopupCommand =
   | { type: "START_FULL_RECORDING" }
   | { type: "CAPTURE_FULL_SCREENSHOT" }
   | { type: "START_RECORDING" }
-  | { type: "STOP_RECORDING" }
+  | { type: "STOP_RECORDING"; recordingId?: string }
   | { type: "CANCEL_RECORDING" };
 
 export type ContentCommand =
@@ -24,7 +24,7 @@ export type ContentCommand =
       regions?: RegionSelection[];
       settings: Settings;
     }
-  | { type: "STOP_DIRECT_RECORDING" }
+  | { type: "STOP_DIRECT_RECORDING"; recordingId?: string }
   | { type: "HAS_DIRECT_RECORDING"; recordingId: string }
   | { type: "CANCEL_DIRECT_RECORDING"; recordingId?: string };
 export type DeletionScheduleRequest = { type: "SCHEDULE_RECORDING_DELETION"; recordingId: string };

@@ -67,6 +67,10 @@ export async function prepareVideo(page, width = 640, height = 360) {
       const ctx = canvas.getContext('2d');
       ctx.fillStyle = `hsl(${performance.now() / 20 % 360} 90% 50%)`;
       ctx.fillRect(0, 0, width, height);
+      for (const [index, color] of ['#ff0000', '#00ff00', '#0000ff', '#ffff00'].entries()) {
+        ctx.fillStyle = color;
+        ctx.fillRect(index % 2 * width / 2, Math.floor(index / 2) * height / 2 + 16, width / 2, height / 2 - 16);
+      }
       if (painting) requestAnimationFrame(paint);
     };
     paint();

@@ -254,8 +254,8 @@ async function startDirectRecording(tabId: number, recordingId: string, region: 
   });
 }
 
-async function stopDirectRecording(tabId: number): Promise<MessageResponse> {
-  return await sendCommandToContentScript(tabId, { type: "STOP_DIRECT_RECORDING" });
+async function stopDirectRecording(tabId: number, recordingId?: string): Promise<MessageResponse> {
+  return await sendCommandToContentScript(tabId, { type: "STOP_DIRECT_RECORDING", recordingId });
 }
 
 async function cancelDirectRecording(tabId: number, recordingId?: string): Promise<MessageResponse> {
@@ -367,8 +367,9 @@ async function startRecording(fullPlayer = false): Promise<MessageResponse<{ rec
   }
 }
 
-async function stopRecording(): Promise<MessageResponse> {
+async function stopRecording(recordingId?: string): Promise<MessageResponse> {
   const state = await loadRecordingState();
+  if (recordingId && state.recordingId !== recordingId) return ok();
   if (state.status !== RECORDING_STATUS.recording) {
     return fail("진행 중인 녹화가 없습니다.");
   }
@@ -381,7 +382,7 @@ async function stopRecording(): Promise<MessageResponse> {
     return fail(error);
   }
 
-  const response = await stopDirectRecording(state.tabId);
+  const response = await stopDirectRecording(state.tabId, state.recordingId);
   if (!response.ok && state.recordingId) {
     await delay(CHECKPOINT_FINALIZE_DELAY_MS);
     if (await recoverRecording(state.recordingId, Date.now())) {
@@ -750,7 +751,7 @@ chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingErrorMess
     }
 
     if (message.type === "STOP_RECORDING") {
-      sendResponse(await stopRecording());
+      sendResponse(await stopRecording(message.recordingId));
       return;
     }
 

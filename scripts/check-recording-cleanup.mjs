@@ -47,7 +47,7 @@ assert.match(selectMime({ isTypeSupported: () => true })({ outputFormat: "mp4" }
 assert.throws(() => selectMime({ isTypeSupported: () => false })({ outputFormat: "webm" }), /WebM/);
 console.log("recording codec selection checks passed");
 const stopSource = functions.find(code => code.startsWith("function requestDirectPartStop("));
-const stopPart = new Function(`${ts.transpile(stopSource, { target: ts.ScriptTarget.ES2022 })}; return requestDirectPartStop;`)();
+const stopPart = new Function('releaseDirectRecordingCapture', `${ts.transpile(stopSource, { target: ts.ScriptTarget.ES2022 })}; return requestDirectPartStop;`)(session => { session.releases = (session.releases ?? 0) + 1; });
 for (const cancelRequested of [false, true]) {
   let flushes = 0, stops = 0;
   const session = { cancelRequested, recorder: {
@@ -55,8 +55,9 @@ for (const cancelRequested of [false, true]) {
   } };
   stopPart(session);
   stopPart(session);
-  assert.equal(flushes, cancelRequested ? 0 : 1, "cancellation must not request an extra blob that will be discarded");
+  assert.equal(flushes, 0, "stop already emits the final blob without an extra flush");
   assert.equal(stops, 1, "stop the encoder exactly once");
+  assert.equal(session.releases, 1, "release capture without waiting for the encoder's stop event");
 }
 console.log("recording cancellation flush checks passed");
 const { cleanup, getVideoStream, startDirectPart, messages, observers, detachTimers, layoutWatch } = new Function("MediaStream", `
@@ -290,7 +291,8 @@ for (const outcome of ["success", "failure", "rejection"]) {
     const RECORDING_STATUS = { idle: 'idle', recording: 'recording' }, RECORDING_MODE = { full: 'full', region: 'region' };
     const MILLISECONDS_PER_SECOND = 1000, activeRegionIndex = 0;
     let currentRecordingState = { status: 'idle' }, recordingCommandInFlight = null, pendingRecordingTerminalCommand = null;
-    const showPlayerFeedback = () => {}, syncRecordingCommandButtons = () => {}, setRecordButtonContent = () => {};
+    const directSession = null;
+    const showPlayerFeedback = () => {}, syncRecordingCommandButtons = () => {}, setRecordButtonContent = () => {}, getRecordingTimeText = () => '00:00';
     const isRegionRecordingActive = () => currentRecordingState.status === 'recording';
     const withShortcut = label => label, getRecordIconSvg = () => '';
     ${ts.transpile(runRecordingCommandSource, { target: ts.ScriptTarget.ES2022 })}
@@ -338,6 +340,7 @@ const createStartup = new Function("playerState", "mimeType", `
   const computeDirectLayout = () => ({ output: { width: 1920, height: 1080 }, placements: [] });
   const selectDirectMimeType = () => ({ mimeType: mimeType ?? 'video/webm', extension: mimeType?.startsWith('video/mp4') ? 'mp4' : 'webm' });
   const getVideoStream = () => new MediaStream(), handleDetachedPlayer = () => {};
+  const createVideoFrameCapture = () => null, handleVideoFrameError = () => {};
   const getCropLayoutKey = () => '', buildBaseName = () => 'recording';
   const startDirectPart = async () => {};
   const watchDirectRecordingSource = () => {}, showSelectionBorders = () => {};

@@ -1,5 +1,141 @@
 import { test, expect, prepareVideo, interceptDownloads, decodeDownloads, expectResultResourcesReleased } from './fixtures.mjs';
 
+for (const format of ['webm', 'mp4']) {
+  test(`${format} stop releases capture immediately while messages and storage are delayed`, async ({ extension }) => {
+    test.setTimeout(120_000);
+    const { context, worker, page } = extension;
+    await prepareVideo(page);
+    const tabId = await worker.evaluate(async () => (await chrome.tabs.query({ url: 'https://chzzk.naver.com/extension-test' }))[0].id);
+    const content = (func, args = []) => worker.evaluate(`(async () => {
+      const [result] = await chrome.scripting.executeScript({ target: { tabId: ${tabId} }, func: (${String(func)}), args: ${JSON.stringify(args)} });
+      return result.result;
+    })()`);
+    await content(() => {
+      const OriginalRecorder = MediaRecorder;
+      const send = chrome.runtime.sendMessage.bind(chrome.runtime);
+      window.__stopTest = { held: [], holdWrites: true, routedStops: 0 };
+      window.MediaRecorder = class extends OriginalRecorder {
+        constructor(stream, options) {
+          super(stream, options);
+          window.__stopTest.recorder = this;
+          window.__stopTest.tracks = stream.getTracks();
+        }
+      };
+      chrome.runtime.sendMessage = (message, callback) => {
+        if (message.type === 'STOP_RECORDING') {
+          window.__stopTest.routedStops++;
+          return; // Simulate a background command that cannot run under load.
+        }
+        if (message.type === 'FINALIZE_RECORDING') {
+          window.__stopTest.finalize = () => send(message, callback);
+          return;
+        }
+        if (message.type === 'STORE_RECORDING_CHUNK') {
+          return send(message, response => {
+            if (window.__stopTest.holdWrites) window.__stopTest.held.push(() => callback(response));
+            else callback(response);
+          });
+        }
+        return send(message, callback);
+      };
+    });
+    await worker.evaluate(format => {
+      const region = { x: 400, y: 200, width: 400, height: 200,
+        videoRelative: { x: 0.5, y: 0.5, width: 0.5, height: 0.5 } };
+      return chrome.storage.local.set({ region, regions: [region], settings: {
+        enableShortcuts: true, enableFullRecordButton: true, outputFormat: format,
+      } });
+    }, format);
+    for (const mode of ['full', 'region', 'popup']) {
+      await page.bringToFront();
+      await content(() => { window.__stopTest.holdWrites = true; });
+      const selector = mode === 'region' ? '.crop-clip-border .record-region' : '#crop-clip-chzzk-record-button';
+      await page.keyboard.press(mode === 'region' ? 'r' : 'e');
+      await expect(page.locator(selector)).toHaveAttribute('aria-busy', 'false');
+      await expect.poll(() => content(() => window.__stopTest.held.length)).toBeGreaterThan(0);
+      let popup;
+      if (mode === 'popup') {
+        popup = await context.newPage();
+        await popup.goto(`chrome-extension://${new URL(worker.url()).host}/popup/popup.html`);
+        await popup.evaluate(() => {
+          const send = chrome.runtime.sendMessage.bind(chrome.runtime);
+          chrome.runtime.sendMessage = (message, ...args) => message.type === 'STOP_RECORDING'
+            ? new Promise(() => {}) : send(message, ...args);
+        });
+        await popup.getByRole('button', { name: '전체 정지', exact: true }).click();
+        await expect.poll(() => content(() => window.__stopTest.recorder.state)).toBe('inactive');
+      }
+      const stopped = await content((mode, selector) => {
+        if (mode === 'full') document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'e', code: 'KeyE', bubbles: true }));
+        else if (mode === 'region') document.querySelector(selector).click();
+        const { recorder, tracks, routedStops } = window.__stopTest;
+        return { state: recorder.state, live: tracks.filter(track => track.readyState === 'live').length, routedStops };
+      }, [mode, selector]);
+      expect(stopped).toEqual({ state: 'inactive', live: 0, routedStops: 0 });
+      if (!popup) await expect(page.locator(selector)).toHaveAttribute('aria-label', /저장 중/);
+      await expect(page.locator(mode === 'region' ? '.crop-clip-border .record-time' : '#crop-clip-chzzk-record-time')).toHaveText('저장 중');
+      const opened = context.waitForEvent('page');
+      await content(() => {
+        window.__stopTest.holdWrites = false;
+        window.__stopTest.held.splice(0).forEach(reply => reply());
+      });
+      await expect.poll(() => content(() => Boolean(window.__stopTest.finalize))).toBe(true);
+      // The final persistence step can also stall after every checkpoint was saved.
+      await expect(page.locator(mode === 'region' ? '.crop-clip-border .record-time' : '#crop-clip-chzzk-record-time')).toHaveText('저장 중');
+      await content(() => {
+        const finalize = window.__stopTest.finalize;
+        window.__stopTest.finalize = null;
+        finalize();
+      });
+      const result = await opened;
+      await expect(result.locator('#split-button')).toBeEnabled({ timeout: 30_000 });
+      await expect.poll(() => result.locator('#preview-video').evaluate(video => video.readyState >= 2 && video.duration > 0.5)).toBe(true);
+      expect(await result.locator('#preview-video').evaluate(video => [video.videoWidth, video.videoHeight]))
+        .toEqual(mode === 'region' ? [320, 180] : [640, 360]);
+      await result.locator('#preview-video').evaluate(async video => {
+        video.currentTime = Math.max(0, video.duration - 0.2);
+        await new Promise((resolve, reject) => { video.onseeked = resolve; video.onerror = reject; });
+      });
+      const pixels = await result.locator('#preview-video').evaluate(video => {
+        const canvas = document.createElement('canvas');
+        canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+        const context = canvas.getContext('2d');
+        context.drawImage(video, 0, 0);
+        return [[0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]]
+          .map(([x, y]) => Array.from(context.getImageData(Math.floor(x * canvas.width), Math.floor(y * canvas.height), 1, 1).data).slice(0, 3));
+      });
+      const palette = mode === 'region' ? Array(4).fill([255, 255, 0]) : [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]];
+      pixels.forEach((pixel, index) => pixel.forEach((channel, color) => expect(Math.abs(channel - palette[index][color])).toBeLessThan(50)));
+      expect(await result.evaluate(async () => {
+        const { getPartsByRecordingId } = await import('/shared/idb.js');
+        const [part] = await getPartsByRecordingId(new URL(location.href).searchParams.get('id'));
+        const audio = new AudioContext();
+        try {
+          const decoded = await audio.decodeAudioData(await part.blob.arrayBuffer());
+          return decoded.duration > 0.5 && decoded.getChannelData(0).some(value => Math.abs(value) > 0.01);
+        } finally { await audio.close(); }
+      })).toBe(true);
+      if (format === 'webm' && mode === 'full') {
+        await interceptDownloads(result);
+        await result.evaluate(() => {
+          window.testReencodes = 0;
+          const start = MediaRecorder.prototype.start;
+          MediaRecorder.prototype.start = function (...args) { window.testReencodes++; return start.apply(this, args); };
+        });
+        const mp4 = result.locator('[data-convert-format="mp4"]');
+        await mp4.click();
+        await expect.poll(() => result.evaluate(() => window.testDownloads.length), { timeout: 30_000 }).toBe(1);
+        await expect(mp4).toBeEnabled();
+        expect(await result.evaluate(() => window.testReencodes)).toBe(0);
+        expect(await decodeDownloads(result)).toEqual([true]);
+      }
+      await expect.poll(() => worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState.status)).toBe('idle');
+      await result.close();
+      await popup?.close();
+    }
+  });
+}
+
 test('MP4 recording, splitting, speed, GIF and frame exports work', async ({ extension }) => {
   test.setTimeout(90_000);
   const { context, worker, page } = extension;

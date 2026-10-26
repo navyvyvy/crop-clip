@@ -1,4 +1,5 @@
 import { getVideoStream } from "./player_capture.js";
+import { createVideoFrameCapture } from "./frame_capture.js";
 import { computeDirectLayout, scaleLayout, type DirectCrop, type DirectCropPlacement } from "./crop_layout.js";
 import { formatElapsed, MILLISECONDS_PER_SECOND } from "../shared/time_range.js";
 import { normalizeSettings, normalizeRegion, normalizeRegions } from "../shared/normalize.js";
@@ -115,6 +116,7 @@ interface DirectRecordingSession {
   rejectFinish: (error: Error) => void;
   placements: DirectCropPlacement[];
   sourceChangeCleanup?: () => void;
+  frameCapture?: NonNullable<ReturnType<typeof createVideoFrameCapture>>;
 }
 
 let currentOverlay: HTMLDivElement | null = null;
@@ -796,7 +798,9 @@ async function runRecordingCommand(type: RecordingControlCommand): Promise<void>
     syncRecordingCommandButtons();
     showPlayerFeedback(type === "STOP_RECORDING" ? "녹화를 종료하고 저장 중입니다."
       : type === "CANCEL_RECORDING" ? "녹화를 취소 중입니다." : "녹화를 시작 중입니다.");
-    const response = await sendRuntimeMessage({ type });
+    const response = type === "STOP_RECORDING" && directSession
+      ? await stopDirectRecording()
+      : await sendRuntimeMessage({ type });
     if (!response.ok) throw new Error(response.error);
     succeeded = true;
   } finally {
@@ -965,6 +969,8 @@ function releaseDirectRecordingCapture(session: DirectRecordingSession): void {
   window.clearInterval(session.drawTimerId);
   session.sourceChangeCleanup?.();
   session.sourceChangeCleanup = undefined;
+  session.frameCapture?.close();
+  session.frameCapture = undefined;
   stopRecordingStream(session.sourceStream);
   stopRecordingStream(session.outputStream);
   if (session.canvas) {
@@ -984,7 +990,6 @@ function cleanupDirectRecordingSession(session: DirectRecordingSession): void {
 }
 
 async function finalizeDirectRecording(session: DirectRecordingSession): Promise<void> {
-  cleanupDirectRecordingSession(session);
   const response = await sendRuntimeMessage({
     type: "FINALIZE_RECORDING",
     recordingId: session.recordingId,
@@ -994,6 +999,7 @@ async function finalizeDirectRecording(session: DirectRecordingSession): Promise
     // Let finishDirectRecording route this failure through checkpoint recovery too.
     throw new Error(response.error);
   }
+  cleanupDirectRecordingSession(session);
   session.resolveFinish();
 }
 
@@ -1070,11 +1076,11 @@ function requestDirectPartStop(session: DirectRecordingSession): void {
   session.closingPart = true;
   session.endedAt ??= Date.now();
   try {
-    if (!session.cancelRequested) session.recorder.requestData();
-  } catch {
-    // Some browsers throw if data is not ready yet.
+    // stop() delivers the final data; keep its handlers until onstop finishes saving.
+    session.recorder.stop();
+  } finally {
+    releaseDirectRecordingCapture(session);
   }
-  session.recorder.stop();
 }
 
 async function startDirectPart(session: DirectRecordingSession): Promise<void> {
@@ -1103,6 +1109,10 @@ async function startDirectPart(session: DirectRecordingSession): Promise<void> {
 
 // A handler created inside startDirectRecording retains its canvas/video scope until saving finishes.
 function ignoreRecordingRejection(): void {}
+
+function handleVideoFrameError(recordingId: string, error: Error): void {
+  if (directSession?.recordingId === recordingId) failDirectRecordingSession(directSession, error);
+}
 
 async function prepareDirectRecordingEncoder(settings: Settings): Promise<{ mimeType: string; extension: "webm" | "mp4" }> {
   const mime = selectDirectMimeType(settings);
@@ -1149,20 +1159,31 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
     return { ok: false, error: "녹화 화면을 준비하지 못했습니다." };
   }
 
-  const paintPlacements = (placements: DirectCropPlacement[]) => {
+  const frameCapture = crops.length === 1
+    ? createVideoFrameCapture(video, output.width, output.height, handleVideoFrameError.bind(null, command.recordingId))
+    : null;
+  const paintCanvas = (placements: DirectCropPlacement[]) => {
     context.fillStyle = "#000";
     context.fillRect(0, 0, output.width, output.height);
     for (const placement of placements) {
       context.drawImage(video, placement.crop.x, placement.crop.y, placement.crop.width, placement.crop.height, placement.dx, placement.dy, placement.dw, placement.dh);
     }
   };
+  const paintPlacements = (placements: DirectCropPlacement[]) => {
+    if (frameCapture) {
+      frameCapture.paint(placements[0], () => { paintCanvas(placements); return canvas; });
+    } else {
+      paintCanvas(placements);
+    }
+  };
 
   const frameRate = command.settings.enable60fps ? HIGH_RECORDING_FRAME_RATE : STANDARD_RECORDING_FRAME_RATE;
-  const canvasStream = canvas.captureStream(frameRate);
+  const canvasStream = frameCapture?.stream ?? canvas.captureStream(frameRate);
+  const releaseOutput = () => { frameCapture?.close(); stopRecordingStream(canvasStream); };
   try {
     paintPlacements(layout.placements);
   } catch {
-    stopRecordingStream(canvasStream);
+    releaseOutput();
     return { ok: false, error: "녹화 화면을 준비하지 못했습니다." };
   }
 
@@ -1170,11 +1191,11 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
   try {
     sourceStream = getVideoStream(video, handleDetachedPlayer);
   } catch {
-    stopRecordingStream(canvasStream);
+    releaseOutput();
     return { ok: false, error: "이 브라우저에서는 현재 영상 녹화를 지원하지 않습니다." };
   }
   if (!sourceStream) {
-    stopRecordingStream(canvasStream);
+    releaseOutput();
     return { ok: false, error: "이 브라우저에서는 현재 영상 녹화를 지원하지 않습니다." };
   }
 
@@ -1202,7 +1223,12 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
       const height = nextLayout.output.height * scale;
       session.placements = scaleLayout(nextLayout, scale, Math.round((output.width - width) / 2), Math.round((output.height - height) / 2));
     }
-    paintPlacements(session.placements);
+    try {
+      paintPlacements(session.placements);
+    } catch (error) {
+      failDirectRecordingSession(session, error instanceof Error ? error : new Error("녹화 프레임을 준비하지 못했습니다."));
+      return;
+    }
     lastPaintedFrame = frame ?? -1;
   };
 
@@ -1221,6 +1247,7 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
     sourceStream,
     outputStream,
     canvas,
+    frameCapture: frameCapture ?? undefined,
     mimeType: mime.mimeType,
     extension: mime.extension,
     baseName: buildBaseName(),
@@ -1258,8 +1285,11 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
   }
 }
 
-async function stopDirectRecording(): Promise<MessageResponse> {
+async function stopDirectRecording(recordingId?: string): Promise<MessageResponse> {
   const session = directSession;
+  if (recordingId && session && session.recordingId !== recordingId) {
+    return { ok: true };
+  }
   if (!session) {
     return { ok: false, error: "진행 중인 녹화가 없습니다." };
   }
@@ -1670,13 +1700,13 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
     }
     if (recordTime) {
       recordTime.hidden = !isRegionRecording || index !== activeRegionIndex;
-      recordTime.textContent = isRegionRecording && currentRecordingState.startedAt ? formatElapsed(Date.now() - currentRecordingState.startedAt) : "00:00";
+      recordTime.textContent = isRegionRecording ? getRecordingTimeText() : "00:00";
     }
     const needsTimer = isRegionRecording && index === activeRegionIndex;
     if (needsTimer && recordTimerId === null) {
       recordTimerId = window.setInterval(() => {
         if (recordTime && currentRecordingState.startedAt) {
-          recordTime.textContent = formatElapsed(Date.now() - currentRecordingState.startedAt);
+          recordTime.textContent = getRecordingTimeText();
         }
       }, MILLISECONDS_PER_SECOND);
     } else if (!needsTimer && recordTimerId !== null) {
@@ -2428,11 +2458,20 @@ function setRecordButtonContent(button: HTMLElement, full = false): void {
   }
 }
 
+function getRecordingTimeText(): string {
+  if (recordingCommandInFlight === "CANCEL_RECORDING") return "취소 중";
+  if (recordingCommandInFlight === "STOP_RECORDING" || directSession?.stopRequested) return "저장 중";
+  return currentRecordingState.startedAt ? formatElapsed(Date.now() - currentRecordingState.startedAt) : "00:00";
+}
+
 function syncRecordingCommandButtons(): void {
   // Update live buttons without rebuilding borders or touching disposed controls.
   document.querySelectorAll<HTMLElement>(".crop-clip-border .record-region").forEach(button => setRecordButtonContent(button));
   const fullButton = document.getElementById(CHZZK_RECORD_BUTTON_ID);
   if (fullButton) setRecordButtonContent(fullButton, true);
+  document.querySelectorAll<HTMLElement>(`.crop-clip-border .record-time, #${CHZZK_RECORD_TIME_ID}`).forEach(badge => {
+    badge.textContent = getRecordingTimeText();
+  });
 }
 
 function setChzzkCancelButtonContent(button: HTMLElement): void {
@@ -2676,7 +2715,7 @@ function syncChzzkToolButton(target: HTMLElement | null = findChzzkButtonHost())
     timeBadge.className = `${CHZZK_TOOL_BUTTON_CLASS} crop-clip-record-time`;
     timeBadge.setAttribute("aria-hidden", "true");
     timeBadge.hidden = false;
-    timeBadge.textContent = currentRecordingState.startedAt ? formatElapsed(Date.now() - currentRecordingState.startedAt) : "";
+    timeBadge.textContent = getRecordingTimeText();
   } else {
     existingTime?.remove();
   }
@@ -2786,7 +2825,7 @@ function syncChzzkRecordTimer(): void {
   chzzkRecordTimerId = window.setInterval(() => {
     const timeBadge = document.getElementById(CHZZK_RECORD_TIME_ID);
     if (timeBadge && currentRecordingState.startedAt) {
-      timeBadge.textContent = formatElapsed(Date.now() - currentRecordingState.startedAt);
+      timeBadge.textContent = getRecordingTimeText();
     }
   }, MILLISECONDS_PER_SECOND);
 }
@@ -3119,7 +3158,7 @@ if (isExtensionContextAvailable()) {
     }
 
     if (message.type === "STOP_DIRECT_RECORDING") {
-      void stopDirectRecording()
+      void stopDirectRecording(message.recordingId)
         .then((response) => sendResponse(response))
         .catch((error: Error) => sendResponse({ ok: false, error: error.message }));
       return true;

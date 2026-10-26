@@ -77,6 +77,14 @@ test('stop must report success when checkpoint recovery saved the result', async
   assert.equal(response.ok, true, 'opening the saved result resets state to idle, which is still a successful recovery');
 });
 
+test('a delayed stop must not finalize a newer recording', async () => {
+  const f = fixture();
+  assert.equal((await f.api.stopRecording('older-clip')).ok, true);
+  assert.equal(f.state.status, 'recording');
+  assert.equal(f.parts.length, 0);
+  assert.equal(f.results.length, 0);
+});
+
 test('recovery uses only the contiguous prefix ending at a complete blob', async () => {
   for (const kind of ['unfinished-tail', 'missing-middle', 'changed-codec', 'unfinished-first']) {
     const f = fixture();

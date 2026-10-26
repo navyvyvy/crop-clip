@@ -250,7 +250,17 @@ async function stepMultiRegionCount(direction: -1 | 1): Promise<void> {
 }
 
 async function sendCommand<T = undefined>(message: PopupCommand): Promise<MessageResponse<T>> {
-  return (await chrome.runtime.sendMessage(message)) as MessageResponse<T>;
+  const { tabId, recordingId } = appState.recordingState;
+  if (message.type === "STOP_RECORDING" && typeof tabId === "number" && recordingId) {
+    try {
+      const response: MessageResponse<T> | undefined = await chrome.tabs.sendMessage(tabId, { type: "STOP_DIRECT_RECORDING", recordingId });
+      if (response?.ok) return response;
+    } catch {
+      // A closed/reloaded tab still needs the background checkpoint recovery path.
+    }
+  }
+  return (await chrome.runtime.sendMessage(message.type === "STOP_RECORDING" && recordingId
+    ? { ...message, recordingId } : message)) as MessageResponse<T>;
 }
 
 async function refreshAppState(): Promise<void> {

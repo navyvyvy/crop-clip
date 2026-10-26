@@ -8,7 +8,7 @@ import path from 'node:path';
 test.skip(!process.env.CROPCLIP_PROFILE_REPORT, 'Set CROPCLIP_PROFILE_REPORT to save comparison measurements');
 test('recording resource and performance profile', async ({ extension }, testInfo) => {
   const cancelMode = process.env.CROPCLIP_PROFILE_CANCEL === '1';
-  const cycles = cancelMode ? Number(process.env.CROPCLIP_PROFILE_CYCLES || 32) : 8;
+  const cycles = Number(process.env.CROPCLIP_PROFILE_CYCLES || (cancelMode ? 32 : 8));
   expect(Number.isInteger(cycles) && cycles > 0 && cycles % 4 === 0).toBe(true);
   test.setTimeout(Math.max(240_000, cycles * 6000));
   const { context, worker, page } = extension;
@@ -37,9 +37,19 @@ test('recording resource and performance profile', async ({ extension }, testInf
     return result.result;
   })()`);
   await content(() => {
-    const audit = { tracks: [], recorders: [], canvases: [], captures: 0, starts: 0, flushes: 0 };
+    const audit = { tracks: [], recorders: [], canvases: [], frames: [], captures: 0, starts: 0, flushes: 0 };
     globalThis.__recordingAudit = audit;
     const track = (value, kind) => { audit.tracks.push({ ref: new WeakRef(value), kind }); return value; };
+    if (typeof MediaStreamTrackGenerator === 'function') {
+      const Generator = MediaStreamTrackGenerator;
+      window.MediaStreamTrackGenerator = class extends Generator {
+        constructor(options) { super(options); track(this, 'generator'); }
+      };
+    }
+    const Frame = VideoFrame;
+    window.VideoFrame = class extends Frame {
+      constructor(...args) { super(...args); audit.frames.push(new WeakRef(this)); }
+    };
     for (const [prototype, kind] of [[HTMLVideoElement.prototype, 'source'], [HTMLCanvasElement.prototype, 'canvas']]) {
       const capture = prototype.captureStream;
       prototype.captureStream = function (...args) {
@@ -82,6 +92,8 @@ test('recording resource and performance profile', async ({ extension }, testInf
       flushes: __recordingAudit.flushes,
       retainedRecorders: __recordingAudit.recorders.filter(ref => ref.deref()).length,
       retainedCanvases: __recordingAudit.canvases.filter(ref => ref.deref()).length,
+      retainedGenerators: __recordingAudit.tracks.filter(({ ref, kind }) => kind === 'generator' && ref.deref()).length,
+      openFrames: __recordingAudit.frames.filter(ref => (ref.deref()?.codedWidth ?? 0) > 0).length,
       live: __recordingAudit.tracks.flatMap(({ ref, kind }) => {
       const value = ref.deref();
       return value?.readyState === 'live' ? [{ kind, type: value.kind, enabled: value.enabled }] : [];
@@ -120,6 +132,8 @@ test('recording resource and performance profile', async ({ extension }, testInf
       expect(resources.tracks.live.filter(track => track.kind !== 'source' || track.type !== 'audio' || track.enabled)).toEqual([]);
       expect(resources.tracks.retainedRecorders, 'cancelled encoders must be collectible').toBe(0);
       expect(resources.tracks.retainedCanvases, 'cancelled canvases must be collectible').toBe(0);
+      expect(resources.tracks.openFrames, 'cancel must close every native frame').toBe(0);
+      expect(resources.tracks.retainedGenerators, 'cancelled generator tracks must be collectible').toBe(0);
       expect(resources.dedicatedWorkers).toBe(0);
       samples.push({ cancellations: index + 1, ...resources });
       continue;
@@ -139,6 +153,10 @@ test('recording resource and performance profile', async ({ extension }, testInf
     const resources = await snapshot();
     expect(resources.tracks.captures, 'reuse the original capture across sessions').toBe(1);
     expect(resources.tracks.live.filter(track => track.kind !== 'source' || track.type !== 'audio' || track.enabled)).toEqual([]);
+    expect(resources.tracks.retainedRecorders, 'stopped encoders must be collectible').toBe(0);
+    expect(resources.tracks.retainedCanvases, 'stopped canvases must be collectible').toBe(0);
+    expect(resources.tracks.openFrames, 'stop must close every native frame').toBe(0);
+    expect(resources.tracks.retainedGenerators, 'stopped generator tracks must be collectible').toBe(0);
     expect(resources.dedicatedWorkers, 'result close must release conversion workers').toBe(0);
     samples.push({ mode: key === 'e' ? 'full' : 'region', startMs, stopMs,
       rendererTaskSeconds: after.TaskDuration - before.TaskDuration,

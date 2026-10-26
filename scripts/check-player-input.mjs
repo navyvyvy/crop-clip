@@ -11,6 +11,79 @@ function visit(node) {
 }
 visit(source);
 const compile = (...names) => ts.transpile(names.map(name => functions.get(name)).join("\n"), { target: ts.ScriptTarget.ES2022 });
+const timeText = new Function('recordingCommandInFlight', 'directSession', `
+  const currentRecordingState = { startedAt: 1 }, formatElapsed = () => '00:42';
+  ${compile('getRecordingTimeText')}
+  return getRecordingTimeText();
+`);
+assert.equal(timeText(null, null), '00:42');
+assert.equal(timeText('STOP_RECORDING', null), '저장 중');
+assert.equal(timeText(null, { stopRequested: true }), '저장 중');
+assert.equal(timeText('CANCEL_RECORDING', null), '취소 중');
+let finalizeReply;
+const finalizing = new Function('sendRuntimeMessage', `
+  const session = { recordingId: 'saving', endedAt: 1, resolveFinish() {} };
+  let directSession = session;
+  const cleanupDirectRecordingSession = () => { directSession = null; };
+  ${compile('finalizeDirectRecording')}
+  return { finish: () => finalizeDirectRecording(session), ownsRecording: () => directSession === session };
+`)(() => new Promise(resolve => { finalizeReply = resolve; }));
+const finalization = finalizing.finish();
+assert.equal(finalizing.ownsRecording(), true, 'keep the saving owner until final persistence acknowledges completion');
+finalizeReply({ ok: true });
+await finalization;
+assert.equal(finalizing.ownsRecording(), false);
+const popup = ts.createSourceFile('popup.ts', fs.readFileSync(new URL('../src/popup/popup.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
+const sendCommandSource = popup.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'sendCommand').getText(popup);
+for (const outcome of ['success', 'closed-tab', 'failed-stop', 'no-owner']) {
+  const sent = [];
+  const send = new Function('chrome', 'appState', `${ts.transpile(sendCommandSource)}; return sendCommand;`)({
+    tabs: { sendMessage: async (tabId, message) => {
+      sent.push({ tabId, ...message });
+      if (outcome === 'closed-tab') throw Error('tab closed');
+      return { ok: outcome !== 'failed-stop' };
+    } },
+    runtime: { sendMessage: async message => { sent.push(message); return { ok: true }; } },
+  }, { recordingState: outcome === 'no-owner' ? {} : { tabId: 7, recordingId: 'current' } });
+  assert.deepEqual(await send({ type: 'STOP_RECORDING' }), { ok: true });
+  assert.deepEqual(sent, [
+    ...(outcome === 'no-owner' ? [] : [{ tabId: 7, type: 'STOP_DIRECT_RECORDING', recordingId: 'current' }]),
+    ...(outcome === 'success' ? [] : [{ type: 'STOP_RECORDING', ...(outcome === 'no-owner' ? {} : { recordingId: 'current' }) }]),
+  ], 'popup stop reaches its recording tab directly and retains recovery on failure');
+}
+// Hold extension messaging and final storage separately from the input event.
+for (const mode of ['region', 'full']) {
+  let finish, settled = false, messages = 0;
+  const session = {
+    recorder: { state: 'recording', requestData() {}, stop() { this.state = 'inactive'; } },
+    finishPromise: new Promise(resolve => { finish = resolve; }),
+    sourceStream: { getTracks: () => [] }, outputStream: { getTracks: () => [] },
+  };
+  const toggle = new Function('directSession', 'sendRuntimeMessage', `
+    const RECORDING_STATUS = { recording: 'recording' }, RECORDING_MODE = { full: 'full' };
+    const currentRecordingState = { status: 'recording', mode: '${mode}' };
+    let recordingCommandInFlight = null, pendingRecordingTerminalCommand = null;
+    const window = { clearInterval() {} };
+    const syncRecordingCommandButtons = () => {}, showPlayerFeedback = () => {};
+    ${compile('toggleRecording', 'runRecordingCommand', 'stopDirectRecording', 'requestDirectPartStop', 'releaseDirectRecordingCapture', 'stopRecordingStream')}
+    return () => toggleRecording(${mode === 'full'});
+  `)(session, () => { messages++; return new Promise(() => {}); });
+  const stopping = toggle().then(() => { settled = true; });
+  assert.equal(session.recorder.state, 'inactive', 'stop input must stop the local encoder without waiting for extension messaging');
+  assert.equal(session.cleanedUp, true, 'capture must be released before a delayed encoder stop event or storage acknowledgement');
+  await toggle();
+  assert.equal(settled, false, 'keep saving state until the final data is persisted');
+  assert.equal(messages, 0, 'local stop must not depend on a busy background worker');
+  finish();
+  await stopping;
+}
+const staleStop = new Function(`
+  const directSession = { recordingId: 'newer' };
+  const requestDirectPartStop = () => { throw Error('stopped the wrong recording'); };
+  ${compile('stopDirectRecording')}
+  return stopDirectRecording;
+`)();
+assert.deepEqual(await staleStop('older'), { ok: true }, 'a delayed popup must not stop a replacement recording');
 const reads = [];
 const stateReader = new Function('chrome', 'normalizeSettings', `
   let storedStateRevision = 0;
@@ -89,6 +162,7 @@ for (const mode of ['region', 'full']) for (const outcome of ['stop', 'cancel', 
   const api = new Function('sendRuntimeMessage', 'presentations', `
     const RECORDING_STATUS = { idle: 'idle', recording: 'recording' }, RECORDING_MODE = { region: 'region', full: 'full' };
     let currentRecordingState = { status: 'idle' }, recordingCommandInFlight = null, pendingRecordingTerminalCommand = null;
+    const directSession = null;
     const window = { alert: message => { throw Error(message); } }, showPlayerFeedback = () => {};
     const syncRecordingCommandButtons = () => presentations.push(recordingCommandInFlight);
     ${compile('runRecordingCommand', 'toggleRecording', 'cancelRecording')}
