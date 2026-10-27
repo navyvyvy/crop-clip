@@ -1160,7 +1160,7 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
   }
 
   const frameCapture = crops.length === 1
-    ? createVideoFrameCapture(video, output.width, output.height, handleVideoFrameError.bind(null, command.recordingId))
+    ? createVideoFrameCapture(video, output.width, output.height, handleVideoFrameError.bind(null, command.recordingId), mime.extension !== "mp4")
     : null;
   const paintCanvas = (placements: DirectCropPlacement[]) => {
     context.fillStyle = "#000";

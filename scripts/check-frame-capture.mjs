@@ -63,4 +63,12 @@ assert.equal(errors.length, 1, 'intentional shutdown must not report an encoder 
 const writes = writer.writes.length;
 capture.paint(placement, fallback);
 assert.equal(writer.writes.length, writes, 'closed capture must not resume');
+const mp4Capture = createVideoFrameCapture(source, 640, 360, error => errors.push(error), false);
+mp4Capture.paint({ ...placement, crop: { x: 0, y: 0, width: 640, height: 360 } }, fallback);
+assert.equal(frames.at(-1).source, source, 'uncropped MP4 recording retains direct frame delivery');
+writers.at(-1).resolve(); await tick();
+mp4Capture.paint(placement, fallback);
+assert.equal(frames.at(-1).source, canvas, 'MP4 crops must normalize pixels through canvas before encoding');
+writers.at(-1).resolve(); await tick();
+mp4Capture.close(); await tick();
 console.log('native frame capture crop, backpressure and cleanup checks passed');

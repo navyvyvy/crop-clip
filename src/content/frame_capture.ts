@@ -4,7 +4,7 @@ import type { DirectCropPlacement } from "./crop_layout.js";
 type FrameTrack = MediaStreamTrack & { writable: WritableStream<VideoFrame> };
 type FrameTrackConstructor = new (options: { kind: "video" }) => FrameTrack;
 
-export function createVideoFrameCapture(video: HTMLVideoElement, width: number, height: number, onError: (error: Error) => void) {
+export function createVideoFrameCapture(video: HTMLVideoElement, width: number, height: number, onError: (error: Error) => void, allowDirectCrop = true) {
   const Generator = (globalThis as typeof globalThis & { MediaStreamTrackGenerator?: FrameTrackConstructor }).MediaStreamTrackGenerator;
   if (!Generator || typeof VideoFrame === "undefined") return null;
   let track: FrameTrack | undefined;
@@ -32,10 +32,12 @@ export function createVideoFrameCapture(video: HTMLVideoElement, width: number, 
         const original = new VideoFrame(source, { timestamp });
         try {
           const rect = original.visibleRect;
-          frame = rect?.x === placement.crop.x && rect.y === placement.crop.y
+          const unchanged = rect?.x === placement.crop.x && rect.y === placement.crop.y
             && rect.width === placement.crop.width && rect.height === placement.crop.height
-            && original.displayWidth === width && original.displayHeight === height
-            ? original
+            && original.displayWidth === width && original.displayHeight === height;
+          // Cropped native frames crash Chromium's Linux MP4 encoder; normalize their pixels through canvas.
+          if (!allowDirectCrop && !unchanged) throw new Error("canvas crop");
+          frame = unchanged ? original
             : new VideoFrame(original, { visibleRect: placement.crop, displayWidth: width, displayHeight: height });
         } finally {
           if (frame !== original) original.close();
