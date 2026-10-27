@@ -806,9 +806,14 @@ async function createDurationSplitWithFfmpeg(
   segmentSeconds: number,
   outputFormat: OutputFormat,
   range?: TimeRange,
+  input?: { ffmpeg: FfmpegLike; inputName: string; duration: number },
 ): Promise<SplitSegment[]> {
-  const { video, url, revoke, duration } = await loadVideoForPart(part, getRecordingDurationFallback());
-  releaseVideoSource(video, url, revoke);
+  let duration = input?.duration;
+  if (duration === undefined) {
+    const loaded = await loadVideoForPart(part, getRecordingDurationFallback());
+    duration = loaded.duration;
+    releaseVideoSource(loaded.video, loaded.url, loaded.revoke);
+  }
   const selectedRange = range ? normalizeTimeRange(range.start, range.end, duration) : { start: 0, end: duration };
   const selectedDuration = selectedRange.end - selectedRange.start;
   if (segmentSeconds >= selectedDuration) {
@@ -816,7 +821,7 @@ async function createDurationSplitWithFfmpeg(
   }
   const expectedCount = getExpectedSplitCount(selectedDuration, segmentSeconds);
 
-  return withFfmpegInput(part, async (ffmpeg, inputName) => {
+  const split = async (ffmpeg: FfmpegLike, inputName: string): Promise<SplitSegment[]> => {
     const pattern = `output%03d.${outputFormat}`;
     const segmentListName = "output.csv";
     const mp4Ranges = outputFormat === RECORDING_FORMAT.mp4
@@ -862,6 +867,7 @@ async function createDurationSplitWithFfmpeg(
     if (!actualTimes) {
       const segmentListData = await ffmpeg.readFile(segmentListName);
       actualTimes = parseSegmentTimeList(typeof segmentListData === "string" ? segmentListData : new TextDecoder().decode(segmentListData));
+      await deleteFfmpegFile(ffmpeg, segmentListName, true);
     }
     const segments: SplitSegment[] = [];
     const progressStart = mp4Ranges ? FFMPEG_TRANSCODE_START_PERCENT : FFMPEG_EXEC_PROGRESS_MAX;
@@ -892,7 +898,8 @@ async function createDurationSplitWithFfmpeg(
       setProgressPercent(progressStart + (index + 1) * progressStep);
     }
     return segments;
-  });
+  };
+  return input ? split(input.ffmpeg, input.inputName) : withFfmpegInput(part, split);
 }
 
 async function createSizeSplit(part: LoadedPart, maxMegabytes: number, outputFormat: OutputFormat, range?: TimeRange): Promise<SplitSegment[]> {
@@ -908,25 +915,28 @@ async function createSizeSplit(part: LoadedPart, maxMegabytes: number, outputFor
 
   const averageBytesPerSecond = Math.max(1, part.size / duration);
   let segmentSeconds = Math.max(TIME_STEP_SECONDS, floorTimeToStep(maxBytes / averageBytesPerSecond));
-  for (let attempt = 0; attempt < MAX_SIZE_SPLIT_ATTEMPTS; attempt += 1) {
-    setWorkStatus(attempt === 0
-      ? `파일당 최대 ${maxMegabytes}MB로 나누는 중입니다.`
-      : `파일 용량을 확인해 다시 나누는 중입니다. (${attempt + 1}/${MAX_SIZE_SPLIT_ATTEMPTS})`);
-    const segments = await createDurationSplitWithFfmpeg(part, segmentSeconds, outputFormat, selectedRange);
-    const largestBytes = Math.max(...segments.map((segment) => segment.blob.size));
-    if (largestBytes <= maxBytes) {
-      return segments;
+  return withFfmpegInput(part, async (ffmpeg, inputName) => {
+    const input = { ffmpeg, inputName, duration };
+    for (let attempt = 0; attempt < MAX_SIZE_SPLIT_ATTEMPTS; attempt += 1) {
+      setWorkStatus(attempt === 0
+        ? `파일당 최대 ${maxMegabytes}MB로 나누는 중입니다.`
+        : `파일 용량을 확인해 다시 나누는 중입니다. (${attempt + 1}/${MAX_SIZE_SPLIT_ATTEMPTS})`);
+      const segments = await createDurationSplitWithFfmpeg(part, segmentSeconds, outputFormat, selectedRange, input);
+      const largestBytes = Math.max(...segments.map((segment) => segment.blob.size));
+      if (largestBytes <= maxBytes) {
+        return segments;
+      }
+
+      const nextSeconds = getNextSizeSplitSeconds(segmentSeconds, maxBytes, largestBytes);
+      segments.length = 0;
+      if (nextSeconds >= segmentSeconds) {
+        break;
+      }
+      segmentSeconds = nextSeconds;
     }
 
-    const nextSeconds = getNextSizeSplitSeconds(segmentSeconds, maxBytes, largestBytes);
-    segments.length = 0;
-    if (nextSeconds >= segmentSeconds) {
-      break;
-    }
-    segmentSeconds = nextSeconds;
-  }
-
-  throw new Error("각 파일을 설정한 최대 용량 이하로 만들지 못했습니다. 최대 용량을 높여 주세요.");
+    throw new Error("각 파일을 설정한 최대 용량 이하로 만들지 못했습니다. 최대 용량을 높여 주세요.");
+  });
 }
 
 async function convertPartWithRecorder(part: LoadedPart, outputFormat: OutputFormat, range?: TimeRange): Promise<{ source: Blob | string; filename: string }> {

@@ -26,8 +26,8 @@ export async function loadAppState(): Promise<AppState> {
 }
 
 export async function loadRecordingState(): Promise<RecordingState> {
-  const state = await loadAppState();
-  return state.recordingState;
+  const stored = await chrome.storage.local.get({ [STORAGE_KEYS.recordingState]: DEFAULT_RECORDING_STATE });
+  return normalizeRecordingState(stored[STORAGE_KEYS.recordingState] as Partial<RecordingState> | undefined);
 }
 
 export async function saveSettings(settings: Settings): Promise<void> {

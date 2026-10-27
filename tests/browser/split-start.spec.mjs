@@ -1,4 +1,4 @@
-import { test, expect, interceptDownloads, expectResultResourcesReleased } from './fixtures.mjs';
+import { test, expect, interceptDownloads, decodeDownloads, expectResultResourcesReleased } from './fixtures.mjs';
 
 function firstSyncSample(bytes) {
   const data = Buffer.from(bytes);
@@ -25,22 +25,19 @@ function firstSyncSample(bytes) {
   throw Error('Missing video track');
 }
 
-test('WebM to MP4 splits start with independently decodable video', async ({ extension }) => {
-  test.setTimeout(150_000);
-  const { context, worker } = extension;
-  const result = await context.newPage();
-  const base = `chrome-extension://${new URL(worker.url()).host}/result/result.html`;
+async function prepareSplitSource(result, base, sizeMode = false) {
   await result.goto(base);
-  const id = await result.evaluate(async () => {
+  const source = await result.evaluate(async sizeMode => {
     const { loadFfmpeg, readFfmpegBlob, releaseFfmpeg } = await import('/result/ffmpeg.js');
     const { putRecording, putPart } = await import('/shared/idb.js');
     const ffmpeg = await loadFfmpeg(() => {});
     try {
-      // Four-second GOPs put the requested split points between keyframes.
+      // Sparse keyframes keep the tests sensitive to decoding dependencies.
       const code = await ffmpeg.exec([
         '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=30:duration=9',
         '-f', 'lavfi', '-i', 'sine=frequency=440:duration=9',
-        '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '120', '-keyint_min', '120', '-sc_threshold', '0',
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-g', sizeMode ? '60' : '120', '-keyint_min', sizeMode ? '60' : '120', '-sc_threshold', '0',
+        ...(sizeMode ? ['-b:v', '2M', '-minrate', '2M', '-maxrate', '2M', '-bufsize', '2M', '-x264-params', 'nal-hrd=cbr'] : []),
         '-c:a', 'libopus', '-f', 'matroska', 'source.webm',
       ]);
       if (code !== 0) throw Error('Could not generate long-GOP source');
@@ -49,13 +46,23 @@ test('WebM to MP4 splits start with independently decodable video', async ({ ext
       await putRecording({ id, createdAt, endedAt: createdAt + 9000, totalSize: blob.size, actualExtension: 'webm' });
       await putPart({ id: crypto.randomUUID(), recordingId: id, index: 0, filename: 'motion.webm',
         mimeType: 'video/webm', extension: 'webm', size: blob.size, blob, createdAt, seekMetadataVersion: 1 });
-      return id;
+      const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer()))).join(',');
+      return { id, bytes: blob.size, hash };
     } finally { await releaseFfmpeg(); }
-  });
-  await result.goto(`${base}?id=${id}`);
+  }, sizeMode);
+  await result.goto(`${base}?id=${source.id}`);
   await expect(result.locator('#split-button')).toBeEnabled({ timeout: 30000 });
   await expect.poll(() => result.locator('#preview-video').evaluate(video => video.readyState >= 2 && video.duration > 8)).toBe(true);
   await expect(result.locator('#trim-thumbnails')).not.toHaveAttribute('data-loading');
+  return source;
+}
+
+test('WebM to MP4 splits start with independently decodable video', async ({ extension }) => {
+  test.setTimeout(150_000);
+  const { context, worker } = extension;
+  const result = await context.newPage();
+  const base = `chrome-extension://${new URL(worker.url()).host}/result/result.html`;
+  await prepareSplitSource(result, base);
   const retained = await result.evaluate(() => window.testObjectUrls.size);
   await interceptDownloads(result);
   await result.evaluate(() => {
@@ -96,6 +103,7 @@ test('WebM to MP4 splits start with independently decodable video', async ({ ext
         const start = await result.evaluate(async bytes => {
           const video = document.createElement('video');
           video.muted = true;
+          video.preload = 'auto';
           video.style.cssText = 'position:fixed;left:0;top:0;width:160px;height:90px;z-index:2147483647';
           document.body.append(video);
           const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: 'video/mp4' }));
@@ -104,15 +112,17 @@ test('WebM to MP4 splits start with independently decodable video', async ({ ext
             const times = [];
             await new Promise((resolve, reject) => {
               timeout = setTimeout(() => reject(Error('Split video did not advance')), 8000);
+              let playing = false;
               const tick = (_now, metadata) => {
                 times.push(metadata.mediaTime);
+                // Sample the paused first frame before the playback clock can skip ahead.
+                if (!playing) { playing = true; video.play().catch(reject); }
                 if (metadata.mediaTime >= 0.6) resolve();
                 else video.requestVideoFrameCallback(tick);
               };
               video.requestVideoFrameCallback(tick);
               video.onerror = () => reject(Error('Split video failed to decode'));
               video.src = url;
-              video.play().catch(reject);
             });
             return { firstTime: times[0], earlyFrames: times.filter(time => time < 0.5).length, duration: video.duration };
           } finally {
@@ -128,4 +138,70 @@ test('WebM to MP4 splits start with independently decodable video', async ({ ext
       await expectResultResourcesReleased(result, retained);
     }
   }
+});
+
+test('size split retries reuse one prepared source and recover from failure', async ({ extension }) => {
+  test.setTimeout(150000);
+  const { context, worker } = extension;
+  const result = await context.newPage();
+  const base = `chrome-extension://${new URL(worker.url()).host}/result/result.html`;
+  const source = await prepareSplitSource(result, base, true);
+  expect(source.bytes).toBeGreaterThan(2000000);
+  const retained = await result.evaluate(() => window.testObjectUrls.size);
+  const dialogs = [];
+  result.on('dialog', async dialog => { dialogs.push(dialog.message()); await dialog.dismiss(); });
+  await interceptDownloads(result);
+  await result.evaluate(() => {
+    const audit = window.testSizeAudit = { inputs: 0, inputBytes: 0, executions: 0, videos: 0, failNext: false };
+    const create = document.createElement.bind(document);
+    document.createElement = (...args) => { if (args[0] === 'video') audit.videos++; return create(...args); };
+    const post = Worker.prototype.postMessage;
+    Worker.prototype.postMessage = function (message, ...args) {
+      if (message?.type === 'WRITE_FILE' && message.data.path === 'input.webm') {
+        audit.inputs++; audit.inputBytes += message.data.data.byteLength;
+      }
+      if (message?.type === 'EXEC') {
+        audit.executions++;
+        if (audit.failNext) {
+          audit.failNext = false;
+          message = { ...message, data: { ...message.data, args: ['-i', 'input.webm', '-c:v', 'cropclip-invalid-codec', 'output-invalid.mp4'] } };
+        }
+      }
+      return post.call(this, message, ...args);
+    };
+  });
+  await result.locator('#split-format-select').selectOption('mp4');
+  await result.locator('#split-mode-select').selectOption('size');
+  await result.locator('#split-value-input').fill('1');
+  await result.locator('#split-button').click();
+  await expect(result.locator('#split-result-summary')).toHaveText(/나눈 파일 \([2-9]\d*개\)/, { timeout: 60000 });
+  await expect(result.locator('#split-button')).toBeEnabled();
+  const audit = await result.evaluate(() => window.testSizeAudit);
+  for (const button of await result.locator('#split-files-list button').all()) await button.click();
+  const sizes = await result.evaluate(async () => (await Promise.all(window.testDownloads)).map(blob => blob.size));
+  expect(audit.executions).toBeGreaterThan(sizes.length); // The workload must actually exercise the size retry.
+  expect(audit.inputs, 'all size attempts must share the prepared input').toBe(1);
+  expect(audit.inputBytes).toBe(source.bytes);
+  expect(audit.videos, 'source metadata must be loaded only once').toBe(1);
+  expect(sizes.every(bytes => bytes > 0 && bytes <= 1000000)).toBe(true);
+  expect(await decodeDownloads(result)).toEqual(Array(sizes.length).fill(true));
+  await expectResultResourcesReleased(result, retained);
+
+  await result.evaluate(() => { window.testSizeAudit.failNext = true; });
+  await result.locator('#split-button').click();
+  await expect.poll(() => dialogs.length).toBe(1);
+  await expect(result.locator('#split-button')).toBeEnabled();
+  await expectResultResourcesReleased(result, retained);
+  await result.locator('#split-button').click();
+  await expect(result.locator('#split-result-summary')).toHaveText(/나눈 파일 \([2-9]\d*개\)/, { timeout: 60000 });
+  await expect(result.locator('#split-button')).toBeEnabled();
+  expect(await result.evaluate(() => window.testSizeAudit.inputs)).toBe(3);
+  await expectResultResourcesReleased(result, retained);
+  const hash = await result.evaluate(async id => {
+    const { getPartsByRecordingId } = await import('/shared/idb.js');
+    const [part] = await getPartsByRecordingId(id);
+    return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await part.blob.arrayBuffer()))).join(',');
+  }, source.id);
+  expect(hash).toBe(source.hash);
+  expect(dialogs).toHaveLength(1);
 });

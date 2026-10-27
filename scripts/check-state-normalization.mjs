@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { normalizeSettings, normalizeRegion } from '../dist/shared/normalize.js';
 import { DEFAULT_SETTINGS } from '../dist/shared/types.js';
+import { loadAppState, loadRecordingState } from '../dist/shared/storage.js';
 
 for (const value of [undefined, null, 7, 'broken', []]) {
   assert.deepEqual(normalizeSettings(value), DEFAULT_SETTINGS, 'missing or invalid settings must restore defaults');
@@ -27,3 +28,16 @@ assert.deepEqual(normalizeRegion(region), region);
 assert.equal(normalizeRegion({ ...region, x: { toString: 'invalid' } }), null);
 assert.deepEqual(normalizeRegion({ ...region, videoRelative: { x: [], y: 0, width: 1, height: 1 } }), region);
 console.log('state normalization checks passed');
+
+for (const recordingState of [undefined, null, {}, { status: 'recording', recordingId: 'active', tabId: 3, startedAt: NaN }, { status: 'broken', mode: 'invalid' }]) {
+  const reads = [];
+  globalThis.chrome = { storage: { local: { async get(defaults) {
+    reads.push(Object.keys(defaults));
+    return Object.fromEntries(Object.entries(defaults).map(([key, value]) => [key,
+      key === 'recordingState' && recordingState !== undefined ? recordingState : value]));
+  } } } };
+  const expected = (await loadAppState()).recordingState;
+  assert.deepEqual(await loadRecordingState(), expected, 'targeted reads must retain normalization and defaults');
+  assert.deepEqual(reads.at(-1), ['recordingState'], 'recording updates must not read settings and regions');
+}
+console.log('targeted recording state reads passed');
