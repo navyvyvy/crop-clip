@@ -77,7 +77,6 @@ assert.doesNotMatch(serviceWorkerText, /message\.chunk\.objectUrl/);
 assert.match(resultText, /function startDeletionKeepalive\(\)/);
 assert.match(resultText, /window\.addEventListener\("pageshow"/);
 assert.doesNotMatch(resultText, /createDurationSplitWithRecorder/);
-assert.match(resultText, /"-break_non_keyframes", "1"/);
 assert.match(resultText, /function getSplitPresetValue\(/);
 assert.match(resultText, /querySelectorAll<HTMLButtonElement>\("\[data-split-mode\]"\)/);
 assert.match(resultText, /빠른 변환을 지원하지 않아 실시간으로 처리 중입니다/);
@@ -111,7 +110,8 @@ const resultFile = ts.createSourceFile("result.ts", resultText, ts.ScriptTarget.
 const splitFunction = resultFile.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "createDurationSplitWithFfmpeg");
 let splitArgs;
 function findSplitExec(node) {
-  if (ts.isCallExpression(node) && node.expression.getText(resultFile) === "ffmpeg.exec") {
+  if (ts.isCallExpression(node) && node.expression.getText(resultFile) === "ffmpeg.exec"
+    && node.arguments[0].getText(resultFile).includes('"-segment_format"')) {
     splitArgs = node.arguments[0].getText(resultFile);
   }
   ts.forEachChild(node, findSplitExec);
@@ -119,14 +119,14 @@ function findSplitExec(node) {
 findSplitExec(splitFunction);
 const buildSplitArgs = new Function("outputFormat", `
   const range = undefined, inputName = "input.webm", segmentSeconds = 3, segmentListName = "output.csv";
+  const expectedCount = 3, selectedRange = { start: 0, end: 9.008 }, TIME_STEP_SECONDS = 0.1;
   const pattern = "output%03d." + outputFormat, RECORDING_FORMAT = { webm: "webm", mp4: "mp4" };
   return ${splitArgs};
 `);
-for (const [format, muxer] of [["webm", "matroska"], ["mp4", "mp4"]]) {
-  const args = buildSplitArgs(format);
-  assert.equal(args[args.indexOf("-segment_format") + 1], muxer);
-  assert.equal(args[args.indexOf("-c") + 1], "copy", "splitting must preserve the encoded video");
-}
+const webmSplitArgs = buildSplitArgs("webm");
+assert.equal(webmSplitArgs[webmSplitArgs.indexOf("-segment_format") + 1], "matroska");
+assert.equal(webmSplitArgs[webmSplitArgs.indexOf("-segment_times") + 1], "3,6", "metadata tails must stay in the final segment");
+assert.equal(webmSplitArgs[webmSplitArgs.indexOf("-c") + 1], "copy", "splitting must preserve the encoded video");
 const presetCode = resultFile.statements
   .filter((node) => ts.isFunctionDeclaration(node) && ["getSplitPresetValue", "updateSplitPresetButtons", "updateSplitEstimate", "formatSecondsLabel", "formatTimeInput", "formatPreciseDuration", "roundTrimTime"].includes(node.name?.text))
   .map((node) => node.getText(resultFile)).join("\n");

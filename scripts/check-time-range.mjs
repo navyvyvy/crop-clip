@@ -21,6 +21,8 @@ assert.equal(floorTimeToStep(8.79), 8.7);
 assert.equal(getExpectedSplitCount(8, 3), 3);
 assert.equal(getExpectedSplitCount(9, 3), 3);
 assert.equal(getExpectedSplitCount(9.000001, 3), 3);
+assert.equal(getExpectedSplitCount(9.008, 3), 3, 'sub-step metadata tails belong to the last requested segment');
+assert.equal(getExpectedSplitCount(9.04, 3), 3);
 assert.equal(getExpectedSplitCount(9.1, 3), 4);
 assert.equal(getExpectedSplitCount(8.7, Math.ceil(8.7 * 0.5)), 2);
 assert.equal(getExpectedSplitCount(9, Math.ceil(9 * 0.5)), 2);

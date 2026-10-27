@@ -109,6 +109,7 @@ let recordingDurationSeconds = 0;
 let sourceDurationSeconds = 0;
 let sourceSizeBytes = 0;
 let ffmpegProgressBase = 0;
+let ffmpegProgressEnd = 0;
 let trimStartSeconds = 0;
 let trimEndSeconds = 0;
 let workBusy = false;
@@ -281,8 +282,9 @@ function setPreparingProgress(message: string): void {
   setProgressPercent(PROGRESS_PREPARING_PERCENT);
 }
 
-function setFfmpegProgressBase(percent: number): void {
+function setFfmpegProgressBase(percent: number, end = FFMPEG_EXEC_PROGRESS_MAX): void {
   ffmpegProgressBase = percent;
+  ffmpegProgressEnd = end;
   elements.splitProgressBar.toggleAttribute("data-preparing", percent < FFMPEG_TRANSCODE_START_PERCENT);
   setProgressPercent(percent);
 }
@@ -294,7 +296,7 @@ function getConvertedMimeType(format: ConvertFormat): string {
 async function withFfmpegInput<T>(part: LoadedPart, operation: (ffmpeg: FfmpegLike, inputName: string) => Promise<T>, message = "원본 파일을 준비하는 중입니다."): Promise<T> {
   setWorkStatus("변환 엔진을 불러오는 중입니다.");
   setFfmpegProgressBase(FFMPEG_LOAD_START_PERCENT);
-  const ffmpeg = await loadFfmpeg(progress => setProgressPercent(ffmpegProgressBase + progress * (FFMPEG_EXEC_PROGRESS_MAX - ffmpegProgressBase)));
+  const ffmpeg = await loadFfmpeg(progress => setProgressPercent(ffmpegProgressBase + progress * (ffmpegProgressEnd - ffmpegProgressBase)));
   const inputName = `input.${part.extension}`;
   try {
     setFfmpegProgressBase(FFMPEG_READY_PERCENT);
@@ -817,29 +819,37 @@ async function createDurationSplitWithFfmpeg(
   return withFfmpegInput(part, async (ffmpeg, inputName) => {
     const pattern = `output%03d.${outputFormat}`;
     const segmentListName = "output.csv";
-    const code = await ffmpeg.exec([
-      ...(range ? ["-copyts", "-start_at_zero", "-ss", String(selectedRange.start)] : []),
-      "-i", inputName,
-      ...(range ? ["-to", String(selectedRange.end)] : []),
-      "-map", "0",
-      "-c", "copy",
-      "-f", "segment",
-      "-segment_format", outputFormat === RECORDING_FORMAT.webm ? "matroska" : "mp4",
-      // Stream copy keeps preceding keyframe data; split on the original timeline.
-      ...(range && expectedCount > 1 ? ["-segment_times", Array.from({ length: expectedCount - 1 },
-        (_, index) => selectedRange.start + (index + 1) * segmentSeconds).join(",")]
-        : ["-segment_time", String(segmentSeconds)]),
-      "-break_non_keyframes", "1",
-      "-segment_list", segmentListName,
-      "-segment_list_type", "csv",
-      "-reset_timestamps", "1",
-      pattern,
-    ]);
-    if (code !== 0) {
-      throw new Error("빠른 파일 나누기에 실패했습니다.");
+    const mp4Ranges = outputFormat === RECORDING_FORMAT.mp4
+      ? Array.from({ length: expectedCount }, (_, index) => ({
+        start: selectedRange.start + index * segmentSeconds,
+        end: index === expectedCount - 1 ? selectedRange.end : selectedRange.start + (index + 1) * segmentSeconds,
+      })) : null;
+    if (!mp4Ranges) {
+      const code = await ffmpeg.exec([
+        ...(range ? ["-copyts", "-start_at_zero", "-ss", String(selectedRange.start)] : []),
+        "-i", inputName,
+        ...(range ? ["-to", String(selectedRange.end)] : []),
+        "-map", "0",
+        "-c", "copy",
+        "-f", "segment",
+        "-segment_format", "matroska",
+        // Stream copy keeps preceding keyframe data; split on the original timeline.
+        ...(expectedCount > 1 ? ["-segment_times", Array.from({ length: expectedCount - 1 },
+          (_, index) => selectedRange.start + (index + 1) * segmentSeconds).join(",")]
+          : ["-segment_time", String(selectedRange.end + TIME_STEP_SECONDS)]),
+        "-break_non_keyframes", "1",
+        "-segment_list", segmentListName,
+        "-segment_list_type", "csv",
+        "-reset_timestamps", "1",
+        pattern,
+      ]);
+      if (code !== 0) {
+        throw new Error("빠른 파일 나누기에 실패했습니다.");
+      }
     }
 
-    const files = (await ffmpeg.listDir("."))
+    const files = mp4Ranges ? mp4Ranges.map((_, index) => ({ name: `output${String(index).padStart(3, "0")}.mp4` }))
+      : (await ffmpeg.listDir("."))
       .filter((file) => !file.isDir && file.name.startsWith("output") && file.name.endsWith(`.${outputFormat}`))
       .sort((a, b) => a.name.localeCompare(b.name));
     if (files.length === 0) {
@@ -848,16 +858,28 @@ async function createDurationSplitWithFfmpeg(
     if (files.length !== expectedCount) {
       throw new Error(`파일 나누기 결과가 올바르지 않습니다. ${expectedCount}개가 필요하지만 ${files.length}개가 생성되었습니다.`);
     }
-    const segmentListData = await ffmpeg.readFile(segmentListName);
-    const segmentListText = typeof segmentListData === "string"
-      ? segmentListData
-      : new TextDecoder().decode(segmentListData);
-    const actualTimes = parseSegmentTimeList(segmentListText);
+    let actualTimes = mp4Ranges;
+    if (!actualTimes) {
+      const segmentListData = await ffmpeg.readFile(segmentListName);
+      actualTimes = parseSegmentTimeList(typeof segmentListData === "string" ? segmentListData : new TextDecoder().decode(segmentListData));
+    }
     const segments: SplitSegment[] = [];
+    const progressStart = mp4Ranges ? FFMPEG_TRANSCODE_START_PERCENT : FFMPEG_EXEC_PROGRESS_MAX;
+    const progressStep = (PERCENT_SCALE - progressStart) / files.length;
     for (let index = 0; index < files.length; index += 1) {
       const actualTime = actualTimes[index];
       const start = actualTime?.start ?? selectedRange.start + index * segmentSeconds;
       const end = Math.min(selectedRange.end, actualTime?.end ?? selectedRange.start + (index + 1) * segmentSeconds);
+      if (mp4Ranges) {
+        setFfmpegProgressBase(progressStart + index * progressStep, progressStart + (index + 1) * progressStep);
+        // Input seeking retains decoding preroll; MP4 edit lists hide it from playback.
+        const code = await ffmpeg.exec([
+          "-ss", String(start), "-i", inputName, "-t", String(end - start),
+          "-map", "0", "-c", "copy", "-use_editlist", "1", "-avoid_negative_ts", "disabled",
+          "-movflags", "+faststart", files[index].name,
+        ]);
+        if (code !== 0) throw new Error("빠른 파일 나누기에 실패했습니다.");
+      }
       const blob = await readFfmpegBlob(ffmpeg, files[index].name, `video/${outputFormat}`);
       await deleteFfmpegFile(ffmpeg, files[index].name, true);
       segments.push({
@@ -867,7 +889,7 @@ async function createDurationSplitWithFfmpeg(
         startSeconds: start,
         endSeconds: end,
       });
-      setProgressPercent(FFMPEG_EXEC_PROGRESS_MAX + (index + 1) / files.length * (PERCENT_SCALE - FFMPEG_EXEC_PROGRESS_MAX));
+      setProgressPercent(progressStart + (index + 1) * progressStep);
     }
     return segments;
   });

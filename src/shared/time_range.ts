@@ -86,7 +86,9 @@ export function getExpectedSplitCount(duration: number, segmentSeconds: number):
   if (!Number.isFinite(duration) || !Number.isFinite(segmentSeconds) || duration <= 0 || segmentSeconds <= 0) {
     return 0;
   }
-  return Math.ceil(duration / segmentSeconds - SPLIT_COUNT_EPSILON);
+  // Codec padding below the displayed time precision belongs in the last file.
+  const tailTolerance = Math.min(TIME_STEP_SECONDS, segmentSeconds) / 2;
+  return Math.max(1, Math.ceil((duration - tailTolerance) / segmentSeconds - SPLIT_COUNT_EPSILON));
 }
 
 export function parseSegmentTimeList(value: string): TimeRange[] {
