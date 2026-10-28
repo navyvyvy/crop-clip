@@ -1,4 +1,5 @@
 import { test, expect, interceptDownloads, decodeDownloads, expectResultResourcesReleased } from './fixtures.mjs';
+import { mkdir, stat } from 'node:fs/promises';
 
 function firstSyncSample(bytes) {
   const data = Buffer.from(bytes);
@@ -204,4 +205,59 @@ test('size split retries reuse one prepared source and recover from failure', as
   }, source.id);
   expect(hash).toBe(source.hash);
   expect(dialogs).toHaveLength(1);
+});
+
+test('split downloads finish in reverse order for newest-first folder sorting', async ({ extension }, testInfo) => {
+  test.setTimeout(90000);
+  const { context, worker } = extension;
+  const result = await context.newPage();
+  const base = `chrome-extension://${new URL(worker.url()).host}/result/result.html`;
+  await prepareSplitSource(result, base);
+  const session = await context.newCDPSession(result);
+  const dialogs = [];
+  result.on('dialog', async dialog => { dialogs.push(dialog.message()); await dialog.dismiss(); });
+  for (const automatic of [false, true]) {
+    if (automatic) {
+      await worker.evaluate(() => chrome.storage.local.set({ settings: { enableAutoDownloadSplit: true } }));
+      await result.reload();
+      await expect(result.locator('#split-button')).toBeEnabled({ timeout: 30000 });
+      await expect(result.locator('#trim-thumbnails')).not.toHaveAttribute('data-loading');
+    }
+    const retained = await result.evaluate(() => window.testObjectUrls.size);
+    const downloadPath = testInfo.outputPath(automatic ? 'automatic' : 'manual');
+    await mkdir(downloadPath, { recursive: true });
+    await session.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath });
+    await result.evaluate(() => {
+      window.testSavedFiles = [];
+      const download = chrome.downloads.download.bind(chrome.downloads);
+      chrome.downloads.download = async options => {
+        const id = await download(options);
+        window.testSavedFiles.push({ id, filename: options.filename });
+        return id;
+      };
+    });
+    await result.locator('#split-format-select').selectOption('mp4');
+    await result.locator('[data-split-count="4"]').click();
+    await result.locator('#split-button').click();
+    await expect(result.locator('#split-result-summary')).toHaveText('나눈 파일 (4개)', { timeout: 30000 });
+    if (!automatic) {
+      await expect(result.locator('#download-all-button')).toBeEnabled();
+      await result.locator('#download-all-button').evaluate(button => { button.click(); button.click(); });
+    }
+    await expect.poll(() => result.evaluate(() => window.testSavedFiles.length)).toBe(4);
+    await expect(result.locator('#download-all-button')).toBeEnabled();
+    const files = await result.evaluate(async () => Promise.all(window.testSavedFiles.map(async ({ id, filename }) => {
+      const [item] = await chrome.downloads.search({ id });
+      return { requestedName: filename, path: item.filename, state: item.state };
+    })));
+    expect(files.map(file => file.requestedName)).toEqual([4, 3, 2, 1].map(index => `motion_00${index}.mp4`));
+    expect(files.map(file => file.state)).toEqual(Array(4).fill('complete'));
+    const saved = await Promise.all(files.map(file => stat(file.path)));
+    expect(saved.every(file => file.size > 0)).toBe(true);
+    for (let index = 1; index < saved.length; index++) {
+      expect(saved[index].mtimeMs).toBeGreaterThan(saved[index - 1].mtimeMs);
+    }
+    await expectResultResourcesReleased(result, retained);
+    expect(dialogs).toEqual([]);
+  }
 });

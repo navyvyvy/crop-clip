@@ -78,18 +78,13 @@ export async function downloadSourcesSequentially(items: Array<{ source: Blob | 
   }
 }
 
-export async function downloadSourcesAndConfirm(items: Array<{ source: Blob | string; filename: string }>): Promise<void> {
-  const completions: Array<Promise<Error | null>> = [];
-  for (const item of [...items].sort((a, b) => a.filename.localeCompare(b.filename, undefined, { numeric: true }))) {
-    const { completion } = await beginConfirmedDownload(item.source, item.filename);
-    completions.push(completion.then(
-      () => null,
-      (error: unknown) => error instanceof Error ? error : new Error("다운로드를 완료하지 못했습니다."),
-    ));
-    await new Promise(resolve => window.setTimeout(resolve, SEQUENTIAL_DOWNLOAD_DELAY_MS));
+export async function downloadSourcesAndConfirm(items: Array<{ source: Blob | string; filename: string }>, reverseOrder = false): Promise<void> {
+  const orderedItems = [...items].sort((a, b) => a.filename.localeCompare(b.filename, undefined, { numeric: true }));
+  if (reverseOrder) {
+    orderedItems.reverse();
   }
-  const error = (await Promise.all(completions)).find((result): result is Error => result !== null);
-  if (error) {
-    throw error;
+  for (const item of orderedItems) {
+    const { completion } = await beginConfirmedDownload(item.source, item.filename);
+    await completion;
   }
 }

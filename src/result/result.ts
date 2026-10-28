@@ -587,6 +587,9 @@ function setSplitBusy(isBusy: boolean): void {
   }
   updateSpeedControls();
   elements.downloadAllButton.disabled = isBusy || splitSegments.length === 0;
+  for (const button of elements.splitFilesList.querySelectorAll<HTMLButtonElement>("button")) {
+    button.disabled = isBusy;
+  }
   renderActions();
 }
 
@@ -1064,6 +1067,7 @@ function renderSplitDownloads(): void {
     const button = document.createElement("button");
     button.className = "button primary icon-button";
     button.type = "button";
+    button.disabled = workBusy;
     button.innerHTML = getDownloadIconSvg();
     button.title = "다운로드";
     button.setAttribute("aria-label", `${segment.index}번 파일 다운로드`);
@@ -1396,7 +1400,23 @@ elements.speedConvertButton.addEventListener("click", () => {
 });
 
 elements.downloadAllButton.addEventListener("click", () => {
-  void downloadSourcesSequentially(splitSegments.map((segment) => ({ source: segment.blob, filename: segment.filename })));
+  if (workBusy || splitSegments.length === 0) {
+    return;
+  }
+  void (async () => {
+    setSplitBusy(true);
+    setWorkStatus("나눈 파일을 마지막 번호부터 차례대로 저장하는 중입니다.");
+    try {
+      await downloadSourcesAndConfirm(splitSegments.map((segment) => ({ source: segment.blob, filename: segment.filename })), true);
+      setWorkStatus("나눈 파일 저장이 완료되었습니다.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "나눈 파일을 저장하지 못했습니다.";
+      setWorkStatus(message);
+      window.alert(message);
+    } finally {
+      setSplitBusy(false);
+    }
+  })();
 });
 
 elements.previewVideo.addEventListener("loadedmetadata", () => {
@@ -1629,9 +1649,11 @@ elements.splitButton.addEventListener("click", () => {
         : await createDurationSplitWithFfmpeg(part, splitValue, outputFormat, range);
 
       splitSegments = segments;
+      await releaseFfmpeg();
       renderSplitDownloads();
       if (autoDownloadSplit) {
-        await downloadSourcesSequentially(segments.map((segment) => ({ source: segment.blob, filename: segment.filename })));
+        setWorkStatus("나눈 파일을 마지막 번호부터 차례대로 저장하는 중입니다.");
+        await downloadSourcesAndConfirm(segments.map((segment) => ({ source: segment.blob, filename: segment.filename })), true);
       }
       setWorkStatus("파일 나누기가 완료되었습니다.");
     } catch (error) {

@@ -97,7 +97,7 @@ assert.match(resultText, /async function revealAutoDownloadFailure\(\): Promise<
 assert.match(resultText, /restoreSourceTabOnClose = true/);
 assert.match(resultText, /await markAutoDownloadHandled\(\);\s*allowRecordingDeletion = true;\s*startDeletionKeepalive\(\)/);
 assert.match(resultText, /if \(allowRecordingDeletion\) \{\s*void scheduleRecordingDeletion\(\)/);
-assert.match(resultText, /if \(autoDownloadSplit\) \{\s*await downloadSourcesSequentially/);
+assert.match(resultText, /if \(autoDownloadSplit\) \{\s*setWorkStatus\([^;]+;\s*await downloadSourcesAndConfirm/);
 assert.doesNotMatch(messagesText, /CANCEL_RECORDING_DELETION/);
 assert.doesNotMatch(idbText, /openKeyCursor/);
 assert.match(idbText, /\.openCursor\(IDBKeyRange\.only\(recordingId\)\)/);
