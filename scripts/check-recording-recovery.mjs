@@ -12,6 +12,7 @@ function fixture(options = {}) {
   let recording;
   const env = {
     chrome: {
+      storage: { local: { get: async () => ({}), set: async () => {}, remove: async () => {} } },
       alarms: { create: async () => {}, clear: async () => {} },
       runtime: {
         getURL: path => `chrome-extension://test/${path}`, ContextType: { TAB: 'TAB' },

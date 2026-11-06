@@ -8,9 +8,12 @@ import path from 'node:path';
 test.skip(!process.env.CROPCLIP_PROFILE_REPORT, 'Set CROPCLIP_PROFILE_REPORT to save comparison measurements');
 test('recording resource and performance profile', async ({ extension }, testInfo) => {
   const cancelMode = process.env.CROPCLIP_PROFILE_CANCEL === '1';
+  const fullOnly = process.env.CROPCLIP_PROFILE_FULL === '1';
+  const recordingSeconds = Number(process.env.CROPCLIP_PROFILE_SECONDS || 33);
   const cycles = Number(process.env.CROPCLIP_PROFILE_CYCLES || (cancelMode ? 32 : 8));
   expect(Number.isInteger(cycles) && cycles > 0 && cycles % 4 === 0).toBe(true);
-  test.setTimeout(Math.max(240_000, cycles * 6000));
+  expect(Number.isFinite(recordingSeconds) && recordingSeconds >= 3).toBe(true);
+  test.setTimeout(Math.max(240_000, cycles * (cancelMode ? 6000 : recordingSeconds * 1000 + 20000)));
   const { context, worker, page } = extension;
   const sourcePath = path.resolve('node_modules/.cache/cropclip-profile-source.webm');
   let source;
@@ -37,9 +40,21 @@ test('recording resource and performance profile', async ({ extension }, testInf
     return result.result;
   })()`);
   await content(() => {
-    const audit = { tracks: [], recorders: [], canvases: [], frames: [], captures: 0, starts: 0, flushes: 0 };
+    const audit = { tracks: [], recorders: [], canvases: [], frames: [], captures: 0, starts: 0, flushes: 0, canvasContexts: 0 };
     globalThis.__recordingAudit = audit;
     const track = (value, kind) => { audit.tracks.push({ ref: new WeakRef(value), kind }); return value; };
+    const createElement = document.createElement.bind(document);
+    document.createElement = (...args) => {
+      const element = createElement(...args);
+      if (args[0] === 'canvas') audit.canvases.push(new WeakRef(element));
+      return element;
+    };
+    const getContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (...args) {
+      const context = getContext.apply(this, args);
+      if (context) audit.canvasContexts++;
+      return context;
+    };
     if (typeof MediaStreamTrackGenerator === 'function') {
       const Generator = MediaStreamTrackGenerator;
       window.MediaStreamTrackGenerator = class extends Generator {
@@ -55,7 +70,6 @@ test('recording resource and performance profile', async ({ extension }, testInf
       prototype.captureStream = function (...args) {
         const stream = capture.apply(this, args);
         if (kind === 'source') audit.captures++;
-        else audit.canvases.push(new WeakRef(this));
         stream.getTracks().forEach(value => track(value, kind));
         return stream;
       };
@@ -79,16 +93,24 @@ test('recording resource and performance profile', async ({ extension }, testInf
   const browserCdp = await context.browser().newBrowserCDPSession();
   await cdp.send('Performance.enable');
   const metrics = async () => Object.fromEntries((await cdp.send('Performance.getMetrics')).metrics.map(item => [item.name, item.value]));
-  const snapshot = async () => {
+  const snapshot = async (collected = true) => {
     const heapBeforeGc = (await metrics()).JSHeapUsedSize;
-    await cdp.send('HeapProfiler.collectGarbage');
+    if (collected) await cdp.send('HeapProfiler.collectGarbage');
     const performance = await metrics();
     const dom = await cdp.send('Memory.getDOMCounters');
     const processes = (await browserCdp.send('SystemInfo.getProcessInfo')).processInfo;
     const ids = processes.map(item => Number(item.id)).filter(Number.isInteger);
-    const privateBytes = Number(execFileSync('powershell.exe', ['-NoProfile', '-Command',
-      `(Get-Process -Id ${ids.join(',')} -ErrorAction SilentlyContinue | Measure-Object -Property PrivateMemorySize64 -Sum).Sum`], { encoding: 'utf8', windowsHide: true }).trim());
+    const memory = JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-Command',
+      `Get-Process -Id ${ids.join(',')} -ErrorAction SilentlyContinue | Select-Object Id,PrivateMemorySize64,WorkingSet64,HandleCount | ConvertTo-Json -Compress`], { encoding: 'utf8', windowsHide: true }).trim());
+    const byId = new Map([memory].flat().map(item => [item.Id, item]));
+    const processMemory = processes.map(item => ({ type: item.type, id: item.id,
+      privateBytes: byId.get(Number(item.id))?.PrivateMemorySize64 ?? 0,
+      workingSetBytes: byId.get(Number(item.id))?.WorkingSet64 ?? 0,
+      handles: byId.get(Number(item.id))?.HandleCount ?? 0,
+    }));
+    const privateBytes = processMemory.reduce((total, item) => total + item.privateBytes, 0);
     const tracks = await content(() => ({ captures: __recordingAudit.captures,
+      canvasContexts: __recordingAudit.canvasContexts,
       flushes: __recordingAudit.flushes,
       retainedRecorders: __recordingAudit.recorders.filter(ref => ref.deref()).length,
       retainedCanvases: __recordingAudit.canvases.filter(ref => ref.deref()).length,
@@ -99,7 +121,7 @@ test('recording resource and performance profile', async ({ extension }, testInf
       return value?.readyState === 'live' ? [{ kind, type: value.kind, enabled: value.enabled }] : [];
     }) }));
     const targets = (await browserCdp.send('Target.getTargets')).targetInfos;
-    return { heapBeforeGc, heapBytes: performance.JSHeapUsedSize, privateBytes, ...dom, tracks,
+    return { collected, heapBeforeGc, heapBytes: performance.JSHeapUsedSize, privateBytes, processMemory, ...dom, tracks,
       dedicatedWorkers: targets.filter(target => target.type === 'worker').length };
   };
   const frames = () => page.locator('video').evaluate(video => {
@@ -109,7 +131,7 @@ test('recording resource and performance profile', async ({ extension }, testInf
   const samples = [];
   const initial = await snapshot();
   for (let index = 0; index < cycles; index++) {
-    const key = index % 2 ? 'r' : 'e';
+    const key = fullOnly || index % 2 === 0 ? 'e' : 'r';
     await page.bringToFront();
     const before = await metrics(), framesBefore = await frames();
     const start = await content(() => performance.now());
@@ -139,7 +161,7 @@ test('recording resource and performance profile', async ({ extension }, testInf
       continue;
     }
     // Real encoding time, not an arbitrary readiness wait.
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(recordingSeconds * 1000);
     const after = await metrics(), framesAfter = await frames();
     const opened = context.waitForEvent('page');
     const stopping = performance.now();
@@ -147,21 +169,30 @@ test('recording resource and performance profile', async ({ extension }, testInf
     const result = await opened;
     await expect(result.locator('#split-button')).toBeEnabled({ timeout: 30_000 });
     const stopMs = performance.now() - stopping;
-    await expect.poll(() => result.locator('#preview-video').evaluate(video => video.readyState >= 2 && video.videoWidth > 0 && video.duration >= 2)).toBe(true);
+    await expect.poll(() => result.locator('#preview-video').evaluate((video, minimum) => video.readyState >= 2 && video.videoWidth > 0 && video.duration >= minimum, recordingSeconds - 1)).toBe(true);
+    const beforeResultClose = await snapshot(false);
     await result.close();
     await expect.poll(() => worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState.status)).toBe('idle');
-    const resources = await snapshot();
-    expect(resources.tracks.captures, 'reuse the original capture across sessions').toBe(1);
-    expect(resources.tracks.live.filter(track => track.kind !== 'source' || track.type !== 'audio' || track.enabled)).toEqual([]);
-    expect(resources.tracks.retainedRecorders, 'stopped encoders must be collectible').toBe(0);
-    expect(resources.tracks.retainedCanvases, 'stopped canvases must be collectible').toBe(0);
-    expect(resources.tracks.openFrames, 'stop must close every native frame').toBe(0);
-    expect(resources.tracks.retainedGenerators, 'stopped generator tracks must be collectible').toBe(0);
-    expect(resources.dedicatedWorkers, 'result close must release conversion workers').toBe(0);
-    samples.push({ mode: key === 'e' ? 'full' : 'region', startMs, stopMs,
+    // Observe normal collection throughout recording/stop cycles; collect only at the end.
+    const resources = await snapshot(index + 1 === cycles);
+    samples.push({ mode: key === 'e' ? 'full' : 'region', recordingSeconds, startMs, stopMs,
       rendererTaskSeconds: after.TaskDuration - before.TaskDuration,
       frames: framesAfter.total - framesBefore.total, droppedFrames: framesAfter.dropped - framesBefore.dropped,
-      ...resources });
+      beforeResultClose, ...resources });
+    await fs.writeFile(process.env.CROPCLIP_PROFILE_REPORT, JSON.stringify({ initial, samples }, null, 2));
+    console.log(JSON.stringify({ cycle: index + 1, collected: resources.collected,
+      privateMiB: Math.round(resources.privateBytes / 1048576),
+      processes: resources.processMemory.map(item => ({ type: item.type, privateMiB: Math.round(item.privateBytes / 1048576), handles: item.handles })),
+      openFrames: resources.tracks.openFrames }));
+    expect(resources.tracks.captures, 'reuse the original capture across sessions').toBe(1);
+    expect(resources.tracks.live.filter(track => track.kind !== 'source' || track.type !== 'audio' || track.enabled)).toEqual([]);
+    if (resources.collected) {
+      expect(resources.tracks.retainedRecorders, 'stopped encoders must be collectible').toBe(0);
+      expect(resources.tracks.retainedCanvases, 'stopped canvases must be collectible').toBe(0);
+      expect(resources.tracks.retainedGenerators, 'stopped generator tracks must be collectible').toBe(0);
+    }
+    expect(resources.tracks.openFrames, 'stop must close every native frame').toBe(0);
+    expect(resources.dedicatedWorkers, 'result close must release conversion workers').toBe(0);
   }
   if (cancelMode) {
     const stored = await worker.evaluate(async () => {
@@ -184,11 +215,13 @@ test('recording resource and performance profile', async ({ extension }, testInf
     expect(stored).toEqual({ recordings: 0, parts: 0, chunks: 0 });
   }
   // Ignore first-use caches. This bounds retained JS, not GPU/native allocations.
-  expect(samples.at(-1).heapBytes - samples[1].heapBytes).toBeLessThan(8 * 1024 * 1024);
-  expect(samples.at(-1).nodes - samples[1].nodes).toBeLessThan(100);
-  expect(samples.at(-1).jsEventListeners - samples[1].jsEventListeners).toBeLessThan(10);
+  const collected = samples.filter(sample => sample.collected);
+  const warmed = collected.length > 1 ? collected[0] : samples[0];
+  expect(collected.at(-1).heapBytes - warmed.heapBytes).toBeLessThan(8 * 1024 * 1024);
+  expect(collected.at(-1).nodes - warmed.nodes).toBeLessThan(100);
+  expect(collected.at(-1).jsEventListeners - warmed.jsEventListeners).toBeLessThan(10);
   const report = { version: await worker.evaluate(() => chrome.runtime.getManifest().version),
-    browser: process.env.CROPCLIP_TEST_BROWSER || 'chromium', scenario: cancelMode ? `${cycles} start/cancel cycles in bursts of four` : 'record/stop', source: '1920x1080, 30fps', initial, samples };
+    browser: process.env.CROPCLIP_TEST_BROWSER || 'chromium', mode: fullOnly ? 'full' : 'full and region', scenario: cancelMode ? `${cycles} start/cancel cycles in bursts of four` : `${cycles} record/stop cycles of ${recordingSeconds} seconds`, source: '1920x1080, 30fps', initial, samples };
   await fs.writeFile(process.env.CROPCLIP_PROFILE_REPORT, JSON.stringify(report, null, 2));
   await testInfo.attach('recording-profile', { body: JSON.stringify(report, null, 2), contentType: 'application/json' });
 });

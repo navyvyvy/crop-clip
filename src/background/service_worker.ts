@@ -1,4 +1,4 @@
-import { deleteRecording, deleteRecordingChunks, getChunksByRecordingId, putChunk, putPart, putRecording } from "../shared/idb.js";
+import { deleteRecording, deleteRecordingChunks, getChunksByRecordingId, getRecordingDeletionCandidates, putChunk, putPart, putRecording } from "../shared/idb.js";
 import { fail, ok, type AutoDownloadHandledMessage, type ContentCommand, type DeletionScheduleRequest, type FinalizeRecordingMessage, type MessageResponse, type PopupCommand, type RecordingErrorMessage, type StoreRecordingChunkMessage } from "../shared/messages.js";
 import { loadAppState, loadRecordingState, saveRecordingState } from "../shared/storage.js";
 import { MILLISECONDS_PER_SECOND, SECONDS_PER_HOUR, SECONDS_PER_MINUTE } from "../shared/time_range.js";
@@ -90,15 +90,17 @@ async function discardRecordingIfCurrent(recordingId?: string): Promise<void> {
 }
 
 async function scheduleRecordingDeletion(recordingId: string): Promise<MessageResponse> {
-  await chrome.alarms.create(getDeleteAlarmName(recordingId), {
-    delayInMinutes: DELETE_AFTER_MINUTES,
-  });
+  const name = getDeleteAlarmName(recordingId);
+  const when = Date.now() + DELETE_AFTER_MINUTES * SECONDS_PER_MINUTE * MILLISECONDS_PER_SECOND;
+  await chrome.storage.local.set({ [name]: when });
+  await chrome.alarms.create(name, { when });
   return ok();
 }
 
 async function deleteRecordingNow(recordingId: string): Promise<void> {
   await deleteRecording(recordingId);
   await chrome.alarms.clear(getDeleteAlarmName(recordingId));
+  await chrome.storage.local.remove(getDeleteAlarmName(recordingId));
 }
 
 async function deleteRecordingEventually(recordingId: string): Promise<void> {
@@ -106,6 +108,64 @@ async function deleteRecordingEventually(recordingId: string): Promise<void> {
     await deleteRecordingNow(recordingId);
   } catch {
     await scheduleRecordingDeletion(recordingId).catch(() => {});
+  }
+}
+
+async function findRecordingResultTab(recordingId: string): Promise<number | undefined> {
+  const resultPage = chrome.runtime.getURL("result/result.html");
+  return (await chrome.runtime.getContexts({ contextTypes: [chrome.runtime.ContextType.TAB] })).find((context) => {
+    const candidate = context.documentUrl;
+    return candidate?.startsWith(`${resultPage}?`) && new URL(candidate).searchParams.get("id") === recordingId;
+  })?.tabId;
+}
+
+async function handleRecordingDeletion(recordingId: string): Promise<void> {
+  const name = getDeleteAlarmName(recordingId);
+  const deadline = (await chrome.storage.local.get(name))[name];
+  if (typeof deadline === "number" && Number.isFinite(deadline) && deadline > Date.now()) {
+    await chrome.alarms.create(name, { when: deadline });
+    return;
+  }
+  const state = await loadRecordingState();
+  if ((state.recordingId === recordingId && state.status !== RECORDING_STATUS.idle)
+    || await findRecordingResultTab(recordingId) !== undefined) {
+    await scheduleRecordingDeletion(recordingId);
+    return;
+  }
+  await deleteRecordingNow(recordingId);
+}
+
+async function restoreScheduledRecordingDeletions(): Promise<void> {
+  const [stored, alarms, recordings] = await Promise.all([
+    chrome.storage.local.get(null), chrome.alarms.getAll(), getRecordingDeletionCandidates().catch(() => []),
+  ]);
+  const existing = new Set(alarms.map(alarm => alarm.name));
+  const deadlines = new Map<string, number>();
+  const orphanDeadlines: Record<string, number> = {};
+  for (const [name, value] of Object.entries(stored)) {
+    if (name.startsWith(DELETE_ALARM_PREFIX) && typeof value === "number" && Number.isFinite(value)) deadlines.set(name, value);
+  }
+  for (const recording of recordings) {
+    const name = getDeleteAlarmName(recording.id);
+    if (!deadlines.has(name)) {
+      const endedAt = recording.endedAt;
+      const hasEndedAt = typeof endedAt === "number" && Number.isFinite(endedAt);
+      const when = (hasEndedAt ? endedAt : Date.now()) + DELETE_AFTER_MINUTES * SECONDS_PER_MINUTE * MILLISECONDS_PER_SECOND;
+      deadlines.set(name, when);
+      if (!hasEndedAt) orphanDeadlines[name] = when;
+    }
+  }
+  // Persist the first grace period for orphans so worker restarts cannot keep extending it.
+  if (Object.keys(orphanDeadlines).length > 0) await chrome.storage.local.set(orphanDeadlines);
+  for (const [name, when] of deadlines) {
+    if (existing.has(name)) continue;
+    if (when > Date.now()) {
+      await chrome.alarms.create(name, { when });
+    } else {
+      const recordingId = name.slice(DELETE_ALARM_PREFIX.length);
+      await runRecordingTerminalOperation(recordingId, () => handleRecordingDeletion(recordingId)).catch(() =>
+        chrome.alarms.create(name, { delayInMinutes: DELETE_RETRY_MINUTES }).catch(() => {}));
+    }
   }
 }
 
@@ -463,10 +523,7 @@ async function openCompletedRecordingResult(): Promise<boolean> {
   try {
     // State persistence can fail after creation. Find the actual result across retries
     // and worker restarts, and ignore tabs that have navigated away from this recording.
-    let resultTabId = (await chrome.runtime.getContexts({ contextTypes: [chrome.runtime.ContextType.TAB] })).find((context) => {
-      const candidate = context.documentUrl;
-      return candidate?.startsWith(`${resultPage}?`) && new URL(candidate).searchParams.get("id") === recordingState.recordingId;
-    })?.tabId;
+    let resultTabId = await findRecordingResultTab(recordingState.recordingId);
     for (let attempt = 0; resultTabId === undefined && attempt < RESULT_TAB_CREATE_ATTEMPTS; attempt += 1) {
       try {
         resultTabId = (await chrome.tabs.create({ url, active: settings.autoFocusResult && !settings.enableAutoDownloadRecording })).id;
@@ -707,7 +764,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 
   const recordingId = alarm.name.slice(DELETE_ALARM_PREFIX.length);
-  void deleteRecordingNow(recordingId).catch(() => {
+  void runRecordingTerminalOperation(recordingId, () => handleRecordingDeletion(recordingId)).catch(() => {
     void chrome.alarms.create(getDeleteAlarmName(recordingId), { delayInMinutes: DELETE_RETRY_MINUTES }).catch(() => {});
   });
 });
@@ -792,3 +849,5 @@ chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingErrorMess
 
   return true;
 });
+
+void restoreScheduledRecordingDeletions().catch(() => {});

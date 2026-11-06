@@ -593,6 +593,22 @@ function setSplitBusy(isBusy: boolean): void {
   renderActions();
 }
 
+async function runResultJob(operation: () => Promise<void>, failureMessage: string): Promise<void> {
+  if (workBusy) return;
+  setSplitBusy(true);
+  try {
+    await operation();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : failureMessage;
+    setWorkStatus(message);
+    window.alert(message);
+  } finally {
+    await releaseFfmpeg();
+    hideSplitProgress();
+    setSplitBusy(false);
+  }
+}
+
 function clearSplitResults(): void {
   if (splitSegments.length === 0) {
     return;
@@ -1245,34 +1261,21 @@ async function boot(): Promise<void> {
 }
 
 elements.downloadCurrentButton.addEventListener("click", () => {
-  void (async () => {
-    const range = getActiveTimeRange();
-    if (!range) {
-      await downloadSourcesSequentially(parts.map((part) => ({ source: getPartSource(part), filename: part.filename })));
-      return;
-    }
-
-    const part = getSelectedSourcePart();
-    if (!part) {
-      return;
-    }
-
-    setSplitBusy(true);
+  const range = getActiveTimeRange();
+  if (!range) {
+    void downloadSourcesSequentially(parts.map((part) => ({ source: getPartSource(part), filename: part.filename })));
+    return;
+  }
+  const part = getSelectedSourcePart();
+  if (!part) return;
+  void runResultJob(async () => {
     setSplitProgress(0, 1);
-    try {
-      setPreparingProgress("선택 구간을 준비하는 중입니다.");
-      const item = await convertPart(part, part.extension, range);
-      setSplitProgress(1, 1);
-      await downloadSourcesSequentially([item]);
-      setWorkStatus("선택 구간 다운로드가 준비되었습니다.");
-    } catch (error) {
-      window.alert(error instanceof Error ? error.message : "선택 구간을 만들지 못했습니다.");
-    } finally {
-      await releaseFfmpeg();
-      hideSplitProgress();
-      setSplitBusy(false);
-    }
-  })();
+    setPreparingProgress("선택 구간을 준비하는 중입니다.");
+    const item = await convertPart(part, part.extension, range);
+    setSplitProgress(1, 1);
+    await downloadSourcesSequentially([item]);
+    setWorkStatus("선택 구간 다운로드가 준비되었습니다.");
+  }, "선택 구간을 만들지 못했습니다.");
 });
 
 elements.downloadOriginalButton.addEventListener("click", () => {
@@ -1286,30 +1289,20 @@ elements.closeButton.addEventListener("click", () => {
 
 for (const button of elements.convertButtons) {
   button.addEventListener("click", () => {
-    void (async () => {
-      setSplitBusy(true);
-      try {
-        const outputFormat = (button.dataset.convertFormat ?? RECORDING_FORMAT.mp4) as ConvertFormat;
-        const range = getActiveTimeRange();
-        const sourceParts = range ? [getSelectedSourcePart()].filter((part): part is LoadedPart => Boolean(part)) : parts;
-        setSplitProgress(0, Math.max(1, sourceParts.length));
-        setPreparingProgress(`${outputFormat.toUpperCase()} 변환을 준비하는 중입니다.`);
-        const items: Array<{ source: Blob | string; filename: string }> = [];
-        for (const [index, part] of sourceParts.entries()) {
-          items.push(await convertPart(part, outputFormat, range));
-          setSplitProgress(index + 1, sourceParts.length);
-        }
-        await downloadSourcesSequentially(items);
-        setWorkStatus(`${outputFormat.toUpperCase()} 변환이 완료되었습니다.`);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "파일을 변환하지 못했습니다.";
-        window.alert(message);
-      } finally {
-        await releaseFfmpeg();
-        hideSplitProgress();
-        setSplitBusy(false);
+    void runResultJob(async () => {
+      const outputFormat = (button.dataset.convertFormat ?? RECORDING_FORMAT.mp4) as ConvertFormat;
+      const range = getActiveTimeRange();
+      const sourceParts = range ? [getSelectedSourcePart()].filter((part): part is LoadedPart => Boolean(part)) : parts;
+      setSplitProgress(0, Math.max(1, sourceParts.length));
+      setPreparingProgress(`${outputFormat.toUpperCase()} 변환을 준비하는 중입니다.`);
+      const items: Array<{ source: Blob | string; filename: string }> = [];
+      for (const [index, part] of sourceParts.entries()) {
+        items.push(await convertPart(part, outputFormat, range));
+        setSplitProgress(index + 1, sourceParts.length);
       }
-    })();
+      await downloadSourcesSequentially(items);
+      setWorkStatus(`${outputFormat.toUpperCase()} 변환이 완료되었습니다.`);
+    }, "파일을 변환하지 못했습니다.");
   });
 }
 
@@ -1370,53 +1363,32 @@ elements.captureFrameButton.addEventListener("click", () => {
 });
 
 elements.speedConvertButton.addEventListener("click", () => {
-  void (async () => {
-    const speed = getSelectedPlaybackSpeed();
-    if (speed === DEFAULT_PLAYBACK_SPEED) {
-      return;
+  const speed = getSelectedPlaybackSpeed();
+  if (speed === DEFAULT_PLAYBACK_SPEED) return;
+  void runResultJob(async () => {
+    const range = getActiveTimeRange();
+    const sourceParts = range ? [getSelectedSourcePart()].filter((part): part is LoadedPart => Boolean(part)) : parts;
+    setSplitProgress(0, Math.max(1, sourceParts.length));
+    setPreparingProgress(`${speed}배속 MP4를 준비하는 중입니다.`);
+    const items: Array<{ source: Blob; filename: string }> = [];
+    for (const [index, part] of sourceParts.entries()) {
+      items.push(await convertPartAtSpeed(part, speed, range));
+      setSplitProgress(index + 1, sourceParts.length);
     }
-
-    setSplitBusy(true);
-    try {
-      const range = getActiveTimeRange();
-      const sourceParts = range ? [getSelectedSourcePart()].filter((part): part is LoadedPart => Boolean(part)) : parts;
-      setSplitProgress(0, Math.max(1, sourceParts.length));
-      setPreparingProgress(`${speed}배속 MP4를 준비하는 중입니다.`);
-      const items: Array<{ source: Blob; filename: string }> = [];
-      for (const [index, part] of sourceParts.entries()) {
-        items.push(await convertPartAtSpeed(part, speed, range));
-        setSplitProgress(index + 1, sourceParts.length);
-      }
-      await downloadSourcesSequentially(items);
-      setWorkStatus(`${speed}배속 MP4 다운로드가 준비되었습니다.`);
-    } catch (error) {
-      window.alert(error instanceof Error ? error.message : "배속 MP4를 만들지 못했습니다.");
-    } finally {
-      await releaseFfmpeg();
-      hideSplitProgress();
-      setSplitBusy(false);
-    }
-  })();
+    await downloadSourcesSequentially(items);
+    setWorkStatus(`${speed}배속 MP4 다운로드가 준비되었습니다.`);
+  }, "배속 MP4를 만들지 못했습니다.");
 });
 
 elements.downloadAllButton.addEventListener("click", () => {
   if (workBusy || splitSegments.length === 0) {
     return;
   }
-  void (async () => {
-    setSplitBusy(true);
+  void runResultJob(async () => {
     setWorkStatus("나눈 파일을 마지막 번호부터 차례대로 저장하는 중입니다.");
-    try {
-      await downloadSourcesAndConfirm(splitSegments.map((segment) => ({ source: segment.blob, filename: segment.filename })), true);
-      setWorkStatus("나눈 파일 저장이 완료되었습니다.");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "나눈 파일을 저장하지 못했습니다.";
-      setWorkStatus(message);
-      window.alert(message);
-    } finally {
-      setSplitBusy(false);
-    }
-  })();
+    await downloadSourcesAndConfirm(splitSegments.map((segment) => ({ source: segment.blob, filename: segment.filename })), true);
+    setWorkStatus("나눈 파일 저장이 완료되었습니다.");
+  }, "나눈 파일을 저장하지 못했습니다.");
 });
 
 elements.previewVideo.addEventListener("loadedmetadata", () => {
@@ -1624,48 +1596,36 @@ for (const button of elements.splitPresetButtons) {
 }
 
 elements.splitButton.addEventListener("click", () => {
-  void (async () => {
-    const part = getSelectedSourcePart();
-    if (!part) {
-      elements.splitStatus.textContent = "나눌 원본 파일이 없습니다.";
-      return;
-    }
-
+  const part = getSelectedSourcePart();
+  if (!part) {
+    elements.splitStatus.textContent = "나눌 원본 파일이 없습니다.";
+    return;
+  }
+  void runResultJob(async () => {
     clearSplitResults();
-    setSplitBusy(true);
-    try {
-      setPreparingProgress("파일 나누기를 준비하는 중입니다.");
-      const mode = elements.splitModeSelect.value;
-      const outputFormat = elements.splitFormatSelect.value === RECORDING_FORMAT.mp4 ? RECORDING_FORMAT.mp4 : RECORDING_FORMAT.webm;
-      const minimum = mode === "duration" ? TIME_STEP_SECONDS : 1;
-      const splitValue = Math.max(minimum, Number(elements.splitValueInput.value || minimum));
-      const range = getActiveTimeRange();
-      const selectedRange = getSelectedTimeRange();
-      if (mode === "duration" && splitValue >= roundTrimTime(selectedRange.end - selectedRange.start)) {
-        throw new Error("나누기 시간은 선택 구간보다 짧아야 합니다.");
-      }
-      const segments = mode === "size"
-        ? await createSizeSplit(part, splitValue, outputFormat, range)
-        : await createDurationSplitWithFfmpeg(part, splitValue, outputFormat, range);
-
-      splitSegments = segments;
-      await releaseFfmpeg();
-      renderSplitDownloads();
-      if (autoDownloadSplit) {
-        setWorkStatus("나눈 파일을 마지막 번호부터 차례대로 저장하는 중입니다.");
-        await downloadSourcesAndConfirm(segments.map((segment) => ({ source: segment.blob, filename: segment.filename })), true);
-      }
-      setWorkStatus("파일 나누기가 완료되었습니다.");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "파일을 나누지 못했습니다.";
-      elements.splitStatus.textContent = message;
-      window.alert(message);
-    } finally {
-      await releaseFfmpeg();
-      hideSplitProgress();
-      setSplitBusy(false);
+    setPreparingProgress("파일 나누기를 준비하는 중입니다.");
+    const mode = elements.splitModeSelect.value;
+    const outputFormat = elements.splitFormatSelect.value === RECORDING_FORMAT.mp4 ? RECORDING_FORMAT.mp4 : RECORDING_FORMAT.webm;
+    const minimum = mode === "duration" ? TIME_STEP_SECONDS : 1;
+    const splitValue = Math.max(minimum, Number(elements.splitValueInput.value || minimum));
+    const range = getActiveTimeRange();
+    const selectedRange = getSelectedTimeRange();
+    if (mode === "duration" && splitValue >= roundTrimTime(selectedRange.end - selectedRange.start)) {
+      throw new Error("나누기 시간은 선택 구간보다 짧아야 합니다.");
     }
-  })();
+    const segments = mode === "size"
+      ? await createSizeSplit(part, splitValue, outputFormat, range)
+      : await createDurationSplitWithFfmpeg(part, splitValue, outputFormat, range);
+
+    splitSegments = segments;
+    await releaseFfmpeg();
+    renderSplitDownloads();
+    if (autoDownloadSplit) {
+      setWorkStatus("나눈 파일을 마지막 번호부터 차례대로 저장하는 중입니다.");
+      await downloadSourcesAndConfirm(segments.map((segment) => ({ source: segment.blob, filename: segment.filename })), true);
+    }
+    setWorkStatus("파일 나누기가 완료되었습니다.");
+  }, "파일을 나누지 못했습니다.");
 });
 
 window.addEventListener("pagehide", () => {

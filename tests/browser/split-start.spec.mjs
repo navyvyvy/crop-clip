@@ -221,8 +221,9 @@ test('split downloads finish in reverse order for newest-first folder sorting', 
       await worker.evaluate(() => chrome.storage.local.set({ settings: { enableAutoDownloadSplit: true } }));
       await result.reload();
       await expect(result.locator('#split-button')).toBeEnabled({ timeout: 30000 });
-      await expect(result.locator('#trim-thumbnails')).not.toHaveAttribute('data-loading');
     }
+    await expect(result.locator('#trim-thumbnails .trim-thumbnail').first()).toBeAttached();
+    await expect(result.locator('#trim-thumbnails')).not.toHaveAttribute('data-loading');
     const retained = await result.evaluate(() => window.testObjectUrls.size);
     const downloadPath = testInfo.outputPath(automatic ? 'automatic' : 'manual');
     await mkdir(downloadPath, { recursive: true });

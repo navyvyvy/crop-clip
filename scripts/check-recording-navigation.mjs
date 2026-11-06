@@ -80,6 +80,7 @@ for (const autoFocusResult of [true, false]) {
       const RECORDING_STATUS = { completed: 'completed', idle: 'idle' }, RESULT_TAB_RETRY_ALARM = 'retry';
       const RESULT_TAB_CREATE_ATTEMPTS = 3, RESULT_TAB_RETRY_DELAY_MS = 200, RESULT_TAB_RETRY_ALARM_DELAY_MINUTES = 0.5;
       const delay = async () => {}, scheduleRecordingDeletion = async () => {};
+      ${ts.transpile(file.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'findRecordingResultTab').getText(file), { target: ts.ScriptTarget.ES2022 })}
       ${ts.transpile(openSource.getText(file), { target: ts.ScriptTarget.ES2022 })}
       return openCompletedRecordingResult;
     `)({ runtime: { getURL: path => path, ContextType: { TAB: 'TAB' }, getContexts: async () => [] }, alarms: { clear: async () => {}, create: async () => {} },

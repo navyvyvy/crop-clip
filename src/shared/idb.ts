@@ -101,6 +101,30 @@ export async function getRecording(recordingId: string): Promise<RecordingRecord
   return await requestToPromise<RecordingRecord | undefined>(request);
 }
 
+export async function getRecordingDeletionCandidates(): Promise<{ id: string; endedAt?: number }[]> {
+  const db = await getDb();
+  const tx = db.transaction([RECORDINGS_STORE, PARTS_STORE, CHUNKS_STORE], "readonly");
+  const ids = new Set<string>();
+  const readIds = (store: string) => new Promise<void>((resolve, reject) => {
+    const request = tx.objectStore(store).index("recordingId").openKeyCursor(null, "nextunique");
+    request.onerror = () => reject(request.error ?? new Error("Failed to read recording IDs"));
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return resolve();
+      if (typeof cursor.key === "string") ids.add(cursor.key);
+      cursor.continue();
+    };
+  });
+  const [recordings] = await Promise.all([
+    requestToPromise<RecordingRecord[]>(tx.objectStore(RECORDINGS_STORE).getAll()), readIds(PARTS_STORE), readIds(CHUNKS_STORE),
+  ]);
+  const candidates = new Map<string, { id: string; endedAt?: number }>(recordings.map(({ id, endedAt }) => [id, { id, endedAt }]));
+  for (const id of ids) {
+    if (!candidates.has(id)) candidates.set(id, { id });
+  }
+  return [...candidates.values()];
+}
+
 export async function getPartsByRecordingId(recordingId: string): Promise<RecordingPartRecord[]> {
   const db = await getDb();
   const tx = db.transaction(PARTS_STORE, "readonly");

@@ -13,7 +13,7 @@ function visit(node) {
   ts.forEachChild(node, visit);
 }
 visit(file);
-assert.equal(cleanupBlocks.length, 5, "cover preview, trim, conversion, speed and split completion");
+assert.ok(cleanupBlocks.length > 0, "preview and result jobs must retain cleanup paths");
 for (const block of cleanupBlocks) {
   let releases = 0;
   await new Function("releaseFfmpeg", "hideSplitProgress", "setSplitBusy", `return (async () => ${compile(block)})();`)(
@@ -21,6 +21,41 @@ for (const block of cleanupBlocks) {
   );
   assert.equal(releases, 1, "completed jobs must release the idle conversion engine");
 }
+
+const jobSource = file.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'runResultJob');
+assert.ok(jobSource, 'result operations must share their job lifecycle');
+const jobState = { busy: false, releases: 0, hidden: 0, alerts: [], statuses: [] };
+const runJob = new Function('state', `
+  let workBusy = false;
+  const setSplitBusy = busy => { workBusy = busy; state.busy = busy; };
+  const releaseFfmpeg = async () => { state.releases++; };
+  const hideSplitProgress = () => { state.hidden++; };
+  const setWorkStatus = message => { state.statuses.push(message); };
+  const window = { alert: message => state.alerts.push(message) };
+  ${compile(jobSource.getText(file))}
+  return runResultJob;
+`)(jobState);
+await runJob(async () => { assert.equal(jobState.busy, true); }, 'fallback');
+assert.equal(jobState.busy, false);
+assert.equal(jobState.releases, 1);
+assert.equal(jobState.hidden, 1);
+for (const failure of [new Error('conversion failed'), null]) {
+  await runJob(async () => { throw failure; }, 'fallback');
+  assert.equal(jobState.busy, false, 'failed jobs must unlock controls');
+  assert.equal(jobState.alerts.at(-1), failure?.message ?? 'fallback');
+  assert.equal(jobState.statuses.at(-1), jobState.alerts.at(-1));
+}
+let completeJob, overlappingCalls = 0;
+const runningJob = runJob(() => new Promise(resolve => { completeJob = resolve; }), 'fallback');
+await runJob(async () => { overlappingCalls++; }, 'fallback');
+assert.equal(overlappingCalls, 0, 'an active job must not admit a second conversion');
+assert.equal(jobState.releases, 3, 'a blocked job must not release the active engine');
+completeJob();
+await runningJob;
+assert.equal(jobState.releases, 4);
+assert.equal(jobState.hidden, 4);
+assert.equal(jobState.busy, false);
+console.log('shared result job success, failure and overlap checks passed');
 
 const functions = file.statements.filter((node) => ts.isFunctionDeclaration(node)
   && ["loadFfmpeg", "releaseFfmpeg"].includes(node.name?.text)).map(node => node.getText(file)).join("\n");

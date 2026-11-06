@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import ts from "typescript";
 
-const source = ts.createSourceFile("region_selector.ts", fs.readFileSync(new URL("../src/content/region_selector.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
+const source = ts.createSourceFile("recording.ts", ["region_selector.ts", "recording_session.ts"].map(name => fs.readFileSync(new URL(`../src/content/${name}`, import.meta.url), "utf8")).join("\n").replace(/^export /gm, ""), ts.ScriptTarget.Latest, true);
 const functions = new Map();
 function visit(node) {
   if (ts.isFunctionDeclaration(node)) functions.set(node.name?.text, node.getText(source));
@@ -147,6 +147,8 @@ for (const full of [false, true]) {
     assert.match(attrs.get('aria-label'), queued === 'CANCEL_RECORDING' ? /취소 예정/ : queued ? /정지 예정/ : /시작 중/);
     assert.equal(control.disabled, false, 'pending start must still accept a stop request');
     assert.equal(attrs.has('data-recording'), false, 'pending start must not pretend to be recording');
+    render(control, full, full ? 'START_FULL_RECORDING' : 'START_RECORDING', queued, { status: 'idle', recordingElsewhere: true });
+    assert.equal(control.disabled, false, 'the starting tab must keep accepting stop intent before its session is ready');
   }
   const pendingIcon = control.innerHTML;
   render(control, full, null, null, { status: 'idle' });
@@ -156,6 +158,12 @@ for (const full of [false, true]) {
   render(control, full, null, null, { status: 'recording', mode: full ? 'full' : 'region' });
   assert.match(attrs.get('aria-label'), /녹화 정지/);
   assert.equal(attrs.has('data-recording'), true);
+  render(control, full, null, null, { status: 'idle', recordingElsewhere: true });
+  assert.equal(control.disabled, true, 'all recording controls must be disabled when another tab owns recording');
+  assert.match(attrs.get('aria-label'), /다른 탭/);
+  assert.equal(attrs.has('data-recording'), false, 'other tabs must not offer to stop the recording');
+  render(control, full, null, null, { status: 'idle' });
+  assert.equal(control.disabled, false, 'recording controls must unlock after the other tab stops');
 }
 for (const mode of ['region', 'full']) for (const outcome of ['stop', 'cancel', 'failure', 'rejection', 'early-stop']) {
   const commands = [], replies = [], presentations = [];
@@ -192,6 +200,12 @@ for (const mode of ['region', 'full']) for (const outcome of ['stop', 'cancel', 
   }
   api.setState({ status: 'idle' });
   assert.equal(presentations.at(-1), null, 'success and failure must clear the pending presentation');
+  api.setState({ status: 'idle', recordingElsewhere: true });
+  const blocked = commands.length;
+  await api.toggle();
+  await api.cancel();
+  assert.equal(commands.length, blocked, 'another tab must not start, stop or cancel the recording through shortcuts');
+  api.setState({ status: 'idle' });
   const next = api.toggle();
   assert.equal(commands.at(-1), mode === 'region' ? 'START_RECORDING' : 'START_FULL_RECORDING', 'lock must release after success or failure');
   replies.shift().resolve({ ok: true });

@@ -1,3 +1,4 @@
+import { stopRecordingStream, releaseDirectRecordingCapture, releaseDirectRecordingRecorder, requestDirectPartStop, type DirectRecordingSession } from "./recording_session.js";
 import { getVideoStream } from "./player_capture.js";
 import { createVideoFrameCapture } from "./frame_capture.js";
 import { computeDirectLayout, scaleLayout, type DirectCrop, type DirectCropPlacement } from "./crop_layout.js";
@@ -36,7 +37,6 @@ const RESIZE_MAGNIFIER_SAMPLE_HEIGHT = 21;
 const SNAP_DISTANCE = 10;
 const MIN_ACTIVE_REGIONS = 2;
 const MAX_ACTIVE_REGIONS = 4;
-
 
 const VIDEO_FRAME_READY_TIMEOUT_MS = 3_000;
 const CHZZK_TOOL_DISCOVERY_INTERVAL_MS = 500;
@@ -80,44 +80,11 @@ type RegionSelection = import("../shared/types.js").RegionSelection;
 type Settings = import("../shared/types.js").Settings;
 type ShortcutAction = import("../shared/types.js").ShortcutAction;
 type ShortcutKeys = import("../shared/types.js").ShortcutKeys;
-type LocalRecordingState = Pick<RecordingState, "status" | "startedAt" | "mode">;
+type LocalRecordingState = Pick<RecordingState, "status" | "startedAt" | "mode"> & { recordingElsewhere?: boolean };
 
 type GuideSide = "n" | "s" | "w" | "e";
 type RegionGeometryResponse = MessageResponse<RegionSelection>;
 type RegionGeometriesResponse = MessageResponse<RegionSelection[]>;
-
-interface DirectRecordingSession {
-  recordingId: string;
-  settings: Settings;
-  video: HTMLVideoElement | null;
-  sourceStream: MediaStream;
-  outputStream: MediaStream;
-  canvas: HTMLCanvasElement | null;
-  recorder?: MediaRecorder;
-  mimeType: string;
-  extension: "webm" | "mp4";
-  baseName: string;
-  checkpointIndex: number;
-  checkpointSaveChain: Promise<void>;
-  pendingChunks: Array<{ blob: Blob; capturedAt: number }>;
-  pendingBytes: number;
-  checkpointSaving: boolean;
-  checkpointAbort: AbortController;
-  checkpointError?: Error;
-  createdAt: number;
-  endedAt?: number;
-  drawTimerId: number;
-  stopRequested: boolean;
-  cancelRequested: boolean;
-  cleanedUp: boolean;
-  closingPart: boolean;
-  finishPromise: Promise<void>;
-  resolveFinish: () => void;
-  rejectFinish: (error: Error) => void;
-  placements: DirectCropPlacement[];
-  sourceChangeCleanup?: () => void;
-  frameCapture?: NonNullable<ReturnType<typeof createVideoFrameCapture>>;
-}
 
 let currentOverlay: HTMLDivElement | null = null;
 let currentBorder: HTMLDivElement | null = null;
@@ -792,6 +759,11 @@ async function runRecordingCommand(type: RecordingControlCommand): Promise<void>
     return;
   }
 
+  if (currentRecordingState.recordingElsewhere) {
+    showPlayerFeedback("다른 탭에서 녹화 중입니다.");
+    return;
+  }
+
   recordingCommandInFlight = type;
   let succeeded = false;
   try {
@@ -953,35 +925,6 @@ async function saveDirectCheckpoints(session: DirectRecordingSession): Promise<v
   }
 }
 
-function stopRecordingStream(stream: MediaStream): void {
-  stream.getTracks().forEach((track) => {
-    track.stop();
-    stream.removeTrack(track);
-  });
-}
-
-function releaseDirectRecordingCapture(session: DirectRecordingSession): void {
-  if (session.cleanedUp) {
-    return;
-  }
-
-  session.cleanedUp = true;
-  window.clearInterval(session.drawTimerId);
-  session.sourceChangeCleanup?.();
-  session.sourceChangeCleanup = undefined;
-  session.frameCapture?.close();
-  session.frameCapture = undefined;
-  stopRecordingStream(session.sourceStream);
-  stopRecordingStream(session.outputStream);
-  if (session.canvas) {
-    session.canvas.width = 0;
-    session.canvas.height = 0;
-    session.canvas.remove();
-  }
-  session.canvas = null;
-  session.video = null;
-}
-
 function cleanupDirectRecordingSession(session: DirectRecordingSession): void {
   releaseDirectRecordingCapture(session);
   if (directSession === session) {
@@ -1007,6 +950,8 @@ function abortDirectRecordingSession(session: DirectRecordingSession): void {
   session.cancelRequested = true;
   session.stopRequested = true;
   requestDirectPartStop(session);
+  // Cancelled recordings do not need the final data or a delayed stop callback.
+  releaseDirectRecordingRecorder(session);
   session.pendingChunks.length = 0;
   session.pendingBytes = 0;
   session.checkpointAbort.abort();
@@ -1026,12 +971,7 @@ function failDirectRecordingSession(session: DirectRecordingSession, error: Erro
 
 async function finishDirectRecording(session: DirectRecordingSession): Promise<void> {
   releaseDirectRecordingCapture(session);
-  if (session.recorder) {
-    session.recorder.ondataavailable = null;
-    session.recorder.onerror = null;
-    session.recorder.onstop = null;
-    session.recorder = undefined;
-  }
+  releaseDirectRecordingRecorder(session);
   try {
     if (!session.cancelRequested) await session.checkpointSaveChain;
     if (session.cancelRequested) {
@@ -1066,21 +1006,6 @@ function watchDirectRecordingSource(session: DirectRecordingSession): void {
     events.forEach(event => video.removeEventListener(event, stop));
     sourceTracks.forEach((track) => track.removeEventListener("ended", stop));
   };
-}
-
-function requestDirectPartStop(session: DirectRecordingSession): void {
-  if (!session.recorder || session.recorder.state === "inactive" || session.closingPart) {
-    return;
-  }
-
-  session.closingPart = true;
-  session.endedAt ??= Date.now();
-  try {
-    // stop() delivers the final data; keep its handlers until onstop finishes saving.
-    session.recorder.stop();
-  } finally {
-    releaseDirectRecordingCapture(session);
-  }
 }
 
 async function startDirectPart(session: DirectRecordingSession): Promise<void> {
@@ -1154,15 +1079,14 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
   canvas.width = output.width;
   canvas.height = output.height;
 
-  const context = canvas.getContext("2d", { alpha: false, desynchronized: true });
-  if (!context) {
-    return { ok: false, error: "녹화 화면을 준비하지 못했습니다." };
-  }
+  let context: CanvasRenderingContext2D | null = null;
 
   const frameCapture = crops.length === 1
     ? createVideoFrameCapture(video, output.width, output.height, handleVideoFrameError.bind(null, command.recordingId), mime.extension !== "mp4")
     : null;
   const paintCanvas = (placements: DirectCropPlacement[]) => {
+    context ??= canvas.getContext("2d", { alpha: false, desynchronized: true });
+    if (!context) throw new Error("녹화 화면을 준비하지 못했습니다.");
     context.fillStyle = "#000";
     context.fillRect(0, 0, output.width, output.height);
     for (const placement of placements) {
@@ -1990,7 +1914,7 @@ async function loadState(): Promise<{ region: RegionSelection | null; regions: R
 function normalizeRecordingState(raw: unknown, activeRecordingId?: string): LocalRecordingState {
   const value = raw as Partial<RecordingState> | null | undefined;
   if (value?.status === RECORDING_STATUS.recording && value.recordingId !== activeRecordingId) {
-    return { status: RECORDING_STATUS.idle };
+    return { status: RECORDING_STATUS.idle, recordingElsewhere: true };
   }
   if (value?.status === RECORDING_STATUS.recording || value?.status === RECORDING_STATUS.completed || value?.status === RECORDING_STATUS.error) {
     return {
@@ -2079,7 +2003,7 @@ async function initializePageState(): Promise<void> {
   shortcutsEnabled = state.shortcutsEnabled;
   shortcutKeys = state.shortcutKeys;
 
-  if (state.recordingState.status !== RECORDING_STATUS.recording && state.regions.length > 0) {
+  if (state.recordingState.status !== RECORDING_STATUS.recording && !state.recordingState.recordingElsewhere && state.regions.length > 0) {
     await clearRegion();
     currentRegion = null;
     currentRegions = [];
@@ -2434,15 +2358,16 @@ function setRecordButtonContent(button: HTMLElement, full = false): void {
   const ownRecording = recording && (currentRecordingState.mode === RECORDING_MODE.full) === full;
   const command = recordingCommandInFlight;
   const starting = command === (full ? "START_FULL_RECORDING" : "START_RECORDING");
+  const blocked = currentRecordingState.recordingElsewhere === true && !starting;
   const pending = starting || command === "STOP_RECORDING" || command === "CANCEL_RECORDING";
   const pendingLabel = starting
     ? pendingRecordingTerminalCommand === "CANCEL_RECORDING" ? "시작 후 취소 예정" : pendingRecordingTerminalCommand ? "시작 후 정지 예정" : "시작 중 · 다시 누르면 정지"
     : command === "CANCEL_RECORDING" ? "취소 중" : "저장 중";
-  const label = withShortcut(`${full ? "전체 " : ""}녹화 ${pending ? pendingLabel : ownRecording ? "정지" : "시작"}`, full ? "fullRecord" : "regionRecord");
+  const label = withShortcut(blocked ? "다른 탭에서 녹화 중" : `${full ? "전체 " : ""}녹화 ${pending ? pendingLabel : ownRecording ? "정지" : "시작"}`, full ? "fullRecord" : "regionRecord");
   button.toggleAttribute("data-recording", ownRecording);
   button.setAttribute("aria-busy", String(pending));
   if (button instanceof HTMLButtonElement) {
-    button.disabled = recording && !ownRecording;
+    button.disabled = blocked || (recording && !ownRecording);
   }
   const icon = getRecordIconSvg(ownRecording, pending);
   if (full) {

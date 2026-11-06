@@ -10,7 +10,7 @@ if (!global.gc) {
   process.exit(result.status ?? 1);
 }
 
-const text = ["region_selector.ts", "player_capture.ts"].map(name => fs.readFileSync(new URL(`../src/content/${name}`, import.meta.url), "utf8")).join("\n").replace(/^export /gm, "");
+const text = ["region_selector.ts", "player_capture.ts", "recording_session.ts"].map(name => fs.readFileSync(new URL(`../src/content/${name}`, import.meta.url), "utf8")).join("\n").replace(/^export /gm, "");
 const file = ts.createSourceFile("region_selector.ts", text, ts.ScriptTarget.Latest, true);
 const functions = [];
 const startupFunctions = [];
@@ -26,7 +26,7 @@ function visit(node) {
   if (ts.isFunctionDeclaration(node) && node.name?.text === "attachBorderControls") borderControlsSource = node.getText(file);
   if (ts.isFunctionDeclaration(node) && ["startDirectRecording", "prepareDirectRecordingEncoder", "ignoreRecordingRejection", "releaseDirectRecordingCapture", "stopRecordingStream"].includes(node.name?.text)) startupFunctions.push(node.getText(file));
   if (ts.isVariableDeclaration(node) && node.name.getText(file) === "drawFrame") drawFrameSource = node.initializer.getText(file);
-  if (ts.isFunctionDeclaration(node) && ["getVideoStream", "handleDetachedPlayer", "stopRegionLayoutWatch", "stopRecordingStream", "releaseDirectRecordingCapture", "cleanupDirectRecordingSession", "startDirectPart", "finalizeDirectRecording", "cancelDirectRecordingSession", "abortDirectRecordingSession", "failDirectRecordingSession", "finishDirectRecording", "requestDirectPartStop"].includes(node.name?.text)) {
+  if (ts.isFunctionDeclaration(node) && ["getVideoStream", "handleDetachedPlayer", "stopRegionLayoutWatch", "stopRecordingStream", "releaseDirectRecordingCapture", "releaseDirectRecordingRecorder", "cleanupDirectRecordingSession", "startDirectPart", "finalizeDirectRecording", "cancelDirectRecordingSession", "abortDirectRecordingSession", "failDirectRecordingSession", "finishDirectRecording", "requestDirectPartStop"].includes(node.name?.text)) {
     functions.push(node.getText(file));
   }
   ts.forEachChild(node, visit);
@@ -60,7 +60,13 @@ for (const cancelRequested of [false, true]) {
   assert.equal(session.releases, 1, "release capture without waiting for the encoder's stop event");
 }
 console.log("recording cancellation flush checks passed");
-const { cleanup, getVideoStream, startDirectPart, messages, observers, detachTimers, layoutWatch } = new Function("MediaStream", `
+for (const cancelRequested of [false, true]) {
+  const session = { cancelRequested, recorder: { state: 'recording', stop() { throw Error('stop failed'); } } };
+  if (cancelRequested) assert.doesNotThrow(() => stopPart(session));
+  else assert.throws(() => stopPart(session), /stop failed/, 'normal stop failures must still reach recovery');
+  assert.equal(session.releases, 1, 'stop errors must still release capture');
+}
+const { cleanup, cancel, getVideoStream, startDirectPart, messages, observers, detachTimers, layoutWatch } = new Function("MediaStream", `
   let directSession = null;
   let regionLayoutVideo = null, regionLayoutObserver = null, regionLayoutSyncFrame = null;
   const layoutWatch = { disconnected: false, get video() { return regionLayoutVideo; },
@@ -91,7 +97,7 @@ const { cleanup, getVideoStream, startDirectPart, messages, observers, detachTim
     stop() { this.state = 'inactive'; }
   }
   ${ts.transpile(functions.join("\n"), { target: ts.ScriptTarget.ES2022 })}
-  return { cleanup: cleanupDirectRecordingSession, getVideoStream: video => getVideoStream(video, handleDetachedPlayer), startDirectPart, messages, observers, detachTimers, layoutWatch };
+  return { cleanup: cleanupDirectRecordingSession, cancel: cancelDirectRecordingSession, getVideoStream: video => getVideoStream(video, handleDetachedPlayer), startDirectPart, messages, observers, detachTimers, layoutWatch };
 `)(Stream);
 function track(kind = "video") { return { kind, enabled: true, readyState: "live", clone() { return track(this.kind); }, stop() { this.readyState = "ended"; } }; }
 function Stream(tracks) { return new FakeStream(tracks); }
@@ -225,6 +231,35 @@ for (const cancelWhileSaving of [false, true]) {
 }
 console.log("recording cleanup checks passed");
 
+for (const state of ["recording", "inactive", "closing", "stop-error"]) {
+  let finished = false;
+  const session = {
+    recordingId: 'cancel-without-stop-event', settings: {},
+    sourceStream: new Stream([track('audio')]), outputStream: new Stream([track()]),
+    canvas: { width: 1920, height: 1080, remove() {} },
+    pendingChunks: [new Blob(['queued'])], pendingBytes: 6, checkpointAbort: new AbortController(),
+    resolveFinish() { finished = true; },
+  };
+  await startDirectPart(session);
+  const recorder = session.recorder;
+  if (state === 'inactive') recorder.state = 'inactive';
+  if (state === 'closing') session.closingPart = true;
+  if (state === 'stop-error') recorder.stop = () => { throw new Error('encoder stop failed'); };
+  cancel(session); // Deliberately never deliver the native stop event.
+  assert.equal(recorder.ondataavailable, null, 'cancel must detach data callbacks without waiting for stop');
+  assert.equal(recorder.onerror, null);
+  assert.equal(recorder.onstop, null);
+  assert.equal(session.recorder, undefined, 'cancel must drop the encoder reference immediately');
+  assert.equal(session.canvas, null);
+  assert.equal(session.outputStream.getTracks().length, 0);
+  assert.equal(session.sourceStream.getTracks().length, 0);
+  assert.equal(session.pendingBytes, 0);
+  assert.equal(session.pendingChunks.length, 0);
+  assert.equal(session.checkpointAbort.signal.aborted, true);
+  assert.equal(finished, true);
+}
+console.log('cancel without stop event cleanup checks passed');
+
 for (const failure of ["encoder", "storage", "finalize-response", "finalize-rejection"]) {
   let resolveFinish, rejectFinish;
   const finished = new Promise((resolve, reject) => { resolveFinish = resolve; rejectFinish = reject; });
@@ -238,10 +273,11 @@ for (const failure of ["encoder", "storage", "finalize-response", "finalize-reje
   const before = messages.length;
   await startDirectPart(session);
   const recorder = session.recorder;
+  const onstop = recorder.onstop;
   if (failure === "encoder") recorder.onerror();
   else if (failure === "storage") session.checkpointError = new Error("disk failed");
   recorder.state = "inactive";
-  recorder.onstop();
+  onstop();
   await rejected;
   assert.equal(session.pendingBytes, 0);
   assert.equal(session.pendingChunks.length, 0);
@@ -319,7 +355,7 @@ console.log("recording border timer cleanup checks passed");
 
 // Exercise the real startup scope: clearing session fields alone cannot detect
 // a pending Promise handler that still retains the drawing closure.
-const createStartup = new Function("playerState", "mimeType", `
+const createStartup = new Function("playerState", "mimeType", "nativeCapture", `
   let directSession = null, currentRecordingState;
   const currentRegions = [], timers = new Map(), refs = {};
   const window = { setInterval(fn) { timers.set(1, fn); return 1; }, clearInterval(id) { timers.delete(id); } };
@@ -328,7 +364,7 @@ const createStartup = new Function("playerState", "mimeType", `
   }
   const document = { createElement() {
     const canvas = { remove() {}, captureStream: () => new MediaStream(),
-      getContext() { return { canvas: this, fillRect() {}, drawImage() {} }; } };
+      getContext() { refs.canvasContexts = (refs.canvasContexts ?? 0) + 1; return { canvas: this, fillRect() {}, drawImage() {} }; } };
     refs.canvas = new WeakRef(canvas); return canvas;
   } };
   const findPrimaryVideoElement = () => {
@@ -340,13 +376,18 @@ const createStartup = new Function("playerState", "mimeType", `
   const computeDirectLayout = () => ({ output: { width: 1920, height: 1080 }, placements: [] });
   const selectDirectMimeType = () => ({ mimeType: mimeType ?? 'video/webm', extension: mimeType?.startsWith('video/mp4') ? 'mp4' : 'webm' });
   const getVideoStream = () => new MediaStream(), handleDetachedPlayer = () => {};
-  const createVideoFrameCapture = () => null, handleVideoFrameError = () => {};
+  const createVideoFrameCapture = () => nativeCapture ? {
+    stream: new MediaStream(), close() {},
+    paint(_placement, fallback) { if (nativeCapture === 'fallback') fallback(); },
+  } : null;
+  const handleVideoFrameError = () => {};
   const getCropLayoutKey = () => '', buildBaseName = () => 'recording';
   const startDirectPart = async () => {};
   const watchDirectRecordingSource = () => {}, showSelectionBorders = () => {};
   const requestChzzkToolSync = () => {}, syncChzzkRecordTimer = () => {};
   const loadState = async () => ({ recordingState: {} });
   const HIGH_RECORDING_FRAME_RATE = 60, STANDARD_RECORDING_FRAME_RATE = 30, MILLISECONDS_PER_SECOND = 1000;
+  const HTMLMediaElement = { HAVE_CURRENT_DATA: 2 };
   ${ts.transpile(startupFunctions.join("\n"), { target: ts.ScriptTarget.ES2022 })}
   return { start: startDirectRecording, refs, timers,
     stop() { releaseDirectRecordingCapture(directSession); },
@@ -367,6 +408,15 @@ for (const mime of ['video/webm;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp
   const recording = createStartup({ muted: false, volume: 1 }, mime);
   await recording.start({ recordingId: 'codec-preparation', region: {}, settings: { outputFormat: mime.startsWith('video/mp4') ? 'mp4' : 'webm' } });
   assert.equal(recording.refs.encoderPreparations ?? 0, /vp[89]/.test(mime) ? 0 : 1, 'H.264 preparation must depend on the codec, including WebM');
+  recording.stop(); recording.finish();
+}
+for (const nativeCapture of [true, 'fallback']) {
+  const recording = createStartup({ muted: false, volume: 1 }, 'video/webm;codecs=avc1', nativeCapture);
+  await recording.start({ recordingId: 'lazy-canvas', region: {}, settings: {} });
+  assert.equal(recording.refs.canvasContexts ?? 0, nativeCapture === true ? 0 : 1,
+    'native capture must allocate a canvas context only when fallback painting is needed');
+  recording.timers.get(1)();
+  assert.equal(recording.refs.canvasContexts ?? 0, nativeCapture === true ? 0 : 1, 'fallback must reuse its prepared context');
   recording.stop(); recording.finish();
 }
 const startup = createStartup({ muted: false, volume: 1 });

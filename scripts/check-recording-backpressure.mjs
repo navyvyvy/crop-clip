@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import ts from "typescript";
 
-const source = ts.createSourceFile("region_selector.ts", fs.readFileSync(new URL("../src/content/region_selector.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
-const names = ["queueDirectChunkCheckpoint", "saveDirectCheckpoints", "sendCheckpointMessage", "getRecordingChunkSliceRanges", "cancelDirectRecordingSession", "abortDirectRecordingSession"];
+const source = ts.createSourceFile("recording.ts", ["region_selector.ts", "recording_session.ts"].map(name => fs.readFileSync(new URL(`../src/content/${name}`, import.meta.url), "utf8")).join("\n").replace(/^export /gm, ""), ts.ScriptTarget.Latest, true);
+const names = ["queueDirectChunkCheckpoint", "saveDirectCheckpoints", "sendCheckpointMessage", "getRecordingChunkSliceRanges", "cancelDirectRecordingSession", "abortDirectRecordingSession", "releaseDirectRecordingRecorder"];
 const functions = [];
 function visit(node) {
   if (ts.isFunctionDeclaration(node) && names.includes(node.name?.text)) functions.push(node.getText(source));

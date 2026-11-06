@@ -99,8 +99,11 @@ assert.match(resultText, /await markAutoDownloadHandled\(\);\s*allowRecordingDel
 assert.match(resultText, /if \(allowRecordingDeletion\) \{\s*void scheduleRecordingDeletion\(\)/);
 assert.match(resultText, /if \(autoDownloadSplit\) \{\s*setWorkStatus\([^;]+;\s*await downloadSourcesAndConfirm/);
 assert.doesNotMatch(messagesText, /CANCEL_RECORDING_DELETION/);
-assert.doesNotMatch(idbText, /openKeyCursor/);
-assert.match(idbText, /\.openCursor\(IDBKeyRange\.only\(recordingId\)\)/);
+const idbFile = ts.createSourceFile("idb.ts", idbText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+const deletionCursor = idbFile.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "deleteRecordsByRecordingId");
+assert.ok(deletionCursor);
+assert.doesNotMatch(deletionCursor.getText(idbFile), /openKeyCursor/);
+assert.match(deletionCursor.getText(idbFile), /\.openCursor\(IDBKeyRange\.only\(recordingId\)\)/);
 
 const resultHtml = fs.readFileSync(new URL("../src/result/result.html", import.meta.url), "utf8");
 assert.match(resultHtml, /data-split-count="3"[^>]*>3분할<\/button>/);
@@ -311,7 +314,7 @@ assert.deepEqual(terminalOrder, ["first-start"]);
 releaseFirstTerminalOperation();
 assert.deepEqual(await Promise.all([firstTerminalOperation, secondTerminalOperation]), [1, 2]);
 assert.deepEqual(terminalOrder, ["first-start", "first-end", "second"]);
-assert.deepEqual(normalizeRecordingState({ status: "recording", recordingId: "recording-tab", startedAt: 1_000, mode: "full" }, "other-tab"), { status: "idle" });
+assert.deepEqual(normalizeRecordingState({ status: "recording", recordingId: "recording-tab", startedAt: 1_000, mode: "full" }, "other-tab"), { status: "idle", recordingElsewhere: true });
 assert.deepEqual(normalizeRecordingState({ status: "recording", recordingId: "recording-tab", startedAt: 1_000, mode: "full" }, "recording-tab"), { status: "recording", startedAt: 1_000, mode: "full" });
 const minimalRegion = { x: 10, y: 20, width: 300, height: 200 };
 assert.deepEqual(normalizeRegion(minimalRegion), minimalRegion);
