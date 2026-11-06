@@ -2,7 +2,7 @@ import { readFile, writeFile, appendFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
 export function extractReleaseNotes(readme, tag) {
-  const sections = readme.matchAll(/<details>\s*<summary><strong>([^<]+)<\/strong><\/summary>([\s\S]*?)<\/details>/g);
+  const sections = readme.matchAll(/<details(?:\s+open)?>\s*<summary><strong>([^<]+)<\/strong><\/summary>([\s\S]*?)<\/details>/g);
   for (const [, version, content] of sections) {
     if (version.trim() !== tag) continue;
     const notes = content.replace(/\r\n/g, "\n").trim();
