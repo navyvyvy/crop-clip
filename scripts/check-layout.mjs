@@ -314,7 +314,7 @@ assert.deepEqual(terminalOrder, ["first-start"]);
 releaseFirstTerminalOperation();
 assert.deepEqual(await Promise.all([firstTerminalOperation, secondTerminalOperation]), [1, 2]);
 assert.deepEqual(terminalOrder, ["first-start", "first-end", "second"]);
-assert.deepEqual(normalizeRecordingState({ status: "recording", recordingId: "recording-tab", startedAt: 1_000, mode: "full" }, "other-tab"), { status: "idle", recordingElsewhere: true });
+assert.deepEqual(normalizeRecordingState({ status: "recording", recordingId: "recording-tab", startedAt: 1_000, mode: "full" }, "other-tab"), { status: "idle", recordingElsewhere: true, mode: "full" });
 assert.deepEqual(normalizeRecordingState({ status: "recording", recordingId: "recording-tab", startedAt: 1_000, mode: "full" }, "recording-tab"), { status: "recording", startedAt: 1_000, mode: "full" });
 const minimalRegion = { x: 10, y: 20, width: 300, height: 200 };
 assert.deepEqual(normalizeRegion(minimalRegion), minimalRegion);

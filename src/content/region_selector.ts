@@ -106,6 +106,7 @@ let removeSelectionHandlers: (() => void) | null = null;
 let removeBorderHandlers: (() => void) | null = null;
 let currentRecordingState: LocalRecordingState = { status: RECORDING_STATUS.idle };
 let directSession: DirectRecordingSession | null = null;
+let preparedRecordingId: string | undefined;
 type RecordingControlCommand = "START_RECORDING" | "START_FULL_RECORDING" | "STOP_RECORDING" | "CANCEL_RECORDING";
 let recordingCommandInFlight: RecordingControlCommand | null = null;
 let pendingRecordingTerminalCommand: "STOP_RECORDING" | "CANCEL_RECORDING" | null = null;
@@ -1256,7 +1257,7 @@ function removeSelectionBorders(): void {
 function showSelectionBorders(regions: RegionSelection[]): void {
   removeSelectionBorders();
 
-  if (regions.length === 0) {
+  if (regions.length === 0 || currentRecordingState.recordingElsewhere) {
     return;
   }
 
@@ -1424,7 +1425,7 @@ function syncBorderState(): void {
     border.dataset.active = active ? "true" : "false";
     border.style.setProperty("--crop-clip-region-outline", rgba(accent, active ? 0.96 : 0.5));
     border.style.setProperty("--crop-clip-region-shadow", rgba(accent, active ? 0.62 : 0.28));
-    border.querySelector<HTMLButtonElement>(".add-region")?.toggleAttribute("hidden", !active || !multiRegionEnabled || currentRegions.length >= getActiveRegionLimit() || isRegionRecordingActive());
+    border.querySelector<HTMLButtonElement>(".add-region")?.toggleAttribute("hidden", !active || !multiRegionEnabled || currentRegions.length >= getActiveRegionLimit() || isRegionEditingLocked());
     border.querySelector<HTMLButtonElement>(".record-region")?.toggleAttribute("hidden", !active);
   }
   syncBorderGuides();
@@ -1432,23 +1433,13 @@ function syncBorderState(): void {
 }
 
 function removeRegionAtIndex(index: number): void {
-  if (currentRegions.length === 0) {
+  const region = currentRegions[index];
+  if (!region || isRegionDeletionLocked()) {
     return;
   }
 
-  if (currentRegions.length === 1) {
-    currentRegion = null;
-    currentRegions = [];
-    void clearRegion();
-    showSelectionBorders([]);
-    return;
-  }
-
-  currentRegions.splice(index, 1);
-  activeRegionIndex = Math.min(index, currentRegions.length - 1);
-  currentRegion = getActiveRegion();
-  void saveRegions(currentRegions);
-  showSelectionBorders(currentRegions);
+  activeRegionIndex = index;
+  clearSavedRegions(region);
 }
 
 function addGuide(guides: Map<number, Set<GuideSide>>, index: number, side: GuideSide): void {
@@ -1587,7 +1578,8 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
       return;
     }
 
-    const isRegionRecording = isRegionRecordingActive();
+    const editingLocked = isRegionEditingLocked();
+    const isRegionRecording = currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode !== RECORDING_MODE.full;
     recordButton.hidden = index !== activeRegionIndex;
     setRecordButtonContent(recordButton);
     if (cancelButton) {
@@ -1606,21 +1598,19 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
       const clearLabel = withShortcut("영역 해제", "clearRegion");
       clearButton.setAttribute("aria-label", clearLabel);
       clearButton.title = clearLabel;
+      clearButton.disabled = isRegionDeletionLocked();
     }
-    if (isRegionRecording) {
+    if (editingLocked) {
       border.dataset.recording = "true";
     } else {
       delete border.dataset.recording;
     }
-    if (clearButton) {
-      clearButton.disabled = isRegionRecording;
-    }
     if (moveButton) {
-      moveButton.disabled = isRegionRecording;
+      moveButton.disabled = editingLocked;
     }
     if (addButton) {
-      addButton.hidden = index !== activeRegionIndex || !multiRegionEnabled || currentRegions.length >= getActiveRegionLimit() || isRegionRecording;
-      addButton.disabled = isRegionRecording;
+      addButton.hidden = index !== activeRegionIndex || !multiRegionEnabled || currentRegions.length >= getActiveRegionLimit() || editingLocked;
+      addButton.disabled = editingLocked;
     }
     if (recordTime) {
       recordTime.hidden = !isRegionRecording || index !== activeRegionIndex;
@@ -1642,6 +1632,7 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
   const onRecord = (event: MouseEvent) => {
     event.preventDefault();
     event.stopPropagation();
+    if (recordButton?.getAttribute("aria-disabled") === "true") return;
     // Storage changes rebuild the controls; late replies must not update this border.
     void toggleRecording().catch((error: Error) => window.alert(error.message));
   };
@@ -1675,10 +1666,6 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
   const onClear = (event: MouseEvent) => {
     event.preventDefault();
     event.stopPropagation();
-    if (isRegionRecordingActive()) {
-      return;
-    }
-
     removeRegionAtIndex(index);
   };
 
@@ -1687,17 +1674,17 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
   const onAdd = (event: MouseEvent) => {
     event.preventDefault();
     event.stopPropagation();
-    if (isRegionRecordingActive() || !multiRegionEnabled || currentRegions.length >= getActiveRegionLimit()) {
+    if (isRegionEditingLocked() || !multiRegionEnabled || currentRegions.length >= getActiveRegionLimit()) {
       return;
     }
-    startSelection();
+    requestRegionSelection();
   };
 
   bindClick(addButton, onAdd);
 
   const startMove = (event: PointerEvent) => {
     const region = currentRegions[index];
-    if (!region || (currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode !== RECORDING_MODE.full)) {
+    if (!region || isRegionEditingLocked()) {
       return;
     }
 
@@ -1761,7 +1748,7 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
     const target = event.currentTarget as HTMLElement;
     const edge = target.dataset.edge;
     const region = currentRegions[index];
-    if (!edge || !region || (currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode !== RECORDING_MODE.full)) {
+    if (!edge || !region || isRegionEditingLocked()) {
       return;
     }
 
@@ -1898,7 +1885,7 @@ async function loadState(): Promise<{ region: RegionSelection | null; regions: R
   return {
     region,
     regions: normalizeRegions(result.regions, region),
-    recordingState: normalizeRecordingState(result.recordingState, directSession?.recordingId),
+    recordingState: normalizeRecordingState(result.recordingState, getLocalRecordingId()),
     multiRegionEnabled: settings.enableMultiRegion,
     multiRegionMaxCount: settings.multiRegionMaxCount,
     fullRecordButtonEnabled: settings.enableFullRecordButton,
@@ -1911,59 +1898,57 @@ async function loadState(): Promise<{ region: RegionSelection | null; regions: R
   };
 }
 
+function getLocalRecordingId(): string | undefined {
+  if (directSession) return directSession.recordingId;
+  if (recordingCommandInFlight === "START_RECORDING" || recordingCommandInFlight === "START_FULL_RECORDING") {
+    return preparedRecordingId;
+  }
+  return undefined;
+}
+
 function normalizeRecordingState(raw: unknown, activeRecordingId?: string): LocalRecordingState {
   const value = raw as Partial<RecordingState> | null | undefined;
-  if (value?.status === RECORDING_STATUS.recording && value.recordingId !== activeRecordingId) {
-    return { status: RECORDING_STATUS.idle, recordingElsewhere: true };
+  const mode = value?.mode === RECORDING_MODE.region || value?.mode === RECORDING_MODE.full ? value.mode : undefined;
+  if (value?.status === RECORDING_STATUS.recording && (!activeRecordingId || value.recordingId !== activeRecordingId)) {
+    return { status: RECORDING_STATUS.idle, recordingElsewhere: true, mode };
   }
   if (value?.status === RECORDING_STATUS.recording || value?.status === RECORDING_STATUS.completed || value?.status === RECORDING_STATUS.error) {
     return {
       status: value.status,
       startedAt: Number.isFinite(value.startedAt as number) ? Number(value.startedAt) : undefined,
-      mode: value.mode === RECORDING_MODE.region || value.mode === RECORDING_MODE.full ? value.mode : undefined,
+      mode,
     };
   }
 
   return { status: RECORDING_STATUS.idle };
 }
 
-function trimRegionsToLimit(): void {
+function trimRegionsToLimit(): boolean {
   const limit = getActiveRegionLimit();
-  if (currentRegions.length <= limit) {
-    return;
+  if (currentRegions.length <= limit || isRegionEditingLocked()) {
+    return false;
   }
   currentRegions = currentRegions.slice(0, limit);
   activeRegionIndex = Math.min(activeRegionIndex, currentRegions.length - 1);
   currentRegion = getActiveRegion();
-  void saveRegions(currentRegions);
-  showSelectionBorders(currentRegions);
+  return true;
 }
 
-async function saveRegions(regions: RegionSelection[]): Promise<boolean> {
-  if (!isExtensionContextAvailable()) {
-    return false;
-  }
-
+async function saveRegions(regions: RegionSelection[]): Promise<MessageResponse> {
   const nextRegions = regions.slice(0, getActiveRegionLimit());
   try {
-    await chrome.storage.local.set({ region: nextRegions[0] ?? null, regions: nextRegions });
-    return true;
-  } catch {
-    return false;
+    const response = await sendRuntimeMessage({ type: "SAVE_REGIONS", regions: nextRegions });
+    if (!response.ok) await refreshBorder();
+    return response;
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "녹화 영역을 저장하지 못했습니다." };
   }
 }
 
-async function clearRegion(): Promise<boolean> {
-  if (!isExtensionContextAvailable()) {
-    return false;
-  }
-
-  try {
-    await chrome.storage.local.set({ region: null, regions: [] });
-    return true;
-  } catch {
-    return false;
-  }
+function clearSavedRegions(region?: RegionSelection): void {
+  void sendRuntimeMessage({ type: "CLEAR_REGION", region }).then(response => {
+    if (!response.ok) showPlayerFeedback(response.error);
+  }).catch((error: Error) => showPlayerFeedback(error.message));
 }
 
 async function refreshBorder(): Promise<void> {
@@ -1984,7 +1969,7 @@ async function refreshBorder(): Promise<void> {
   shortcutKeys = state.shortcutKeys;
   showSelectionBorders(currentRegions);
 
-  if (state.recordingState.status === RECORDING_STATUS.recording && state.recordingState.mode !== RECORDING_MODE.full && selectionActive) {
+  if (selectionActive && isRegionEditingLocked(state.recordingState)) {
     cancelSelection("녹화 중에는 영역을 다시 선택할 수 없습니다.");
   }
 }
@@ -1994,7 +1979,6 @@ async function initializePageState(): Promise<void> {
   currentRecordingState = state.recordingState;
   multiRegionEnabled = state.multiRegionEnabled;
   multiRegionMaxCount = state.multiRegionMaxCount;
-  trimRegionsToLimit();
   fullRecordButtonEnabled = state.fullRecordButtonEnabled;
   fullScreenshotButtonEnabled = state.fullScreenshotButtonEnabled;
   seekEnabled = state.seekEnabled;
@@ -2004,10 +1988,12 @@ async function initializePageState(): Promise<void> {
   shortcutKeys = state.shortcutKeys;
 
   if (state.recordingState.status !== RECORDING_STATUS.recording && !state.recordingState.recordingElsewhere && state.regions.length > 0) {
-    await clearRegion();
-    currentRegion = null;
-    currentRegions = [];
-    showSelectionBorders([]);
+    const cleared = await saveRegions([]);
+    if (cleared.ok) {
+      currentRegion = null;
+      currentRegions = [];
+      showSelectionBorders([]);
+    }
     return;
   }
 
@@ -2070,8 +2056,8 @@ async function commitSelection(region: RegionSelection): Promise<void> {
   }
   const nextRegions = multiRegionEnabled ? [...currentRegions, nextRegion].slice(0, getActiveRegionLimit()) : [nextRegion];
   const saved = await saveRegions(nextRegions);
-  if (!saved) {
-    setOverlayError("확장 프로그램이 새로고침되었습니다. 페이지를 새로고침한 뒤 다시 시도하세요.");
+  if (!saved.ok) {
+    setOverlayError(saved.error);
     return;
   }
 
@@ -2128,8 +2114,15 @@ function getPlayerRegionGeometry(): RegionSelection | null {
   return buildRegionSelection(rect.left, rect.top, rect.width, rect.height, rect);
 }
 
+function requestRegionSelection(): void {
+  if (selectionActive || isRegionEditingLocked()) return;
+  void sendRuntimeMessage({ type: "SELECT_REGION" }).then(response => {
+    if (!response.ok) showPlayerFeedback(response.error);
+  }).catch((error: Error) => showPlayerFeedback(error.message));
+}
+
 function startSelection(): void {
-  if (selectionActive || isRegionRecordingActive()) {
+  if (selectionActive || isRegionEditingLocked()) {
     return;
   }
   if (multiRegionEnabled && currentRegions.length >= getActiveRegionLimit()) {
@@ -2359,16 +2352,18 @@ function setRecordButtonContent(button: HTMLElement, full = false): void {
   const command = recordingCommandInFlight;
   const starting = command === (full ? "START_FULL_RECORDING" : "START_RECORDING");
   const blocked = currentRecordingState.recordingElsewhere === true && !starting;
+  const otherMode = recording && !ownRecording;
   const pending = starting || command === "STOP_RECORDING" || command === "CANCEL_RECORDING";
   const pendingLabel = starting
     ? pendingRecordingTerminalCommand === "CANCEL_RECORDING" ? "시작 후 취소 예정" : pendingRecordingTerminalCommand ? "시작 후 정지 예정" : "시작 중 · 다시 누르면 정지"
     : command === "CANCEL_RECORDING" ? "취소 중" : "저장 중";
-  const label = withShortcut(blocked ? "다른 탭에서 녹화 중" : `${full ? "전체 " : ""}녹화 ${pending ? pendingLabel : ownRecording ? "정지" : "시작"}`, full ? "fullRecord" : "regionRecord");
+  let label = withShortcut(`${full ? "전체 " : ""}녹화 ${pending ? pendingLabel : ownRecording ? "정지" : "시작"}`, full ? "fullRecord" : "regionRecord");
+  if (blocked) label = "다른 탭에서 녹화 중";
+  else if (otherMode) label = full ? "영역 녹화 중에는 전체 녹화를 시작할 수 없습니다" : "전체 녹화 중에는 영역 녹화를 시작할 수 없습니다";
   button.toggleAttribute("data-recording", ownRecording);
   button.setAttribute("aria-busy", String(pending));
-  if (button instanceof HTMLButtonElement) {
-    button.disabled = blocked || (recording && !ownRecording);
-  }
+  if (blocked || otherMode) button.setAttribute("aria-disabled", "true");
+  else button.removeAttribute("aria-disabled");
   const icon = getRecordIconSvg(ownRecording, pending);
   if (full) {
     setChzzkButtonPresentation(button, `record:${label}:${ownRecording}`, label, icon);
@@ -2410,7 +2405,13 @@ function setChzzkScreenshotButtonContent(button: HTMLElement): void {
 }
 
 function setChzzkButtonContent(button: HTMLElement): void {
-  const label = withShortcut(PLAYER_TOOL_LABEL, "selectRegion");
+  let label = withShortcut(PLAYER_TOOL_LABEL, "selectRegion");
+  if (isRegionEditingLocked()) {
+    label = currentRecordingState.recordingElsewhere ? "다른 탭에서 녹화 중" : "녹화 중에는 영역을 선택할 수 없습니다";
+    button.setAttribute("aria-disabled", "true");
+  } else {
+    button.removeAttribute("aria-disabled");
+  }
   setChzzkButtonPresentation(button, `select:${label}`, label, getCropIconSvg());
 }
 
@@ -2473,7 +2474,7 @@ function handlePlayerToolActivation(event: MouseEvent): void {
 
   event.preventDefault();
   event.stopPropagation();
-  startSelection();
+  requestRegionSelection();
 }
 
 function handlePlayerRecordActivation(event: MouseEvent): void {
@@ -2483,7 +2484,7 @@ function handlePlayerRecordActivation(event: MouseEvent): void {
 
   event.preventDefault();
   event.stopPropagation();
-  if (currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode !== RECORDING_MODE.full) {
+  if ((event.currentTarget as HTMLElement).getAttribute("aria-disabled") === "true") {
     return;
   }
   void toggleRecording(true).catch((error: Error) => window.alert(error.message));
@@ -2678,7 +2679,6 @@ function syncChzzkToolButton(target: HTMLElement | null = findChzzkButtonHost())
   selectButton.id = CHZZK_TOOL_BUTTON_ID;
   selectButton.className = CHZZK_TOOL_BUTTON_CLASS;
   selectButton.type = "button";
-  selectButton.disabled = isRegionRecordingActive();
   setChzzkButtonContent(selectButton);
   bindDirectPlayerActivation(selectButton, handlePlayerToolActivation);
 
@@ -2869,16 +2869,17 @@ function syncPlayerToolsForLocation(): void {
     .catch(() => {});
 }
 
-function isRegionRecordingActive(): boolean {
-  return currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode !== RECORDING_MODE.full;
+function isRegionEditingLocked(state = currentRecordingState): boolean {
+  return state.status === RECORDING_STATUS.recording || state.recordingElsewhere === true;
 }
 
-function isRegionRecordingState(value: LocalRecordingState): boolean {
-  return value.status === RECORDING_STATUS.recording && value.mode !== RECORDING_MODE.full;
+function isRegionDeletionLocked(): boolean {
+  return currentRecordingState.recordingElsewhere === true
+    || (currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode !== RECORDING_MODE.full);
 }
 
 function activateRegionAtPoint(x: number, y: number): void {
-  if (isRegionRecordingActive()) {
+  if (isRegionEditingLocked()) {
     return;
   }
 
@@ -2933,35 +2934,23 @@ function handleShortcut(event: KeyboardEvent): void {
 
   if (key === shortcutKeys.selectRegion) {
     event.preventDefault();
-    if (isRegionRecordingActive()) {
-      return;
-    }
-    startSelection();
+    requestRegionSelection();
   } else if (key === shortcutKeys.clearRegion) {
     event.preventDefault();
-    if (isRegionRecordingActive()) {
-      return;
-    }
     if (selectionActive) {
       cancelSelection();
       return;
     }
-
-    void (async () => {
-      if (currentRegions.length === 0) {
-        return;
-      }
-      removeRegionAtIndex(activeRegionIndex);
-    })();
+    removeRegionAtIndex(activeRegionIndex);
   } else if (key === shortcutKeys.clearAllRegions) {
     event.preventDefault();
-    if (isRegionRecordingActive()) {
+    if (isRegionDeletionLocked()) {
       return;
     }
     if (selectionActive) {
       cancelSelection();
     }
-    void clearRegion();
+    clearSavedRegions();
   } else if (key === shortcutKeys.regionRecord) {
     event.preventDefault();
     void toggleRecording().catch((error: Error) => window.alert(error.message));
@@ -3021,7 +3010,10 @@ if (isExtensionContextAvailable()) {
   chrome.runtime.onMessage.addListener((message: ContentCommand, _sender, sendResponse: (response: MessageResponse | MessageResponse<boolean> | RegionGeometryResponse | RegionGeometriesResponse) => void) => {
     if (message.type === "PREPARE_DIRECT_RECORDING") {
       void prepareDirectRecordingEncoder(message.settings)
-        .then(() => sendResponse({ ok: true }))
+        .then(() => {
+          preparedRecordingId = message.recordingId;
+          sendResponse({ ok: true });
+        })
         .catch((error: Error) => sendResponse({ ok: false, error: error.message }));
       return true;
     }
@@ -3029,25 +3021,6 @@ if (isExtensionContextAvailable()) {
     if (message.type === "HAS_DIRECT_RECORDING") {
       sendResponse({ ok: true, data: directSession?.recordingId === message.recordingId });
       return false;
-    }
-
-    if (message.type === "CLEAR_REGION") {
-      void (async () => {
-        const state = await loadState();
-        if (isRegionRecordingState(state.recordingState)) {
-          sendResponse({ ok: false, error: "녹화 중에는 영역을 해제할 수 없습니다." });
-          return;
-        }
-
-        await clearRegion();
-        currentRegion = null;
-        currentRegions = [];
-        showSelectionBorders([]);
-        sendResponse({ ok: true });
-      })().catch((error: unknown) => {
-        sendResponse({ ok: false, error: error instanceof Error ? error.message : "영역을 해제하지 못했습니다." });
-      });
-      return true;
     }
 
     if (message.type === "GET_REGION_GEOMETRY") {
@@ -3103,16 +3076,17 @@ if (isExtensionContextAvailable()) {
     void (async () => {
       const state = await loadState();
 
-      if (state.recordingState.status === RECORDING_STATUS.recording && state.recordingState.mode !== RECORDING_MODE.full) {
+      if (isRegionEditingLocked(state.recordingState)) {
         sendResponse({ ok: false, error: "녹화 중에는 영역을 선택할 수 없습니다." });
         return;
       }
 
       currentRegion = state.region;
       currentRegions = state.regions;
+      currentRecordingState = state.recordingState;
       multiRegionEnabled = state.multiRegionEnabled;
       multiRegionMaxCount = state.multiRegionMaxCount;
-      trimRegionsToLimit();
+      if (trimRegionsToLimit()) showSelectionBorders(currentRegions);
       startSelection();
       sendResponse({ ok: true });
     })().catch((error: unknown) => {
@@ -3148,13 +3122,13 @@ if (isExtensionContextAvailable()) {
     }
 
     if (changes.recordingState) {
-      const nextState = normalizeRecordingState(changes.recordingState.newValue, directSession?.recordingId);
+      const nextState = normalizeRecordingState(changes.recordingState.newValue, getLocalRecordingId());
       currentRecordingState = nextState;
-      if (nextState.status === RECORDING_STATUS.recording && nextState.mode !== RECORDING_MODE.full && selectionActive) {
+      if (selectionActive && isRegionEditingLocked(nextState)) {
         cancelSelection("녹화 중에는 영역을 다시 선택할 수 없습니다.");
       }
-      showSelectionBorders(currentRegions);
-      requestChzzkToolSync();
+      // A background tab may not receive an animation frame until it is focused.
+      syncChzzkToolButton();
       syncChzzkRecordTimer();
     }
 
@@ -3162,12 +3136,6 @@ if (isExtensionContextAvailable()) {
       const settings = normalizeSettings(changes.settings.newValue);
       multiRegionEnabled = settings.enableMultiRegion;
       multiRegionMaxCount = settings.multiRegionMaxCount;
-      if (!multiRegionEnabled && currentRegions.length > 1) {
-        currentRegions = currentRegions.slice(0, 1);
-        void saveRegions(currentRegions);
-        showSelectionBorders(currentRegions);
-      }
-      trimRegionsToLimit();
       fullRecordButtonEnabled = settings.enableFullRecordButton;
       fullScreenshotButtonEnabled = settings.enableFullScreenshotButton;
       seekEnabled = settings.enableSeek;
@@ -3177,6 +3145,9 @@ if (isExtensionContextAvailable()) {
       shortcutKeys = settings.shortcutKeys;
       requestChzzkToolSync();
       syncChzzkRecordTimer();
+    }
+    if (changes.recordingState || changes.settings) {
+      if (trimRegionsToLimit() || changes.recordingState) showSelectionBorders(currentRegions);
     }
   });
 }

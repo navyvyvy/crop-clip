@@ -67,7 +67,7 @@ for (const outputFormat of ['webm', 'mp4']) for (const prepared of [true, false]
     return startRecordingSession;
   `)(outputFormat, prepared, order);
   assert.equal((await start(true)).ok, prepared);
-  assert.deepEqual(order, [{ type: 'PREPARE_DIRECT_RECORDING', settings: { outputFormat } }, ...(prepared ? ['recording', 'start'] : [])], 'prepare either container before setting recording state; a failed preparation must not start capture');
+  assert.deepEqual(order, [{ type: 'PREPARE_DIRECT_RECORDING', recordingId: 'new-recording', settings: { outputFormat } }, ...(prepared ? ['recording', 'start'] : [])], 'prepare either container before setting recording state; a failed preparation must not start capture');
 }
 console.log('recording startup preparation checks passed');
 

@@ -318,7 +318,7 @@ for (const outcome of ["success", "failure", "rejection"]) {
   const timers = new Map();
   let nextTimer = 0, respond, reject;
   const makeBorder = () => {
-    const button = Object.assign(new EventTarget(), { dataset: {}, setAttribute() {} });
+    const button = Object.assign(new EventTarget(), { dataset: {}, setAttribute() {}, getAttribute() { return null; } });
     return { button, border: Object.assign(new EventTarget(), {
       dataset: {}, querySelector: selector => selector === ".record-region" ? button : null, querySelectorAll: () => [],
     }) };
@@ -329,7 +329,7 @@ for (const outcome of ["success", "failure", "rejection"]) {
     let currentRecordingState = { status: 'idle' }, recordingCommandInFlight = null, pendingRecordingTerminalCommand = null;
     const directSession = null;
     const showPlayerFeedback = () => {}, syncRecordingCommandButtons = () => {}, setRecordButtonContent = () => {}, getRecordingTimeText = () => '00:00';
-    const isRegionRecordingActive = () => currentRecordingState.status === 'recording';
+    const isRegionEditingLocked = () => currentRecordingState.status === 'recording';
     const withShortcut = label => label, getRecordIconSvg = () => '';
     ${ts.transpile(runRecordingCommandSource, { target: ts.ScriptTarget.ES2022 })}
     ${ts.transpile(toggleRecordingSource, { target: ts.ScriptTarget.ES2022 })}

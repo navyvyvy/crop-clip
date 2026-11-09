@@ -88,7 +88,7 @@ const reads = [];
 const stateReader = new Function('chrome', 'normalizeSettings', `
   let storedStateRevision = 0;
   const RECORDING_STATUS = { idle: 'idle' };
-  const isExtensionContextAvailable = () => true, directSession = { recordingId: 'current' };
+  const isExtensionContextAvailable = () => true, getLocalRecordingId = () => 'current';
   const normalizeRegion = value => value, normalizeRegions = value => value ?? [];
   const normalizeRecordingState = value => value, getMultiRegionLimit = () => 2, normalizeShortcutKeys = value => value;
   const DEFAULT_SEEK_SECONDS = 5, DEFAULT_MULTI_REGION_COUNT = 2, DEFAULT_CONTENT_SHORTCUT_KEYS = {};
@@ -131,7 +131,6 @@ for (const [key, code, action] of [['r','KeyR','region'], ['ㄱ','KeyR','region'
 let captures = 0, now = 1000;
 // Use the production renderer for both button layouts, including rebuilt controls.
 const render = new Function('button', 'full', 'command', 'queued', 'state', `
-  const HTMLButtonElement = Object;
   const RECORDING_STATUS = { recording: 'recording' }, RECORDING_MODE = { full: 'full' };
   const currentRecordingState = state, recordingCommandInFlight = command, pendingRecordingTerminalCommand = queued;
   const withShortcut = label => label;
@@ -145,10 +144,10 @@ for (const full of [false, true]) {
     render(control, full, full ? 'START_FULL_RECORDING' : 'START_RECORDING', queued, { status: 'idle' });
     assert.equal(attrs.get('aria-busy'), 'true');
     assert.match(attrs.get('aria-label'), queued === 'CANCEL_RECORDING' ? /취소 예정/ : queued ? /정지 예정/ : /시작 중/);
-    assert.equal(control.disabled, false, 'pending start must still accept a stop request');
+    assert.equal(attrs.has('aria-disabled'), false, 'pending start must still accept a stop request');
     assert.equal(attrs.has('data-recording'), false, 'pending start must not pretend to be recording');
     render(control, full, full ? 'START_FULL_RECORDING' : 'START_RECORDING', queued, { status: 'idle', recordingElsewhere: true });
-    assert.equal(control.disabled, false, 'the starting tab must keep accepting stop intent before its session is ready');
+    assert.equal(attrs.has('aria-disabled'), false, 'the starting tab must keep accepting stop intent before its session is ready');
   }
   const pendingIcon = control.innerHTML;
   render(control, full, null, null, { status: 'idle' });
@@ -159,11 +158,11 @@ for (const full of [false, true]) {
   assert.match(attrs.get('aria-label'), /녹화 정지/);
   assert.equal(attrs.has('data-recording'), true);
   render(control, full, null, null, { status: 'idle', recordingElsewhere: true });
-  assert.equal(control.disabled, true, 'all recording controls must be disabled when another tab owns recording');
+  assert.equal(attrs.get('aria-disabled'), 'true', 'all recording controls must be disabled when another tab owns recording');
   assert.match(attrs.get('aria-label'), /다른 탭/);
   assert.equal(attrs.has('data-recording'), false, 'other tabs must not offer to stop the recording');
   render(control, full, null, null, { status: 'idle' });
-  assert.equal(control.disabled, false, 'recording controls must unlock after the other tab stops');
+  assert.equal(attrs.has('aria-disabled'), false, 'recording controls must unlock after the other tab stops');
 }
 for (const mode of ['region', 'full']) for (const outcome of ['stop', 'cancel', 'failure', 'rejection', 'early-stop']) {
   const commands = [], replies = [], presentations = [];

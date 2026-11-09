@@ -2,7 +2,8 @@ import type { RegionSelection, Settings } from "./types.js";
 
 export type PopupCommand =
   | { type: "SELECT_REGION" }
-  | { type: "CLEAR_REGION" }
+  | { type: "SAVE_REGIONS"; regions: RegionSelection[] }
+  | { type: "CLEAR_REGION"; region?: RegionSelection }
   | { type: "START_FULL_RECORDING" }
   | { type: "CAPTURE_FULL_SCREENSHOT" }
   | { type: "START_RECORDING" }
@@ -10,9 +11,8 @@ export type PopupCommand =
   | { type: "CANCEL_RECORDING" };
 
 export type ContentCommand =
-  | { type: "PREPARE_DIRECT_RECORDING"; settings: Settings }
+  | { type: "PREPARE_DIRECT_RECORDING"; recordingId: string; settings: Settings }
   | { type: "START_SELECTION" }
-  | { type: "CLEAR_REGION" }
   | { type: "GET_REGION_GEOMETRY" }
   | { type: "GET_REGION_GEOMETRIES" }
   | { type: "GET_PLAYER_REGION_GEOMETRY" }

@@ -174,7 +174,7 @@ function renderState(): void {
   const isRecording = appState.recordingState.status === RECORDING_STATUS.recording;
   const isFullRecording = isRecording && appState.recordingState.mode === RECORDING_MODE.full;
   const isRegionRecording = isRecording && !isFullRecording;
-  elements.selectRegionButton.disabled = isRegionRecording || sendingCommand;
+  elements.selectRegionButton.disabled = isRecording || sendingCommand;
   elements.clearRegionButton.disabled = isRegionRecording || sendingCommand || !appState.region;
   elements.recordToggleButton.disabled = sendingCommand || isFullRecording;
   elements.recordToggleButton.textContent = isRegionRecording ? "영역 정지" : "영역 녹화";

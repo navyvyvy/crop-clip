@@ -237,7 +237,7 @@
   pointer-events: none;
 }
 
-.crop-clip-border .region-tool:disabled {
+.crop-clip-border .region-tool:is(:disabled, [aria-disabled="true"]) {
   opacity: 0.42;
   cursor: not-allowed;
 }
@@ -399,6 +399,25 @@
 
 .crop-clip-pzp-button {
   color: #ffffff;
+}
+
+:is(#crop-clip-chzzk-tool-button, #crop-clip-chzzk-record-button)[aria-disabled="true"] {
+  cursor: not-allowed;
+  pointer-events: auto;
+}
+
+:is(#crop-clip-chzzk-tool-button, #crop-clip-chzzk-record-button)[aria-disabled="true"] .pzp-ui-icon {
+  opacity: 0.42;
+}
+
+:is(#crop-clip-chzzk-tool-button, #crop-clip-chzzk-record-button)[aria-disabled="true"] .pzp-button__tooltip {
+  visibility: hidden;
+}
+
+:is(#crop-clip-chzzk-tool-button, #crop-clip-chzzk-record-button)[aria-disabled="true"]:is(:hover, :focus-visible) .pzp-button__tooltip {
+  display: block;
+  visibility: visible;
+  opacity: 1;
 }
 
 .crop-clip-pzp-button .pzp-ui-icon {

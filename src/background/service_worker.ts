@@ -1,6 +1,7 @@
 import { deleteRecording, deleteRecordingChunks, getChunksByRecordingId, getRecordingDeletionCandidates, putChunk, putPart, putRecording } from "../shared/idb.js";
 import { fail, ok, type AutoDownloadHandledMessage, type ContentCommand, type DeletionScheduleRequest, type FinalizeRecordingMessage, type MessageResponse, type PopupCommand, type RecordingErrorMessage, type StoreRecordingChunkMessage } from "../shared/messages.js";
 import { loadAppState, loadRecordingState, saveRecordingState } from "../shared/storage.js";
+import { normalizeRegion, normalizeRegions } from "../shared/normalize.js";
 import { MILLISECONDS_PER_SECOND, SECONDS_PER_HOUR, SECONDS_PER_MINUTE } from "../shared/time_range.js";
 import { RECORDING_MODE, RECORDING_STATUS, type RecordingRecord, type RegionSelection, type Settings } from "../shared/types.js";
 const DELETE_AFTER_MINUTES = 10;
@@ -14,6 +15,7 @@ const RESULT_TAB_RETRY_DELAY_MS = 200;
 const RESULT_TAB_RETRY_ALARM = "open-recording-result";
 const RESULT_TAB_RETRY_ALARM_DELAY_MINUTES = 0.5;
 let recordingStartInFlight = false;
+let pendingRegionWrite = Promise.resolve();
 let resultTabLaunchPromise: Promise<boolean> | null = null;
 const checkpointStores = new Map<string, Promise<void>>();
 const recordingTerminalOperations = new Map<string, Promise<void>>();
@@ -169,9 +171,8 @@ async function restoreScheduledRecordingDeletions(): Promise<void> {
   }
 }
 
-async function getActiveRecordableTab(): Promise<chrome.tabs.Tab> {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  const tab = tabs[0];
+async function getActiveRecordableTab(sourceTab?: chrome.tabs.Tab): Promise<chrome.tabs.Tab> {
+  const tab = sourceTab ?? (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
   const url = tab?.url ?? tab?.pendingUrl;
 
   if (!tab?.id || !url) {
@@ -244,13 +245,13 @@ function decodeRecordingDataUrl(dataUrl: string, mimeType: string): Blob {
   return new Blob([bytes], { type: mimeType });
 }
 
-async function startSelection(): Promise<MessageResponse> {
-  const state = await loadAppState();
-  if (state.recordingState.status === RECORDING_STATUS.recording && state.recordingState.mode !== RECORDING_MODE.full) {
+async function startSelection(sourceTab?: chrome.tabs.Tab): Promise<MessageResponse> {
+  const state = await loadRecordingState();
+  if (recordingStartInFlight || state.status === RECORDING_STATUS.recording) {
     return fail("녹화 중에는 영역을 다시 선택할 수 없습니다.");
   }
 
-  const tab = await getActiveRecordableTab();
+  const tab = await getActiveRecordableTab(sourceTab);
   const tabId = tab.id;
   if (typeof tabId !== "number") {
     return fail("녹화할 수 있는 웹 탭에서만 사용할 수 있습니다.");
@@ -259,27 +260,39 @@ async function startSelection(): Promise<MessageResponse> {
   return await sendCommandToContentScript(tabId, { type: "START_SELECTION" });
 }
 
-async function clearRegion(): Promise<MessageResponse> {
-  const state = await loadAppState();
-  if (state.recordingState.status === RECORDING_STATUS.recording && state.recordingState.mode !== RECORDING_MODE.full) {
-    return fail("녹화 중에는 영역을 해제할 수 없습니다.");
-  }
+function queueRegionWrite<T>(operation: () => Promise<T>): Promise<T> {
+  const write = pendingRegionWrite.then(operation);
+  pendingRegionWrite = write.then(() => {}, () => {});
+  return write;
+}
 
-  try {
-    const tab = await getActiveRecordableTab();
-    const tabId = tab.id;
-    if (typeof tabId === "number") {
-      const response = await sendCommandToContentScript(tabId, { type: "CLEAR_REGION" });
-      if (!response.ok) {
-        return response;
-      }
+function saveRecordingRegions(message: Extract<PopupCommand, { type: "CLEAR_REGION" | "SAVE_REGIONS" }>, sender: chrome.runtime.MessageSender): Promise<MessageResponse> {
+  return queueRegionWrite(async () => {
+    const { recordingState: state, regions: savedRegions } = await loadAppState();
+    const isRecording = state.status === RECORDING_STATUS.recording;
+    const ownsRecording = state.tabId !== undefined && sender.tab?.id === state.tabId;
+    const popupClear = message.type === "CLEAR_REGION" && message.region === undefined && sender.url === chrome.runtime.getURL("popup/popup.html");
+    if (recordingStartInFlight || (isRecording && (state.mode !== RECORDING_MODE.full || (!ownsRecording && !popupClear)))) {
+      return fail("녹화 중에는 영역을 변경할 수 없습니다.");
     }
-  } catch {
-    // Storage is the source of truth, so clearing the page border is best-effort.
-  }
-
-  await chrome.storage.local.set({ region: null, regions: [] });
-  return ok();
+    let regions: RegionSelection[];
+    if (message.type === "SAVE_REGIONS") {
+      if (isRecording) return fail("녹화 중에는 영역을 삭제만 할 수 있습니다.");
+      regions = normalizeRegions(message.regions);
+      if (!Array.isArray(message.regions) || regions.length !== message.regions.length) return fail("녹화 영역이 올바르지 않습니다.");
+    } else if (message.region === undefined) {
+      regions = [];
+    } else {
+      const region = normalizeRegion(message.region);
+      if (!region) return fail("녹화 영역이 올바르지 않습니다.");
+      const key = JSON.stringify(region);
+      const index = savedRegions.findIndex(saved => JSON.stringify(saved) === key);
+      if (index < 0) return ok();
+      regions = savedRegions.filter((_, savedIndex) => savedIndex !== index);
+    }
+    await chrome.storage.local.set({ region: regions[0] ?? null, regions });
+    return ok();
+  });
 }
 
 async function captureFullScreenshot(): Promise<MessageResponse> {
@@ -322,8 +335,8 @@ async function cancelDirectRecording(tabId: number, recordingId?: string): Promi
   return await sendCommandToContentScript(tabId, { type: "CANCEL_DIRECT_RECORDING", recordingId });
 }
 
-async function startRecordingSession(fullPlayer: boolean): Promise<MessageResponse<{ recordingId: string }>> {
-  const tab = await getActiveRecordableTab();
+async function startRecordingSession(fullPlayer: boolean, sourceTab?: chrome.tabs.Tab): Promise<MessageResponse<{ recordingId: string }>> {
+  const tab = await getActiveRecordableTab(sourceTab);
   const tabId = tab.id;
   if (typeof tabId !== "number") {
     return fail("녹화할 수 있는 웹 탭에서만 사용할 수 있습니다.");
@@ -353,12 +366,11 @@ async function startRecordingSession(fullPlayer: boolean): Promise<MessageRespon
     }
   }
 
-  // Keep the timer and recording state idle until GPU discovery is complete.
-  const prepared = await sendCommandToContentScript(tabId, { type: "PREPARE_DIRECT_RECORDING", settings: state.settings });
-  if (!prepared.ok) return prepared;
-
   const settings = state.settings;
   const recordingId = crypto.randomUUID();
+  // Keep the timer and recording state idle until GPU discovery is complete.
+  const prepared = await sendCommandToContentScript(tabId, { type: "PREPARE_DIRECT_RECORDING", recordingId, settings });
+  if (!prepared.ok) return prepared;
 
   await saveRecordingState({
     status: RECORDING_STATUS.recording,
@@ -414,25 +426,27 @@ async function startRecordingSession(fullPlayer: boolean): Promise<MessageRespon
   }
 }
 
-async function startRecording(fullPlayer = false): Promise<MessageResponse<{ recordingId: string }>> {
+async function startRecording(fullPlayer = false, sourceTab?: chrome.tabs.Tab): Promise<MessageResponse<{ recordingId: string }>> {
   if (recordingStartInFlight) {
     return fail("녹화 시작을 처리 중입니다.");
   }
 
   recordingStartInFlight = true;
   try {
-    return await startRecordingSession(fullPlayer);
+    await pendingRegionWrite;
+    return await startRecordingSession(fullPlayer, sourceTab);
   } finally {
     recordingStartInFlight = false;
   }
 }
 
-async function stopRecording(recordingId?: string): Promise<MessageResponse> {
+async function stopRecording(recordingId?: string, sourceTabId?: number): Promise<MessageResponse> {
   const state = await loadRecordingState();
   if (recordingId && state.recordingId !== recordingId) return ok();
   if (state.status !== RECORDING_STATUS.recording) {
     return fail("진행 중인 녹화가 없습니다.");
   }
+  if (sourceTabId !== undefined && sourceTabId !== state.tabId) return fail("다른 탭에서 녹화 중입니다.");
 
   if (typeof state.tabId !== "number") {
     const error = "녹화 중인 탭을 찾지 못했습니다.";
@@ -452,11 +466,12 @@ async function stopRecording(recordingId?: string): Promise<MessageResponse> {
   return response;
 }
 
-async function cancelRecording(): Promise<MessageResponse> {
+async function cancelRecording(sourceTabId?: number): Promise<MessageResponse> {
   const initialState = await loadRecordingState();
   if (initialState.status !== RECORDING_STATUS.recording && initialState.status !== RECORDING_STATUS.error) {
     return ok();
   }
+  if (sourceTabId !== undefined && sourceTabId !== initialState.tabId) return fail("다른 탭에서 녹화 중입니다.");
 
   if (!initialState.recordingId) {
     await saveRecordingState({ status: RECORDING_STATUS.idle });
@@ -780,25 +795,41 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingErrorMessage | StoreRecordingChunkMessage | FinalizeRecordingMessage | DeletionScheduleRequest | AutoDownloadHandledMessage, _sender, sendResponse: (response: MessageResponse<unknown>) => void) => {
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  const unlocked = changes.recordingState?.oldValue?.status === RECORDING_STATUS.recording
+    && changes.recordingState.newValue?.status !== RECORDING_STATUS.recording;
+  if (areaName !== "local" || (!changes.settings && !unlocked)) return;
+
+  void queueRegionWrite(async () => {
+    const { recordingState, settings, regions } = await loadAppState();
+    if (recordingStartInFlight || recordingState.status === RECORDING_STATUS.recording) return;
+    const limit = settings.enableMultiRegion ? settings.multiRegionMaxCount : 1;
+    if (regions.length > limit) {
+      await chrome.storage.local.set({ region: regions[0], regions: regions.slice(0, limit) });
+    }
+  }).catch(() => {});
+});
+
+chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingErrorMessage | StoreRecordingChunkMessage | FinalizeRecordingMessage | DeletionScheduleRequest | AutoDownloadHandledMessage, sender, sendResponse: (response: MessageResponse<unknown>) => void) => {
+  const sourceTab = sender.url?.startsWith(chrome.runtime.getURL("")) ? undefined : sender.tab;
   void (async () => {
     if (message.type === "SELECT_REGION") {
-      sendResponse(await startSelection());
+      sendResponse(await startSelection(sourceTab));
       return;
     }
 
-    if (message.type === "CLEAR_REGION") {
-      sendResponse(await clearRegion());
+    if (message.type === "CLEAR_REGION" || message.type === "SAVE_REGIONS") {
+      sendResponse(await saveRecordingRegions(message, sender));
       return;
     }
 
     if (message.type === "START_RECORDING") {
-      sendResponse(await startRecording());
+      sendResponse(await startRecording(false, sourceTab));
       return;
     }
 
     if (message.type === "START_FULL_RECORDING") {
-      sendResponse(await startRecording(true));
+      sendResponse(await startRecording(true, sourceTab));
       return;
     }
 
@@ -808,12 +839,12 @@ chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingErrorMess
     }
 
     if (message.type === "STOP_RECORDING") {
-      sendResponse(await stopRecording(message.recordingId));
+      sendResponse(await stopRecording(message.recordingId, sourceTab?.id));
       return;
     }
 
     if (message.type === "CANCEL_RECORDING") {
-      sendResponse(await cancelRecording());
+      sendResponse(await cancelRecording(sourceTab?.id));
       return;
     }
 

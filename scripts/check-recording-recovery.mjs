@@ -8,6 +8,7 @@ const code = ts.transpile(source.statements.filter(ts.isFunctionDeclaration).map
 function fixture(options = {}) {
   let state = { status: 'recording', recordingId: 'clip', tabId: 7 };
   let chunks = [1, 2].map(index => ({ id: `chunk${index}`, recordingId: 'clip', index, mimeType: 'video/webm', extension: 'webm', baseName: 'clip', createdAt: 0, capturedAt: index * 1000, completesBlob: true, blob: new Blob(['saved']) }));
+  if (options.awaitingFirstChunk) chunks = [];
   const parts = [], results = [], deleted = [];
   let recording;
   const env = {
@@ -121,6 +122,15 @@ test('persistent storage failure preserves data and prevents a new start overwri
   await f.api.recoverInterruptedRecording();
   assert.equal(f.results.length, 1);
   assert.equal(f.state.status, 'idle');
+});
+
+test('a different tab cannot terminate the recording before its first checkpoint', async () => {
+  const f = fixture({ awaitingFirstChunk: true });
+  assert.equal((await f.api.stopRecording(undefined, 9)).ok, false);
+  assert.equal(f.state.status, 'recording');
+  assert.equal((await f.api.cancelRecording(9)).ok, false);
+  assert.equal(f.state.recordingId, 'clip');
+  assert.deepEqual(f.deleted, []);
 });
 
 test('explicit cancellation discards retained data and late errors do not affect another recording', async () => {
