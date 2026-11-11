@@ -8,9 +8,8 @@ import { RECORDING_FORMAT, RECORDING_STATUS, RECORDING_MODE, DEFAULT_MULTI_REGIO
 
 (() => {
   // The build bundles shared imports into one classic content script.
-  const isChzzkClipEditorPage = (): boolean =>
-    (location.hostname === "chzzk.naver.com" || location.hostname.endsWith(".chzzk.naver.com"))
-    && location.pathname.startsWith("/clip-editor");
+  const isChzzkPage = location.hostname === "chzzk.naver.com" || location.hostname.endsWith(".chzzk.naver.com");
+  const isChzzkClipEditorPage = (): boolean => isChzzkPage && location.pathname.startsWith("/clip-editor");
 
   const CONTENT_SCRIPT_BOOT_KEY = "__cropClipRegionSelectorBooted";
   const contentScriptGlobal = globalThis as typeof globalThis & { [CONTENT_SCRIPT_BOOT_KEY]?: boolean };
@@ -1043,9 +1042,24 @@ function handleVideoFrameError(recordingId: string, error: Error): void {
   if (directSession?.recordingId === recordingId) failDirectRecordingSession(directSession, error);
 }
 
+let recordingEncoderCheck: Promise<void> | undefined;
+
+function checkDirectRecordingEncoder(): Promise<void> {
+  return recordingEncoderCheck ??= prepareRecordingEncoder().catch(error => {
+    recordingEncoderCheck = undefined;
+    throw error;
+  });
+}
+
+function prepareEncoderDuringPlayback(event?: Event): void {
+  if (isChzzkClipEditorPage() || (event && !(event.target instanceof HTMLVideoElement))) return;
+  document.removeEventListener("playing", prepareEncoderDuringPlayback, true);
+  void checkDirectRecordingEncoder().catch(ignoreRecordingRejection);
+}
+
 async function prepareDirectRecordingEncoder(settings: Settings): Promise<{ mimeType: string; extension: "webm" | "mp4" }> {
   const mime = selectDirectMimeType(settings);
-  if (mime.extension === "mp4" || mime.mimeType.includes("avc1")) await prepareRecordingEncoder();
+  if (mime.extension === "mp4" || mime.mimeType.includes("avc1")) await checkDirectRecordingEncoder();
   return mime;
 }
 
@@ -3222,6 +3236,13 @@ window.addEventListener("keydown", (event) => {
   const navigationApi = (window as Window & { navigation?: EventTarget }).navigation;
   navigationApi?.addEventListener("currententrychange", syncPlayerToolsForLocation);
   window.addEventListener("popstate", syncPlayerToolsForLocation);
+
+  if (isChzzkPage) {
+    document.addEventListener("playing", prepareEncoderDuringPlayback, true);
+    if (Array.from(document.querySelectorAll("video")).some(video =>
+      !video.paused && !video.ended && video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA
+    )) prepareEncoderDuringPlayback();
+  }
 
   if (isChzzkClipEditorPage()) {
     suspendPlayerTools();

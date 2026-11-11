@@ -24,7 +24,7 @@ function visit(node) {
   if (ts.isFunctionDeclaration(node) && node.name?.text === "selectDirectMimeType") selectDirectMimeTypeSource = node.getText(file);
   if (ts.isFunctionDeclaration(node) && node.name?.text === "toggleRecording") toggleRecordingSource = node.getText(file);
   if (ts.isFunctionDeclaration(node) && node.name?.text === "attachBorderControls") borderControlsSource = node.getText(file);
-  if (ts.isFunctionDeclaration(node) && ["startDirectRecording", "prepareDirectRecordingEncoder", "ignoreRecordingRejection", "releaseDirectRecordingCapture", "stopRecordingStream"].includes(node.name?.text)) startupFunctions.push(node.getText(file));
+  if (ts.isFunctionDeclaration(node) && ["startDirectRecording", "prepareDirectRecordingEncoder", "checkDirectRecordingEncoder", "ignoreRecordingRejection", "releaseDirectRecordingCapture", "stopRecordingStream"].includes(node.name?.text)) startupFunctions.push(node.getText(file));
   if (ts.isVariableDeclaration(node) && node.name.getText(file) === "drawFrame") drawFrameSource = node.initializer.getText(file);
   if (ts.isFunctionDeclaration(node) && ["getVideoStream", "handleDetachedPlayer", "stopRegionLayoutWatch", "stopRecordingStream", "releaseDirectRecordingCapture", "releaseDirectRecordingRecorder", "cleanupDirectRecordingSession", "startDirectPart", "finalizeDirectRecording", "cancelDirectRecordingSession", "abortDirectRecordingSession", "failDirectRecordingSession", "finishDirectRecording", "requestDirectPartStop"].includes(node.name?.text)) {
     functions.push(node.getText(file));
@@ -357,7 +357,7 @@ console.log("recording border timer cleanup checks passed");
 // Exercise the real startup scope: clearing session fields alone cannot detect
 // a pending Promise handler that still retains the drawing closure.
 const createStartup = new Function("playerState", "mimeType", "nativeCapture", `
-  let directSession = null, currentRecordingState;
+  let directSession = null, currentRecordingState, recordingEncoderCheck;
   const currentRegions = [], timers = new Map(), refs = {};
   const window = { setInterval(fn) { timers.set(1, fn); return 1; }, clearInterval(id) { timers.delete(id); } };
   class MediaStream {

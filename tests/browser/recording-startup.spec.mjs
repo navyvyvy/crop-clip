@@ -1,6 +1,63 @@
 import { test, expect, prepareVideo, decodeDownloads } from './fixtures.mjs';
 import fs from 'node:fs/promises';
 
+async function observeRecordingStartup(worker) {
+  await worker.evaluate(async () => {
+    const [tab] = await chrome.tabs.query({ url: 'https://chzzk.naver.com/extension-test' });
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => {
+      const timing = globalThis.cropClipStartupTiming = { probes: [], starts: [] };
+      const probe = VideoEncoder.isConfigSupported.bind(VideoEncoder);
+      VideoEncoder.isConfigSupported = async config => {
+        if (!config.codec.startsWith('avc1')) return probe(config);
+        const sample = { began: performance.now(), finished: null };
+        timing.probes.push(sample);
+        try { return await probe(config); }
+        finally { sample.finished = performance.now(); }
+      };
+      const start = MediaRecorder.prototype.start;
+      MediaRecorder.prototype.start = function (...args) {
+        const sample = { began: performance.now(), firstChunk: null };
+        timing.starts.push(sample);
+        this.addEventListener('dataavailable', event => {
+          if (sample.firstChunk === null && event.data.size > 0) sample.firstChunk = performance.now();
+        });
+        start.apply(this, args);
+      };
+    } });
+  });
+}
+
+async function readRecordingStartup(worker) {
+  return worker.evaluate(async () => {
+    const [tab] = await chrome.tabs.query({ url: 'https://chzzk.naver.com/extension-test' });
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id }, func: () => globalThis.cropClipStartupTiming,
+    });
+    return result;
+  });
+}
+
+test('playing video prepares H.264 once before recording without starting an encoder', async ({ extension }) => {
+  const { worker, page } = extension;
+  test.skip(!await page.evaluate(() => typeof VideoEncoder !== 'undefined' && MediaRecorder.isTypeSupported('video/webm;codecs=avc1')),
+    'Requires H.264 WebM recording support');
+  await observeRecordingStartup(worker);
+  await prepareVideo(page);
+  await expect.poll(async () => (await readRecordingStartup(worker)).probes[0]?.finished, { timeout: 16000 }).toEqual(expect.any(Number));
+  expect((await readRecordingStartup(worker)).starts).toHaveLength(0);
+
+  const button = page.locator('#crop-clip-chzzk-record-button');
+  await button.click();
+  await expect(button).toHaveAttribute('aria-busy', 'false');
+  await expect(button).toHaveAttribute('data-recording', '');
+  const timing = await readRecordingStartup(worker);
+  expect(timing.probes).toHaveLength(1);
+  expect(timing.starts).toHaveLength(1);
+  expect(timing.starts[0].began).toBeGreaterThan(timing.probes[0].finished);
+  await page.keyboard.press('c');
+  await expect(button).not.toHaveAttribute('data-recording', '');
+});
+
 const startupTimingTest = process.env.CROPCLIP_STARTUP_REPORT ? test : test.skip;
 startupTimingTest('first recording frame timing', async ({ extension }) => {
   test.setTimeout(90_000);
@@ -13,33 +70,48 @@ startupTimingTest('first recording frame timing', async ({ extension }) => {
   const button = page.locator(regionMode ? '.crop-clip-border .record-region' : '#crop-clip-chzzk-record-button');
   // Generate this source with recording-profile.spec.mjs first; encoding it in this
   // browser would warm the encoder and invalidate the first-start measurement.
-  const source = await fs.readFile('node_modules/.cache/cropclip-profile-source.webm');
+  const source = await fs.readFile(process.env.CROPCLIP_STARTUP_SOURCE || 'node_modules/.cache/cropclip-profile-source.webm');
+  await observeRecordingStartup(worker);
   await page.getByRole('button', { name: 'Native', exact: true }).click();
-  await page.evaluate(async bytes => {
+  await page.evaluate(async encoded => {
     const video = document.querySelector('video');
-    video.src = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: 'video/webm' }));
+    const bytes = Uint8Array.from(atob(encoded), character => character.charCodeAt(0));
+    video.src = URL.createObjectURL(new Blob([bytes], { type: 'video/webm' }));
     video.loop = true;
     await video.play();
     const frames = window.__startupFrames = [];
     const tick = now => { frames.push(now); video.requestVideoFrameCallback(tick); };
     video.requestVideoFrameCallback(tick);
-  }, Array.from(source));
+  }, source.toString('base64'));
   const samples = [];
   for (let cycle = 0; cycle < 3; cycle++) {
-    await page.waitForTimeout(1500); // Sample normal playback before each start.
+    // Give the cold capability check time to finish during ordinary viewing.
+    await page.waitForTimeout(cycle === 0 ? 8000 : 1500);
     const start = await page.evaluate(() => performance.now());
     await page.keyboard.press(regionMode ? 'r' : 'e');
     await expect(button).toHaveAttribute('aria-busy', 'false', { timeout: 20_000 });
     await expect(button).toHaveAttribute('data-recording', '');
     await page.waitForTimeout(2000); // Include encoder startup and the first checkpoint.
-    samples.push(await page.evaluate(({ cycle, start }) => {
+    const timing = await readRecordingStartup(worker);
+    const recording = timing.starts[cycle];
+    const startup = await page.evaluate(start => {
       const frames = window.__startupFrames;
       const gaps = frames.slice(1).map((time, index) => ({ time, gap: time - frames[index] }));
       const baseline = gaps.filter(frame => frame.time >= start - 1000 && frame.time < start);
       const startup = gaps.filter(frame => frame.time >= start);
-      return { cycle, baselineMaxGap: Math.max(...baseline.map(frame => frame.gap)),
+      return { baselineMaxGap: Math.max(...baseline.map(frame => frame.gap)),
         startupMaxGap: Math.max(...startup.map(frame => frame.gap)) };
-    }, { cycle, start }));
+    }, start);
+    samples.push({
+      cycle, ...startup,
+      clickToRecorderStart: recording.began - start,
+      clickToFirstChunk: recording.firstChunk === null ? null : recording.firstChunk - start,
+      probesAfterClick: timing.probes.filter(sample => sample.began >= start && sample.began <= recording.began).length,
+      ...(cycle === 0 ? { firstProbe: timing.probes[0] && {
+        beganFromClick: timing.probes[0].began - start,
+        finishedFromClick: timing.probes[0].finished - start,
+      } } : {}),
+    });
     await page.keyboard.press('c');
     await expect.poll(() => worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState.status)).toBe('idle');
     await expect(page.locator('#crop-clip-chzzk-record-button')).toHaveAttribute('aria-busy', 'false');
