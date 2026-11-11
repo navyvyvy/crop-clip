@@ -159,6 +159,8 @@ const SPLIT_FILE_INDEX_DIGITS = 3;
 const PLAYBACK_END_TOLERANCE_SECONDS = 0.02;
 const TRIM_DRAG_THRESHOLD_PX = 3;
 const MAX_SIZE_SPLIT_ATTEMPTS = 5;
+// shortcut: Keep startup remuxes under 128 MiB until the converter can stream the input and output.
+const MAX_STARTUP_TRIM_BYTES = 128 * 1024 * 1024;
 const DELETION_KEEPALIVE_MS = 60_000;
 
 function formatBytes(bytes: number): string {
@@ -407,26 +409,79 @@ async function makeWebmSeekable(part: LoadedPart): Promise<LoadedPart> {
   return normalized;
 }
 
-async function prepareSeekablePreview(): Promise<void> {
-  if (!parts.some((part) => part.extension === RECORDING_FORMAT.webm && part.seekMetadataVersion !== SEEK_METADATA_VERSION)) {
+async function trimRecordingStartup(part: LoadedPart, trimSeconds: number): Promise<{ blob: Blob; cutSeconds: number } | null> {
+  return withFfmpegInput(part, async (ffmpeg, inputName) => {
+    const format = part.extension === RECORDING_FORMAT.webm ? "matroska" : "mp4";
+    const list = "output-startup.csv";
+    const name = `output-startup-1.${part.extension}`;
+    const code = await ffmpeg.exec([
+      "-i", inputName, "-map", "0", "-c", "copy", "-f", "segment",
+      "-segment_format", format, "-segment_times", String(trimSeconds),
+      ...(format === "matroska" ? ["-segment_format_options", "cues_to_front=1"] : []),
+      "-segment_list", list, "-segment_list_type", "csv", "-reset_timestamps", "1",
+      `output-startup-%d.${part.extension}`,
+    ]);
+    if (code !== 0) return null;
+    const data = await ffmpeg.readFile(list);
+    const rows = (typeof data === "string" ? data : new TextDecoder().decode(data)).trim().split("\n");
+    const [, start, end] = rows.find(row => row.startsWith(`${name},`))?.split(",") ?? [];
+    const cutSeconds = Number(start);
+    // Keep the original if the next keyframe is too far away or the result would be too short.
+    if (!(cutSeconds >= trimSeconds - 0.05 && cutSeconds <= trimSeconds + 1.25 && Number(end) - cutSeconds >= 1)) return null;
+    if (await ffmpeg.exec(["-xerror", "-i", name, "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-"]) !== 0) return null;
+    const blob = await readFfmpegBlob(ffmpeg, name, getConvertedMimeType(part.extension));
+    return blob.size > 0 ? { blob, cutSeconds } : null;
+  }, "녹화 초반의 끊긴 구간을 정리하는 중입니다.");
+}
+
+async function prepareRecordedFiles(includeSeekMetadata: boolean): Promise<string | undefined> {
+  if (!parts.some(part => part.startupTrimSeconds || (includeSeekMetadata && part.extension === RECORDING_FORMAT.webm && part.seekMetadataVersion !== SEEK_METADATA_VERSION))) {
     return;
   }
 
   setWorkStatus("미리보기 탐색 정보를 준비하는 중입니다.");
   const prepared: LoadedPart[] = [];
+  let cutSeconds = 0;
+  let keptUntrimmed = false;
   for (const part of parts) {
-    prepared.push(await makeWebmSeekable(part));
+    const trimSeconds = part.startupTrimSeconds;
+    if (trimSeconds && part.size <= MAX_STARTUP_TRIM_BYTES && getRecordingDurationFallback() >= trimSeconds + 1) {
+      try {
+        const cut = await trimRecordingStartup(part, trimSeconds);
+        if (cut) {
+          const trimmed = {
+            ...part,
+            blob: cut.blob,
+            size: cut.blob.size,
+            seekMetadataVersion: SEEK_METADATA_VERSION,
+            startupTrimSeconds: undefined,
+          } satisfies LoadedPart;
+          await putPart(trimmed);
+          prepared.push(trimmed);
+          cutSeconds += cut.cutSeconds;
+          continue;
+        }
+      } catch {
+        // A failed startup trim must leave the saved recording available.
+      }
+    }
+    keptUntrimmed ||= Boolean(trimSeconds);
+    prepared.push(includeSeekMetadata ? await makeWebmSeekable(part) : part);
   }
   parts = prepared;
 
   if (recording) {
     recording = {
       ...recording,
+      createdAt: Math.min(recording.endedAt, recording.createdAt + cutSeconds * MILLISECONDS_PER_SECOND),
       totalSize: parts.reduce((sum, part) => sum + part.size, 0),
     };
     await putRecording(recording).catch(() => {});
   }
-  setWorkStatus("미리보기 탐색 준비가 완료되었습니다.");
+  recordingDurationSeconds = getRecordingDurationFallback();
+  if (keptUntrimmed) return "초반 구간을 정리할 수 없어 원본을 유지했습니다.";
+  if (cutSeconds > 0) return "녹화 초반의 끊긴 구간을 제외했습니다.";
+  return undefined;
 }
 
 function getSelectedSourcePart(): LoadedPart | undefined {
@@ -1238,6 +1293,21 @@ async function boot(): Promise<void> {
     throw new Error("자동 다운로드할 녹화 파일을 찾지 못했습니다.");
   }
 
+  if (!autoDownloadRecording) {
+    startDeletionKeepalive();
+    renderHeader();
+  }
+  elements.resultLoadingMessage.textContent = "미리보기를 준비하는 중입니다.";
+  let preparationStatus: string | undefined;
+  try {
+    preparationStatus = await prepareRecordedFiles(!autoDownloadRecording);
+  } catch {
+    preparationStatus = "파일을 정리하지 못해 원본을 사용합니다.";
+  } finally {
+    await releaseFfmpeg();
+    hideSplitProgress();
+  }
+
   if (autoDownloadRecording) {
     await downloadSourcesAndConfirm(parts.map((part) => ({ source: getPartSource(part), filename: part.filename })));
     await markAutoDownloadHandled();
@@ -1245,19 +1315,9 @@ async function boot(): Promise<void> {
     window.close();
     return;
   }
-  startDeletionKeepalive();
-  renderHeader();
-  elements.resultLoadingMessage.textContent = "미리보기를 준비하는 중입니다.";
-  try {
-    await prepareSeekablePreview();
-  } catch {
-    setWorkStatus("탐색 정보를 만들지 못해 원본 미리보기를 사용합니다.");
-  } finally {
-    await releaseFfmpeg();
-    hideSplitProgress();
-  }
   renderHeader();
   renderParts();
+  if (preparationStatus) setWorkStatus(preparationStatus);
 }
 
 elements.downloadCurrentButton.addEventListener("click", () => {

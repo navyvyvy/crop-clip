@@ -56,13 +56,16 @@ for (const outputFormat of ['webm', 'mp4']) for (const prepared of [true, false]
     const getActiveRecordableTab = async () => ({ id: 7 });
     const loadAppState = async () => ({ region: {}, recordingState: { status: 'idle' }, settings });
     const sendCommandToContentScript = async (tabId, message) => {
+      if (message.type === 'START_DIRECT_RECORDING') {
+        order.push(message.fullPlayer ? 'start' : 'wrong mode');
+        return ok();
+      }
       order.push(message);
       return prepared ? ok() : fail('encoder preparation failed');
     };
     const saveRecordingState = async () => { order.push('recording'); };
     const getPlayerRegionGeometry = async () => ok({});
     const loadRecordingState = async () => ({ status: 'recording', recordingId: 'new-recording' });
-    const startDirectRecording = async () => { order.push('start'); return ok(); };
     ${ts.transpile(startSource.getText(file), { target: ts.ScriptTarget.ES2022 })}
     return startRecordingSession;
   `)(outputFormat, prepared, order);

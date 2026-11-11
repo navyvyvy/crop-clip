@@ -11,6 +11,8 @@ export interface DirectRecordingSession {
   canvas: HTMLCanvasElement | null;
   recorder?: MediaRecorder;
   mimeType: string;
+  stabilizeStartup?: boolean;
+  startupTrimSeconds?: number;
   extension: "webm" | "mp4";
   baseName: string;
   checkpointIndex: number;

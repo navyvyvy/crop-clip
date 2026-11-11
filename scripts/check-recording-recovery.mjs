@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import fs from 'node:fs';
 import ts from 'typescript';
+import { RECORDING_MODE, STARTUP_TRIM_MIN_SECONDS, STARTUP_TRIM_MAX_SECONDS } from '../dist/shared/types.js';
 
 const source = ts.createSourceFile('service_worker.ts', fs.readFileSync(new URL('../src/background/service_worker.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
 const code = ts.transpile(source.statements.filter(ts.isFunctionDeclaration).map(node => node.getText(source)).join('\n'), { target: ts.ScriptTarget.ES2022 });
@@ -12,6 +13,7 @@ function fixture(options = {}) {
   const parts = [], results = [], deleted = [];
   let recording;
   const env = {
+    RECORDING_MODE, STARTUP_TRIM_MIN_SECONDS, STARTUP_TRIM_MAX_SECONDS,
     chrome: {
       storage: { local: { get: async () => ({}), set: async () => {}, remove: async () => {} } },
       alarms: { create: async () => {}, clear: async () => {} },
@@ -43,6 +45,7 @@ function fixture(options = {}) {
   };
   const api = new Function('env', `
     const { chrome, loadRecordingState, loadAppState, saveRecordingState, getChunksByRecordingId, putChunk, putPart, putRecording, deleteRecordingChunks, deleteRecording } = env;
+    const { RECORDING_MODE, STARTUP_TRIM_MIN_SECONDS, STARTUP_TRIM_MAX_SECONDS } = env;
     const RECORDING_STATUS = { idle: 'idle', recording: 'recording', completed: 'completed', error: 'error' };
     const checkpointStores = new Map(), recordingTerminalOperations = new Map();
     let resultTabLaunchPromise = null;
@@ -77,6 +80,16 @@ test('stop must report success when checkpoint recovery saved the result', async
   assert.equal(f.recording.id, 'clip');
   assert.equal(f.state.status, 'idle');
   assert.equal(response.ok, true, 'opening the saved result resets state to idle, which is still a successful recovery');
+});
+
+test('only a valid full-recording startup marker reaches the saved file', async () => {
+  for (const [mode, marker, expected] of [['full', 1.5, 1.5], ['full', 20, undefined], ['region', 1.5, undefined]]) {
+    const f = fixture();
+    f.state = { ...f.state, mode };
+    assert.equal((await f.api.finalizeRecordingFromChunks('clip', 2000, marker)).ok, true);
+    assert.equal(f.parts[0].startupTrimSeconds, expected);
+    assert.equal(await f.parts[0].blob.text(), 'savedsaved');
+  }
 });
 
 test('a delayed stop must not finalize a newer recording', async () => {

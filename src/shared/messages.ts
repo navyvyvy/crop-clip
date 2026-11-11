@@ -20,6 +20,7 @@ export type ContentCommand =
   | {
       type: "START_DIRECT_RECORDING";
       recordingId: string;
+      fullPlayer: boolean;
       region: RegionSelection;
       regions?: RegionSelection[];
       settings: Settings;
@@ -45,6 +46,7 @@ export type FinalizeRecordingMessage = {
   type: "FINALIZE_RECORDING";
   recordingId: string;
   endedAt: number;
+  startupTrimSeconds?: number;
 };
 
 type OkResponse<T = undefined> = { ok: true; data?: T };

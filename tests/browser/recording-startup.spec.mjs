@@ -1,9 +1,8 @@
-import { test, expect } from './fixtures.mjs';
+import { test, expect, prepareVideo, decodeDownloads } from './fixtures.mjs';
 import fs from 'node:fs/promises';
 
-test.skip(!process.env.CROPCLIP_STARTUP_REPORT, 'Opt-in first-recording frame timing');
-
-test('first recording frame timing', async ({ extension }) => {
+const startupTimingTest = process.env.CROPCLIP_STARTUP_REPORT ? test : test.skip;
+startupTimingTest('first recording frame timing', async ({ extension }) => {
   test.setTimeout(90_000);
   const { worker, page } = extension;
   const regionMode = process.env.CROPCLIP_STARTUP_MODE === 'region';
@@ -52,4 +51,73 @@ test('first recording frame timing', async ({ extension }) => {
     expect(Number.isFinite(sample.baselineMaxGap) && Number.isFinite(sample.startupMaxGap), 'both intervals must contain video frames').toBe(true);
   }
   expect(samples[0].startupMaxGap, 'the first recording must not stall playback for 200ms').toBeLessThan(200);
+});
+
+for (const format of ['webm', 'mp4']) test(`full H.264 ${format} recordings exclude a stalled opening and keep short originals`, async ({ extension }, testInfo) => {
+  test.setTimeout(120_000);
+  const { worker, page, context } = extension;
+  await prepareVideo(page);
+  test.skip(!await page.evaluate(format => MediaRecorder.isTypeSupported(format === 'webm'
+    ? 'video/webm;codecs=avc1'
+    : 'video/mp4;codecs="avc1,mp4a.40.2"'), format), 'Requires H.264 recording support');
+  await worker.evaluate(async outputFormat => {
+    const { settings } = await chrome.storage.local.get('settings');
+    await chrome.storage.local.set({ settings: { ...settings, outputFormat } });
+    const [tab] = await chrome.tabs.query({ url: 'https://chzzk.naver.com/extension-test' });
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => {
+      const start = MediaRecorder.prototype.start;
+      MediaRecorder.prototype.start = function (...args) {
+        start.apply(this, args);
+        window.setTimeout(() => {
+          const end = performance.now() + 360;
+          while (performance.now() < end) { /* Stall the first capture interval. */ }
+        }, 60);
+      };
+    } });
+  }, format);
+  const cases = [
+    { duration: 5000, status: /끊긴 구간을 제외/, min: 2, max: 4.2 },
+    { duration: 1000, status: /원본을 유지/, min: 0.5, max: 2 },
+  ];
+  if (format === 'webm') cases.push({ duration: 5000, automatic: true });
+  for (const { duration, status, min, max, automatic } of cases) {
+    if (automatic) {
+      const downloads = testInfo.outputPath('automatic');
+      await fs.mkdir(downloads, { recursive: true });
+      const session = await context.newCDPSession(page);
+      await session.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads });
+      await worker.evaluate(async () => {
+        const { settings } = await chrome.storage.local.get('settings');
+        await chrome.storage.local.set({ settings: { ...settings, enableAutoDownloadRecording: true } });
+      });
+    }
+    await page.bringToFront();
+    await page.keyboard.press('e');
+    const button = page.locator('#crop-clip-chzzk-record-button');
+    await expect(button).toHaveAttribute('data-recording', '', { timeout: 20000 });
+    await expect(button).toHaveAttribute('aria-busy', 'false');
+    await page.waitForTimeout(duration);
+    const opened = context.waitForEvent('page');
+    await page.keyboard.press('e');
+    const result = await opened;
+    if (automatic) {
+      await expect.poll(() => result.isClosed(), { timeout: 35000 }).toBe(true);
+      const [download] = await worker.evaluate(() => chrome.downloads.search({ state: 'complete' }));
+      expect(download?.filename).toMatch(/\.webm$/);
+      const bytes = await fs.readFile(download.filename);
+      await page.evaluate(data => {
+        window.testDownloads = [new Blob([Uint8Array.from(atob(data), byte => byte.charCodeAt(0))], { type: 'video/webm' })];
+      }, bytes.toString('base64'));
+      expect(await decodeDownloads(page, 4.2)).toEqual([true]);
+      await expect.poll(() => worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState.status)).toBe('idle');
+      continue;
+    }
+    await expect(result.locator('#split-status')).toHaveText(status, { timeout: 35000 });
+    const video = result.locator('#preview-video');
+    await expect.poll(() => video.evaluate(element => element.videoWidth)).toBeGreaterThan(0);
+    const saved = await video.evaluate(element => element.duration);
+    expect(saved).toBeGreaterThan(min);
+    expect(saved).toBeLessThan(max);
+    await result.close();
+  }
 });

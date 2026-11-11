@@ -4,7 +4,7 @@ import { createVideoFrameCapture } from "./frame_capture.js";
 import { computeDirectLayout, scaleLayout, type DirectCrop, type DirectCropPlacement } from "./crop_layout.js";
 import { formatElapsed, MILLISECONDS_PER_SECOND } from "../shared/time_range.js";
 import { normalizeSettings, normalizeRegion, normalizeRegions } from "../shared/normalize.js";
-import { RECORDING_FORMAT, RECORDING_STATUS, RECORDING_MODE, DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, STANDARD_RECORDING_FRAME_RATE, HIGH_RECORDING_FRAME_RATE, DEFAULT_SHORTCUT_KEYS as DEFAULT_CONTENT_SHORTCUT_KEYS } from "../shared/types.js";
+import { RECORDING_FORMAT, RECORDING_STATUS, RECORDING_MODE, DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, STANDARD_RECORDING_FRAME_RATE, HIGH_RECORDING_FRAME_RATE, STARTUP_TRIM_MIN_SECONDS, STARTUP_TRIM_MAX_SECONDS, DEFAULT_SHORTCUT_KEYS as DEFAULT_CONTENT_SHORTCUT_KEYS } from "../shared/types.js";
 
 (() => {
   // The build bundles shared imports into one classic content script.
@@ -56,6 +56,7 @@ const CHUNK_INDEX_DIGITS = 6;
 const VISIBLE_VIDEO_SCORE_WEIGHT = 4;
 const VIDEO_FRAME_SCORE_WEIGHT = 2;
 const AUDIO_BITS_PER_SECOND = 128_000;
+const STARTUP_FRAME_GAP_MS = 150;
 const MAX_RECORDING_MESSAGE_BLOB_BYTES = 8 * 1024 * 1024;
 const MAX_PENDING_RECORDING_BYTES = 64 * 1024 * 1024;
 const CHZZK_RECORD_BUTTON_ID = "crop-clip-chzzk-record-button";
@@ -938,6 +939,7 @@ async function finalizeDirectRecording(session: DirectRecordingSession): Promise
     type: "FINALIZE_RECORDING",
     recordingId: session.recordingId,
     endedAt: session.endedAt ?? Date.now(),
+    startupTrimSeconds: session.startupTrimSeconds,
   });
   if (!response.ok) {
     // Let finishDirectRecording route this failure through checkpoint recovery too.
@@ -1016,6 +1018,7 @@ async function startDirectPart(session: DirectRecordingSession): Promise<void> {
     mimeType: session.mimeType,
     videoBitsPerSecond: session.settings.videoBitsPerSecond,
     audioBitsPerSecond: AUDIO_BITS_PER_SECOND,
+    ...(session.stabilizeStartup ? { videoKeyFrameIntervalDuration: MILLISECONDS_PER_SECOND } : {}),
   });
   session.recorder = recorder;
 
@@ -1131,8 +1134,13 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
   const outputStream = new MediaStream(tracks);
   let cropLayoutKey = getCropLayoutKey(crops);
   let lastPaintedFrame = -1;
+  const stabilizeStartup = command.fullPlayer && mime.mimeType.includes("avc1");
+  let startupStartedAt: number | undefined;
+  let lastStartupFrameAt = 0;
+  let lastStartupMediaTime = video.currentTime;
 
   const drawFrame = () => {
+    if (startupStartedAt !== undefined && (video.paused || video.seeking)) startupStartedAt = undefined;
     if (video.paused || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
     const frame = video.getVideoPlaybackQuality?.().totalVideoFrames;
     if (frame !== undefined && frame === lastPaintedFrame) return;
@@ -1155,6 +1163,17 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
       return;
     }
     lastPaintedFrame = frame ?? -1;
+    if (startupStartedAt !== undefined) {
+      const now = performance.now();
+      const elapsedSeconds = (now - startupStartedAt) / MILLISECONDS_PER_SECOND;
+      if (elapsedSeconds > STARTUP_TRIM_MAX_SECONDS) {
+        startupStartedAt = undefined;
+      } else if (now - lastStartupFrameAt >= STARTUP_FRAME_GAP_MS && video.currentTime >= lastStartupMediaTime) {
+        session.startupTrimSeconds = Math.max(STARTUP_TRIM_MIN_SECONDS, elapsedSeconds);
+      }
+      lastStartupFrameAt = now;
+      lastStartupMediaTime = video.currentTime;
+    }
   };
 
   let resolveFinish: () => void = () => {};
@@ -1174,6 +1193,7 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
     canvas,
     frameCapture: frameCapture ?? undefined,
     mimeType: mime.mimeType,
+    stabilizeStartup,
     extension: mime.extension,
     baseName: buildBaseName(),
     checkpointIndex: 0,
@@ -1196,6 +1216,7 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
 
   directSession = session;
   try {
+    if (stabilizeStartup) startupStartedAt = lastStartupFrameAt = performance.now();
     await startDirectPart(session);
     watchDirectRecordingSource(session);
     currentRecordingState = (await loadState()).recordingState;

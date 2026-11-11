@@ -82,6 +82,7 @@ export interface RecordingPartRecord {
   dataUrl?: string;
   objectUrl?: string;
   seekMetadataVersion?: number;
+  startupTrimSeconds?: number;
   createdAt: number;
 }
 
@@ -111,6 +112,8 @@ const DEFAULT_VIDEO_BITS_PER_SECOND = 6_000_000;
 export const FPS_WARNING_VIDEO_BITS_PER_SECOND = DEFAULT_VIDEO_BITS_PER_SECOND;
 export const STANDARD_RECORDING_FRAME_RATE = 30;
 export const HIGH_RECORDING_FRAME_RATE = 60;
+export const STARTUP_TRIM_MIN_SECONDS = 1.5;
+export const STARTUP_TRIM_MAX_SECONDS = 2.5;
 export const MIN_MULTI_REGION_COUNT = 2;
 export const MAX_MULTI_REGION_COUNT = 4;
 export const DEFAULT_MULTI_REGION_COUNT = 2;

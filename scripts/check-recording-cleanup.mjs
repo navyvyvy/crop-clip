@@ -292,6 +292,7 @@ const video = { paused: false, readyState: 4, frame: 1, getVideoPlaybackQuality(
 let paints = 0;
 const draw = new Function("video", "paintPlacements", `
   let lastPaintedFrame = -1, cropLayoutKey = 'fixed';
+  let startupStartedAt;
   const HTMLMediaElement = { HAVE_CURRENT_DATA: 2 };
   const sourceRegions = [{}], session = { placements: [] };
   const computeDirectCropFromSelection = () => ({}), getCropLayoutKey = () => 'fixed';
