@@ -388,6 +388,7 @@ const createStartup = new Function("playerState", "mimeType", "nativeCapture", `
   const requestChzzkToolSync = () => {}, syncChzzkRecordTimer = () => {};
   const loadState = async () => ({ recordingState: {} });
   const HIGH_RECORDING_FRAME_RATE = 60, STANDARD_RECORDING_FRAME_RATE = 30, MILLISECONDS_PER_SECOND = 1000;
+  const RECORDING_FORMAT = { mp4: "mp4" };
   const HTMLMediaElement = { HAVE_CURRENT_DATA: 2 };
   ${ts.transpile(startupFunctions.join("\n"), { target: ts.ScriptTarget.ES2022 })}
   return { start: startDirectRecording, refs, timers,
@@ -420,6 +421,10 @@ for (const nativeCapture of [true, 'fallback']) {
   assert.equal(recording.refs.canvasContexts ?? 0, nativeCapture === true ? 0 : 1, 'fallback must reuse its prepared context');
   recording.stop(); recording.finish();
 }
+const croppedMp4 = createStartup({ muted: false, volume: 1 }, 'video/mp4', true);
+await croppedMp4.start({ recordingId: 'cropped-mp4', fullPlayer: false, region: {}, settings: {} });
+assert.equal(croppedMp4.refs.canvasContexts, 1, 'cropped MP4 must use the native canvas track');
+croppedMp4.stop(); croppedMp4.finish();
 const startup = createStartup({ muted: false, volume: 1 });
 assert.deepEqual(await startup.start({ recordingId: "pending-save", region: {}, settings: {} }), { ok: true });
 startup.stop();

@@ -1085,7 +1085,9 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
 
   let context: CanvasRenderingContext2D | null = null;
 
-  const frameCapture = crops.length === 1
+  // Feed cropped MP4 through canvas capture to keep Chromium's fallback encoder on a native track.
+  const useFrameCapture = crops.length === 1 && (mime.extension !== RECORDING_FORMAT.mp4 || command.fullPlayer);
+  const frameCapture = useFrameCapture
     ? createVideoFrameCapture(video, output.width, output.height, handleVideoFrameError.bind(null, command.recordingId), mime.extension !== "mp4")
     : null;
   const paintCanvas = (placements: DirectCropPlacement[]) => {

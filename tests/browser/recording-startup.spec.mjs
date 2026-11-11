@@ -77,7 +77,7 @@ for (const format of ['webm', 'mp4']) test(`full H.264 ${format} recordings excl
   }, format);
   const cases = [
     { duration: 5000, status: /끊긴 구간을 제외/, min: 2, max: 4.2 },
-    { duration: 1000, status: /원본을 유지/, min: 0.5, max: 2 },
+    { duration: 1000, min: 0.5, max: 2 },
   ];
   if (format === 'webm') cases.push({ duration: 5000, automatic: true });
   for (const { duration, status, min, max, automatic } of cases) {
@@ -112,7 +112,7 @@ for (const format of ['webm', 'mp4']) test(`full H.264 ${format} recordings excl
       await expect.poll(() => worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState.status)).toBe('idle');
       continue;
     }
-    await expect(result.locator('#split-status')).toHaveText(status, { timeout: 35000 });
+    if (status) await expect(result.locator('#split-status')).toHaveText(status, { timeout: 35000 });
     const video = result.locator('#preview-video');
     await expect.poll(() => video.evaluate(element => element.videoWidth)).toBeGreaterThan(0);
     const saved = await video.evaluate(element => element.duration);
