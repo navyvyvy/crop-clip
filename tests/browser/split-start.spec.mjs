@@ -45,7 +45,7 @@ async function prepareSplitSource(result, base, sizeMode = false) {
       const blob = await readFfmpegBlob(ffmpeg, 'source.webm', 'video/webm');
       const id = crypto.randomUUID(), createdAt = Date.now();
       await putRecording({ id, createdAt, endedAt: createdAt + 9000, totalSize: blob.size, actualExtension: 'webm' });
-      await putPart({ id: crypto.randomUUID(), recordingId: id, index: 0, filename: 'motion.webm',
+      await putPart({ id: crypto.randomUUID(), recordingId: id, index: 0, filename: 'motion_20260717_120000_45s.webm',
         mimeType: 'video/webm', extension: 'webm', size: blob.size, blob, createdAt, seekMetadataVersion: 1 });
       const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer()))).join(',');
       return { id, bytes: blob.size, hash };
@@ -251,7 +251,7 @@ test('split downloads finish in reverse order for newest-first folder sorting', 
       const [item] = await chrome.downloads.search({ id });
       return { requestedName: filename, path: item.filename, state: item.state };
     })));
-    expect(files.map(file => file.requestedName)).toEqual([4, 3, 2, 1].map(index => `motion_00${index}.mp4`));
+    expect(files.map(file => file.requestedName)).toEqual([4, 3, 2, 1].map(index => `motion_20260717_120000_00${index}.mp4`));
     expect(files.map(file => file.state)).toEqual(Array(4).fill('complete'));
     const saved = await Promise.all(files.map(file => stat(file.path)));
     expect(saved.every(file => file.size > 0)).toBe(true);

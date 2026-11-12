@@ -190,6 +190,10 @@ for (const format of ['webm', 'mp4']) test(`full H.264 ${format} recordings excl
     const saved = await video.evaluate(element => element.duration);
     expect(saved).toBeGreaterThan(min);
     expect(saved).toBeLessThan(max);
+    const downloadPromise = result.waitForEvent('download');
+    await result.locator('#download-current-button').click();
+    const download = await downloadPromise;
+    expect(download.suggestedFilename().endsWith(`_${Math.max(1, Math.round(saved))}s.${format}`)).toBe(true);
     await result.close();
   }
 });

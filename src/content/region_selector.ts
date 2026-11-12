@@ -1149,6 +1149,9 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
   ];
   const outputStream = new MediaStream(tracks);
   let cropLayoutKey = getCropLayoutKey(crops);
+  const layoutDependsOnlyOnVideoSize = command.fullPlayer && sourceRegions.every(region => region.videoRelative);
+  let layoutVideoWidth = video.videoWidth;
+  let layoutVideoHeight = video.videoHeight;
   let lastPaintedFrame = -1;
   const stabilizeStartup = command.fullPlayer && mime.mimeType.includes("avc1");
   let startupStartedAt: number | undefined;
@@ -1160,17 +1163,21 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
     if (video.paused || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
     const frame = video.getVideoPlaybackQuality?.().totalVideoFrames;
     if (frame !== undefined && frame === lastPaintedFrame) return;
-    const nextCrops = sourceRegions
-      .map((region) => computeDirectCropFromSelection(region, video))
-      .filter((crop): crop is DirectCrop => crop !== null);
-    const nextCropLayoutKey = getCropLayoutKey(nextCrops);
-    if (nextCrops.length > 0 && nextCropLayoutKey !== cropLayoutKey) {
-      cropLayoutKey = nextCropLayoutKey;
-      const nextLayout = computeDirectLayout(nextCrops);
-      const scale = Math.min(output.width / nextLayout.output.width, output.height / nextLayout.output.height);
-      const width = nextLayout.output.width * scale;
-      const height = nextLayout.output.height * scale;
-      session.placements = scaleLayout(nextLayout, scale, Math.round((output.width - width) / 2), Math.round((output.height - height) / 2));
+    if (!layoutDependsOnlyOnVideoSize || layoutVideoWidth !== video.videoWidth || layoutVideoHeight !== video.videoHeight) {
+      layoutVideoWidth = video.videoWidth;
+      layoutVideoHeight = video.videoHeight;
+      const nextCrops = sourceRegions
+        .map((region) => computeDirectCropFromSelection(region, video))
+        .filter((crop): crop is DirectCrop => crop !== null);
+      const nextCropLayoutKey = getCropLayoutKey(nextCrops);
+      if (nextCrops.length > 0 && nextCropLayoutKey !== cropLayoutKey) {
+        cropLayoutKey = nextCropLayoutKey;
+        const nextLayout = computeDirectLayout(nextCrops);
+        const scale = Math.min(output.width / nextLayout.output.width, output.height / nextLayout.output.height);
+        const width = nextLayout.output.width * scale;
+        const height = nextLayout.output.height * scale;
+        session.placements = scaleLayout(nextLayout, scale, Math.round((output.width - width) / 2), Math.round((output.height - height) / 2));
+      }
     }
     try {
       paintPlacements(session.placements);

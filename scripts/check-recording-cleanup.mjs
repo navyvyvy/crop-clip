@@ -288,16 +288,19 @@ for (const failure of ["encoder", "storage", "finalize-response", "finalize-reje
 }
 console.log("recording error cleanup checks passed");
 
-const video = { paused: false, readyState: 4, frame: 1, getVideoPlaybackQuality() { return { totalVideoFrames: this.frame }; } };
+const video = { paused: false, readyState: 4, videoWidth: 1920, videoHeight: 1080, frame: 1, getVideoPlaybackQuality() { return { totalVideoFrames: this.frame }; } };
 let paints = 0;
-const draw = new Function("video", "paintPlacements", `
+let cropChecks = 0;
+const draw = new Function("video", "paintPlacements", "computeDirectCropFromSelection", `
   let lastPaintedFrame = -1, cropLayoutKey = 'fixed';
+  let layoutVideoWidth = video.videoWidth, layoutVideoHeight = video.videoHeight;
+  const layoutDependsOnlyOnVideoSize = true;
   let startupStartedAt;
   const HTMLMediaElement = { HAVE_CURRENT_DATA: 2 };
   const sourceRegions = [{}], session = { placements: [] };
-  const computeDirectCropFromSelection = () => ({}), getCropLayoutKey = () => 'fixed';
+  const getCropLayoutKey = () => 'fixed';
   return ${ts.transpile(drawFrameSource, { target: ts.ScriptTarget.ES2022 })};
-`)(video, () => paints++);
+`)(video, () => paints++, () => { cropChecks++; return {}; });
 for (let tick = 0; tick < 60; tick++) draw();
 assert.equal(paints, 1, "paint each decoded frame only once, even when the recording timer runs faster");
 video.paused = true;
@@ -307,10 +310,16 @@ assert.equal(paints, 1, "paused playback must not cause redundant full-frame cop
 video.paused = false;
 draw();
 assert.equal(paints, 2, "resume drawing as soon as playback resumes");
+assert.equal(cropChecks, 0, "full recording reuses its layout while resolution is unchanged");
+video.videoWidth = 1280;
+video.videoHeight = 720;
+video.frame++;
+draw();
+assert.equal(cropChecks, 1, "full recording recalculates its layout after a resolution change");
 video.readyState = 0;
 video.frame++;
 draw();
-assert.equal(paints, 2, "do not draw a frame while the player is loading");
+assert.equal(paints, 3, "do not draw a frame while the player is loading");
 console.log("recording frame checks passed");
 
 // Starting a recording rebuilds the border before its message response arrives.

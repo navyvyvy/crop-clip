@@ -88,7 +88,6 @@ assert.match(serviceWorkerText, /active: settings\.autoFocusResult && !settings\
 assert.match(messagesText, /AUTO_DOWNLOAD_HANDLED/);
 assert.ok(manifest.permissions.includes("downloads"));
 assert.match(resultText, /function waitForDownloadCompletion\(/);
-assert.match(resultText, /if \(autoDownloadRecording\) \{\s*await downloadSourcesAndConfirm/);
 assert.match(resultText, /await downloadSourcesAndConfirm\([\s\S]*?await markAutoDownloadHandled\(\);\s*allowRecordingDeletion = true;\s*window\.close\(\)/);
 assert.match(resultText, /let restoreSourceTabOnClose = !autoDownloadRecording/);
 assert.match(resultText, /function restoreSourceTab\(\): void \{\s*if \(!restoreSourceTabOnClose \|\| !resultTab\?\.active\) \{\s*return;/);
@@ -201,7 +200,7 @@ const functionNames = new Set([
   "computeResizedEdges",
   "getResizeFocusPoint",
   "getStreamerNameFromTitle",
-  "buildDirectFilename",
+  "getRecordingFilename",
   "getFinalRecordingEndedAt",
   "decodeRecordingDataUrl",
   "getRecordingChunkSliceRanges",
@@ -228,6 +227,7 @@ function collectStatements(node, file) {
 }
 collectStatements(sourceFile, sourceFile);
 collectStatements(serviceWorkerFile, serviceWorkerFile);
+collectStatements(resultFile, resultFile);
 const statements = selectedStatements.join("\n");
 const observed = [], disconnected = [];
 const replacement = { closest: () => null };
@@ -268,19 +268,21 @@ applyBorder(border, selection, null);
 assert.equal(border.style.display, 'none', 'a temporarily detached player must not leave a stale border');
 applyBorder(border, selection, { left: 0, top: 0, width: 800, height: 400 });
 assert.equal(border.style.display, '', 'reattaching the player must restore the border');
-const runtime = ts.transpileModule(`const recordingTerminalOperations = new Map();\nconst RECORDING_STATUS = { idle: "idle", recording: "recording", completed: "completed", error: "error" };\nconst RECORDING_MODE = { region: "region", full: "full" };\nconst MILLISECONDS_PER_SECOND = 1_000;\nconst SECONDS_PER_MINUTE = 60;\nconst SECONDS_PER_HOUR = 3_600;\n${statements}\nreturn { computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, getRecordingChunkSliceRanges, runRecordingTerminalOperation, normalizeRecordingState };`, {
+const runtime = ts.transpileModule(`const recordingTerminalOperations = new Map();\nconst RECORDING_STATUS = { idle: "idle", recording: "recording", completed: "completed", error: "error" };\nconst RECORDING_MODE = { region: "region", full: "full" };\nconst MILLISECONDS_PER_SECOND = 1_000;\nconst SECONDS_PER_MINUTE = 60;\nconst SECONDS_PER_HOUR = 3_600;\n${statements}\nreturn { computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, getRecordingFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, getRecordingChunkSliceRanges, runRecordingTerminalOperation, normalizeRecordingState };`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
 }).outputText;
-const { computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, buildDirectFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, getRecordingChunkSliceRanges, runRecordingTerminalOperation, normalizeRecordingState } = new Function(runtime)();
+const { computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, getRecordingFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, getRecordingChunkSliceRanges, runRecordingTerminalOperation, normalizeRecordingState } = new Function(runtime)();
 
 assert.equal(getStreamerNameFromTitle("치지직 게임 - CHZZK"), "치지직 게임");
 assert.equal(getStreamerNameFromTitle("치지직 스포츠 - CHZZK"), "치지직 스포츠");
 assert.equal(getStreamerNameFromTitle("치지직 배구 중계 - CHZZK"), "치지직 배구 중계");
 assert.equal(getStreamerNameFromTitle("치지직 - CHZZK"), "치지직");
 assert.equal(getStreamerNameFromTitle("Streamer | CHZZK"), "Streamer");
-assert.equal(buildDirectFilename("streamer_20260717_120000", "webm", 1_000, 43_400), "streamer_20260717_120000_42s.webm");
-assert.equal(buildDirectFilename("streamer_20260717_120000", "webm", 1_000, 66_000), "streamer_20260717_120000_1m05s.webm");
-assert.equal(buildDirectFilename("streamer_20260717_120000", "mp4", 1_000, 3_724_000), "streamer_20260717_120000_1h02m03s.mp4");
+assert.equal(getRecordingFilename("streamer_20260717_120000_45s.webm", 42.4), "streamer_20260717_120000_42s.webm");
+assert.equal(getRecordingFilename("streamer_20260717_120000.webm", 65), "streamer_20260717_120000_1m05s.webm");
+assert.equal(getRecordingFilename("streamer_20260717_120000.mp4", 3723), "streamer_20260717_120000_1h02m03s.mp4");
+assert.equal(getRecordingFilename("streamer_20260717_120000_45s.webm", Infinity), "streamer_20260717_120000.webm");
+assert.equal(getRecordingFilename("motion.webm", 33), "motion.webm");
 assert.equal(getFinalRecordingEndedAt(1_000, 10_000, 10_100), 10_000);
 assert.equal(getFinalRecordingEndedAt(1_000, 60_000, 10_000), 10_000);
 assert.equal(getFinalRecordingEndedAt(1_000, 10_000), 10_000);

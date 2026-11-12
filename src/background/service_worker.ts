@@ -2,7 +2,7 @@ import { deleteRecording, deleteRecordingChunks, getChunksByRecordingId, getReco
 import { fail, ok, type AutoDownloadHandledMessage, type ContentCommand, type DeletionScheduleRequest, type FinalizeRecordingMessage, type MessageResponse, type PopupCommand, type RecordingErrorMessage, type StoreRecordingChunkMessage } from "../shared/messages.js";
 import { loadAppState, loadRecordingState, saveRecordingState } from "../shared/storage.js";
 import { normalizeRegion, normalizeRegions } from "../shared/normalize.js";
-import { MILLISECONDS_PER_SECOND, SECONDS_PER_HOUR, SECONDS_PER_MINUTE } from "../shared/time_range.js";
+import { MILLISECONDS_PER_SECOND, SECONDS_PER_MINUTE } from "../shared/time_range.js";
 import { RECORDING_MODE, RECORDING_STATUS, STARTUP_TRIM_MIN_SECONDS, STARTUP_TRIM_MAX_SECONDS, type RecordingRecord, type RegionSelection } from "../shared/types.js";
 const DELETE_AFTER_MINUTES = 10;
 const DELETE_RETRY_MINUTES = 1;
@@ -210,17 +210,6 @@ async function sendCommandToContentScript<T = undefined>(tabId: number, message:
       return fail(getContentScriptErrorMessage(fallbackError instanceof Error ? fallbackError : error));
     }
   }
-}
-
-function buildDirectFilename(baseName: string, extension: string, createdAt: number, endedAt: number): string {
-  const totalSeconds = Math.max(1, Math.round((endedAt - createdAt) / MILLISECONDS_PER_SECOND));
-  const hours = Math.floor(totalSeconds / SECONDS_PER_HOUR);
-  const minutes = Math.floor(totalSeconds % SECONDS_PER_HOUR / SECONDS_PER_MINUTE);
-  const seconds = totalSeconds % SECONDS_PER_MINUTE;
-  const duration = hours > 0
-    ? `${hours}h${String(minutes).padStart(2, "0")}m${String(seconds).padStart(2, "0")}s`
-    : minutes > 0 ? `${minutes}m${String(seconds).padStart(2, "0")}s` : `${seconds}s`;
-  return `${baseName}_${duration}.${extension}`;
 }
 
 function getFinalRecordingEndedAt(createdAt: number, requestedEndedAt: number, lastCapturedAt?: number): number {
@@ -666,7 +655,7 @@ async function finalizeRecordingFromChunksUnlocked(recordingId: string, endedAt:
     id: `${recordingId}:part:001`,
     recordingId,
     index: 1,
-    filename: buildDirectFilename(first.baseName, first.extension, first.createdAt, actualEndedAt),
+    filename: `${first.baseName}.${first.extension}`,
     mimeType: first.mimeType,
     extension: first.extension,
     size: blob.size,

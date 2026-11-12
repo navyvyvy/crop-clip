@@ -224,7 +224,7 @@ function getSelectedSourceSizeBytes(): number {
 }
 
 function getRangeFilename(part: LoadedPart, extension: string, range?: TimeRange): string {
-  const base = getFilenameBase(part.filename);
+  const base = getFilenameBase(getRecordingFilename(part.filename));
   if (!range) {
     return `${base}.${extension}`;
   }
@@ -378,6 +378,21 @@ async function convertPartAtSpeed(part: LoadedPart, speed: number, range?: TimeR
 
 function getFilenameBase(filename: string): string {
   return filename.replace(/\.[^.]+$/, "");
+}
+
+function getRecordingFilename(filename: string, duration = 0): string {
+  const match = /^(.+_\d{8}_\d{6})(?:_(?:\d+h)?(?:\d+m)?\d+s)?(\.(?:webm|mp4))$/i.exec(filename);
+  if (!match) return filename;
+  const [, base, extension] = match;
+  if (!Number.isFinite(duration) || duration <= 0) return `${base}${extension}`;
+  const totalSeconds = Math.max(1, Math.round(duration));
+  const hours = Math.floor(totalSeconds / SECONDS_PER_HOUR);
+  const minutes = Math.floor(totalSeconds % SECONDS_PER_HOUR / SECONDS_PER_MINUTE);
+  const seconds = totalSeconds % SECONDS_PER_MINUTE;
+  const label = hours > 0
+    ? `${hours}h${String(minutes).padStart(2, "0")}m${String(seconds).padStart(2, "0")}s`
+    : minutes > 0 ? `${minutes}m${String(seconds).padStart(2, "0")}s` : `${seconds}s`;
+  return `${base}_${label}${extension}`;
 }
 
 function delay(ms: number): Promise<void> {
@@ -964,7 +979,7 @@ async function createDurationSplitWithFfmpeg(
       await deleteFfmpegFile(ffmpeg, files[index].name, true);
       segments.push({
         blob,
-        filename: `${getFilenameBase(part.filename)}_${String(index + 1).padStart(SPLIT_FILE_INDEX_DIGITS, "0")}.${outputFormat}`,
+        filename: `${getFilenameBase(getRecordingFilename(part.filename))}_${String(index + 1).padStart(SPLIT_FILE_INDEX_DIGITS, "0")}.${outputFormat}`,
         index: index + 1,
         startSeconds: start,
         endSeconds: end,
@@ -1308,7 +1323,15 @@ async function boot(): Promise<void> {
     hideSplitProgress();
   }
 
+  for (const part of parts) part.filename = getRecordingFilename(part.filename);
   if (autoDownloadRecording) {
+    for (const part of parts) {
+      const loaded = await loadVideoForPart(part).catch(() => undefined);
+      if (loaded) {
+        part.filename = getRecordingFilename(part.filename, loaded.duration);
+        releaseVideoSource(loaded.video, loaded.url, loaded.revoke);
+      }
+    }
     await downloadSourcesAndConfirm(parts.map((part) => ({ source: getPartSource(part), filename: part.filename })));
     await markAutoDownloadHandled();
     allowRecordingDeletion = true;
@@ -1451,11 +1474,18 @@ elements.downloadAllButton.addEventListener("click", () => {
   }, "나눈 파일을 저장하지 못했습니다.");
 });
 
+function syncPreviewDuration(): void {
+  const duration = elements.previewVideo.duration;
+  if (!Number.isFinite(duration) || duration <= 0) return;
+  const part = getSelectedSourcePart();
+  if (part) part.filename = getRecordingFilename(part.filename, duration);
+  setSourceDuration(duration);
+}
+
+elements.previewVideo.addEventListener("durationchange", syncPreviewDuration);
 elements.previewVideo.addEventListener("loadedmetadata", () => {
   updateSpeedControls();
-  if (Number.isFinite(elements.previewVideo.duration) && elements.previewVideo.duration > 0) {
-    setSourceDuration(elements.previewVideo.duration);
-  }
+  syncPreviewDuration();
   void renderTimelineThumbnails(getSelectedSourcePart());
 });
 
