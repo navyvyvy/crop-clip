@@ -51,6 +51,23 @@
 
               <div class="setting-row">
                 <span class="setting-copy">
+                  <span id="original-stream-title" class="setting-title">전체 녹화 원본 사용</span>
+                  <span id="original-stream-desc" class="setting-desc">MP4 · 최대 5분 · 비트레이트 미적용</span>
+                </span>
+                <span class="segmented" role="radiogroup" aria-labelledby="original-stream-title" aria-describedby="original-stream-desc">
+                  <label>
+                    <input type="radio" name="original-stream-mode" value="off" />
+                    <span>OFF</span>
+                  </label>
+                  <label>
+                    <input type="radio" name="original-stream-mode" value="on" />
+                    <span>ON</span>
+                  </label>
+                </span>
+              </div>
+
+              <div class="setting-row">
+                <span class="setting-copy">
                   <span class="setting-title">비트레이트</span>
                   <span class="setting-desc">화질·용량 조절, 기본 6 Mbps</span>
                 </span>
@@ -146,6 +163,23 @@
 
             <section class="settings-group" aria-labelledby="convenience-settings-title">
               <h2 id="convenience-settings-title" class="settings-heading">편의 기능</h2>
+              <div class="setting-row">
+                <span class="setting-copy">
+                  <span id="recording-size-title" class="setting-title">녹화 용량 표시</span>
+                  <span id="recording-size-desc" class="setting-desc">원본 저장 중 타이머에 표시</span>
+                </span>
+                <span class="segmented" role="radiogroup" aria-labelledby="recording-size-title" aria-describedby="recording-size-desc">
+                  <label>
+                    <input type="radio" name="recording-size-mode" value="off" />
+                    <span>OFF</span>
+                  </label>
+                  <label>
+                    <input type="radio" name="recording-size-mode" value="on" />
+                    <span>ON</span>
+                  </label>
+                </span>
+              </div>
+
               <label class="setting-row">
                 <span class="setting-copy">
                   <span class="setting-title">전체 녹화 버튼</span>

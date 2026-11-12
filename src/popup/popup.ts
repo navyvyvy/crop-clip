@@ -1,8 +1,8 @@
 import { DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, DEFAULT_SETTINGS, DEFAULT_SHORTCUT_KEYS, FPS_WARNING_VIDEO_BITS_PER_SECOND, MAX_MULTI_REGION_COUNT, MAX_SEEK_SECONDS, MAX_VIDEO_BITS_PER_SECOND, MIN_MULTI_REGION_COUNT, MIN_SEEK_SECONDS, MIN_VIDEO_BITS_PER_SECOND, RECORDING_FORMAT, RECORDING_MODE, RECORDING_STATUS, type AppState, type RecordingFormat, type Settings, type ShortcutAction } from "../shared/types.js";
 import { loadAppState, saveSettings } from "../shared/storage.js";
 import { normalizeRecordingState, normalizeRegion, normalizeRegions, normalizeSettings } from "../shared/normalize.js";
-import type { MessageResponse, PopupCommand } from "../shared/messages.js";
-import { formatElapsed, MILLISECONDS_PER_SECOND } from "../shared/time_range.js";
+import type { ContentCommand, MessageResponse, PopupCommand } from "../shared/messages.js";
+import { formatElapsed, formatRecordingSize, MILLISECONDS_PER_SECOND } from "../shared/time_range.js";
 
 const elements = {
   versionBadge: document.getElementById("version-badge") as HTMLSpanElement,
@@ -14,6 +14,8 @@ const elements = {
   fullRecordToggleButton: document.getElementById("full-record-toggle-button") as HTMLButtonElement,
   fullScreenshotButton: document.getElementById("full-screenshot-button") as HTMLButtonElement,
   outputFormatInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='output-format']")),
+  originalStreamModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='original-stream-mode']")),
+  recordingSizeModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='recording-size-mode']")),
   fpsModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='fps-mode']")),
   mutedRecordingModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='muted-recording-mode']")),
   multiRegionModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='multi-region-mode']")),
@@ -74,15 +76,42 @@ let appState: AppState = {
 
 let sendingCommand = false;
 let recordingTimerId: number | null = null;
+let recordingSize: { recordingId: string; bytes?: number; pending: boolean } | undefined;
 let waitingShortcutAction: ShortcutAction | null = null;
 
 function updateRecordingTimer(): void {
-  if (appState.recordingState.status !== RECORDING_STATUS.recording || !appState.recordingState.startedAt) {
+  const { status, startedAt, mode, recordingId, tabId } = appState.recordingState;
+  if (status !== RECORDING_STATUS.recording || !startedAt) {
     elements.recordingTime.textContent = "";
     return;
   }
 
-  elements.recordingTime.textContent = formatElapsed(Date.now() - appState.recordingState.startedAt);
+  if (!appState.settings.showRecordingSize || mode !== RECORDING_MODE.full || !recordingId || tabId === undefined) {
+    recordingSize = undefined;
+    elements.recordingTime.textContent = formatElapsed(Date.now() - startedAt);
+    return;
+  }
+
+  if (recordingSize?.recordingId !== recordingId) recordingSize = { recordingId, pending: false };
+  const sample = recordingSize;
+  const render = () => {
+    const elapsed = formatElapsed(Date.now() - startedAt);
+    const text = sample.bytes === undefined ? elapsed : `${elapsed} · ${formatRecordingSize(sample.bytes)}`;
+    if (elements.recordingTime.textContent !== text) elements.recordingTime.textContent = text;
+  };
+  render();
+  if (sample.pending) return;
+
+  sample.pending = true;
+  void chrome.tabs.sendMessage(tabId, { type: "GET_ORIGINAL_RECORDING_SIZE", recordingId } satisfies ContentCommand)
+    .then((response: MessageResponse<number> | undefined) => {
+      if (response?.ok && response.data !== undefined) {
+        sample.bytes = response.data;
+        if (recordingSize === sample) render();
+      }
+    }).catch(() => {
+      // The recording tab can close between reading its state and requesting its size.
+    }).finally(() => { sample.pending = false; });
 }
 
 function syncRecordingTimer(): void {
@@ -92,6 +121,7 @@ function syncRecordingTimer(): void {
   }
 
   if (appState.recordingState.status !== RECORDING_STATUS.recording || !appState.recordingState.startedAt) {
+    recordingSize = undefined;
     elements.recordingTime.textContent = "";
     return;
   }
@@ -127,6 +157,12 @@ function syncPresetUi(settings: Settings): void {
   const outputFormat = settings.outputFormat === RECORDING_FORMAT.mp4 ? RECORDING_FORMAT.mp4 : RECORDING_FORMAT.webm;
   for (const input of elements.outputFormatInputs) {
     input.checked = input.value === outputFormat;
+  }
+  for (const input of elements.originalStreamModeInputs) {
+    input.checked = input.value === (settings.enableOriginalStreamRecording ? "on" : "off");
+  }
+  for (const input of elements.recordingSizeModeInputs) {
+    input.checked = input.value === (settings.showRecordingSize ? "on" : "off");
   }
   for (const input of elements.fpsModeInputs) {
     input.checked = input.value === (settings.enable60fps ? "on" : "off");
@@ -193,6 +229,7 @@ function renderState(): void {
   const lockControls = isRecording;
   const controls = [
     ...elements.outputFormatInputs,
+    ...elements.originalStreamModeInputs,
     ...elements.fpsModeInputs,
     ...elements.mutedRecordingModeInputs,
     ...elements.multiRegionModeInputs,
@@ -290,6 +327,8 @@ function readSettingsFromUi(): Settings {
 
   return normalizeSettings({
     outputFormat,
+    enableOriginalStreamRecording: elements.originalStreamModeInputs.some(input => input.checked && input.value === "on"),
+    showRecordingSize: elements.recordingSizeModeInputs.some(input => input.checked && input.value === "on"),
     videoBitsPerSecond,
     enable60fps,
     allowMutedRecording,
@@ -476,7 +515,7 @@ elements.fullScreenshotButton.addEventListener("click", () => {
   });
 });
 
-for (const element of [...elements.outputFormatInputs, ...elements.fpsModeInputs, ...elements.mutedRecordingModeInputs, ...elements.multiRegionModeInputs, ...elements.fullRecordModeInputs, ...elements.fullScreenshotModeInputs, ...elements.seekButtonModeInputs, ...elements.streamerFilenameModeInputs, ...elements.autoFocusResultModeInputs, ...elements.autoDownloadRecordingModeInputs, ...elements.autoDownloadSplitModeInputs, ...elements.shortcutModeInputs]) {
+for (const element of [...elements.outputFormatInputs, ...elements.originalStreamModeInputs, ...elements.recordingSizeModeInputs, ...elements.fpsModeInputs, ...elements.mutedRecordingModeInputs, ...elements.multiRegionModeInputs, ...elements.fullRecordModeInputs, ...elements.fullScreenshotModeInputs, ...elements.seekButtonModeInputs, ...elements.streamerFilenameModeInputs, ...elements.autoFocusResultModeInputs, ...elements.autoDownloadRecordingModeInputs, ...elements.autoDownloadSplitModeInputs, ...elements.shortcutModeInputs]) {
   element.addEventListener("change", () => {
     void persistUiSettings();
   });
@@ -619,6 +658,8 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (changes.recordingState) {
     appState.recordingState = normalizeRecordingState(changes.recordingState.newValue as Partial<AppState["recordingState"]> | undefined);
     syncRecordingTimer();
+  } else if (changes.settings) {
+    updateRecordingTimer();
   }
 
   renderState();

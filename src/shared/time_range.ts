@@ -7,6 +7,7 @@ export const TIME_STEP_SECONDS = 0.1;
 export const MILLISECONDS_PER_SECOND = 1_000;
 export const SECONDS_PER_MINUTE = 60;
 export const SECONDS_PER_HOUR = 3_600;
+export const MAX_ORIGINAL_STREAM_SECONDS = 5 * SECONDS_PER_MINUTE;
 const BYTES_PER_MEGABYTE = 1_000_000;
 const SIZE_SPLIT_SAFETY_RATIO = 0.9;
 const FLOATING_POINT_PRECISION_DIGITS = 10;
@@ -70,6 +71,11 @@ export function megabytesToBytes(megabytes: number): number {
 
 export function bytesToMegabytes(bytes: number): number {
   return bytes / BYTES_PER_MEGABYTE;
+}
+
+export function formatRecordingSize(bytes: number): string {
+  const megabytes = bytesToMegabytes(bytes);
+  return `약 ${megabytes.toFixed(megabytes < 10 ? 1 : 0)} MB`;
 }
 
 export function floorTimeToStep(seconds: number): number {

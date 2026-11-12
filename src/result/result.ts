@@ -11,6 +11,7 @@ import {
   getExpectedSplitCount,
   getNextSizeSplitSeconds,
   isFullTimeRange,
+  MAX_ORIGINAL_STREAM_SECONDS,
   MILLISECONDS_PER_SECOND,
   megabytesToBytes,
   normalizeTimeRange,
@@ -380,6 +381,19 @@ function getFilenameBase(filename: string): string {
   return filename.replace(/\.[^.]+$/, "");
 }
 
+function getCaptureMethodLabel(part?: LoadedPart): string | undefined {
+  if (part?.captureMethod === "original") return "방송 원본";
+  if (part?.captureMethod === "screen") return "화면 녹화";
+  return undefined;
+}
+
+function getRecordingDownload(part: LoadedPart): { source: Blob | string; filename: string } {
+  const filename = part.captureMethod === "original"
+    ? `${getFilenameBase(part.filename)}_방송원본.${part.extension}`
+    : part.filename;
+  return { source: getPartSource(part), filename };
+}
+
 function getRecordingFilename(filename: string, duration = 0): string {
   const match = /^(.+_\d{8}_\d{6})(?:_(?:\d+h)?(?:\d+m)?\d+s)?(\.(?:webm|mp4))$/i.exec(filename);
   if (!match) return filename;
@@ -449,8 +463,30 @@ async function trimRecordingStartup(part: LoadedPart, trimSeconds: number): Prom
   }, "녹화 초반의 끊긴 구간을 정리하는 중입니다.");
 }
 
+async function prepareOriginalStream(part: LoadedPart): Promise<LoadedPart> {
+  const start = part.originalStreamStart!;
+  const end = Math.min(part.originalStreamEnd ?? Infinity, start + MAX_ORIGINAL_STREAM_SECONDS);
+  const blob = await withFfmpegInput(part, async (ffmpeg, inputName) => {
+    const name = "output-original.mp4";
+    const code = await ffmpeg.exec([
+      "-seek_timestamp", "1", "-ss", String(start), "-i", inputName,
+      "-t", String(end - start),
+      "-map", "0:v:0", "-map", "0:a:0", "-c", "copy", "-use_editlist", "1",
+      "-avoid_negative_ts", "disabled", "-movflags", "+faststart", name,
+    ]);
+    if (code !== 0 || await ffmpeg.exec(["-xerror", "-i", name, "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-"]) !== 0) {
+      throw new Error("원본 방송을 MP4로 묶지 못했습니다.");
+    }
+    return readFfmpegBlob(ffmpeg, name, "video/mp4");
+  }, "원본 방송 조각을 MP4로 묶는 중입니다.");
+  const prepared = { ...part, blob, size: blob.size, originalStreamStart: undefined, originalStreamEnd: undefined } satisfies LoadedPart;
+  await putPart(prepared);
+  return prepared;
+}
+
 async function prepareRecordedFiles(includeSeekMetadata: boolean): Promise<string | undefined> {
-  if (!parts.some(part => part.startupTrimSeconds || (includeSeekMetadata && part.extension === RECORDING_FORMAT.webm && part.seekMetadataVersion !== SEEK_METADATA_VERSION))) {
+  if (!parts.some(part => part.originalStreamStart !== undefined || part.startupTrimSeconds
+    || (includeSeekMetadata && part.extension === RECORDING_FORMAT.webm && part.seekMetadataVersion !== SEEK_METADATA_VERSION))) {
     return;
   }
 
@@ -459,6 +495,10 @@ async function prepareRecordedFiles(includeSeekMetadata: boolean): Promise<strin
   let cutSeconds = 0;
   let keptUntrimmed = false;
   for (const part of parts) {
+    if (part.originalStreamStart !== undefined) {
+      prepared.push(await prepareOriginalStream(part));
+      continue;
+    }
     const trimSeconds = part.startupTrimSeconds;
     if (trimSeconds && part.size <= MAX_STARTUP_TRIM_BYTES && getRecordingDurationFallback() >= trimSeconds + 1) {
       try {
@@ -1030,7 +1070,7 @@ async function createSizeSplit(part: LoadedPart, maxMegabytes: number, outputFor
 
 async function convertPartWithRecorder(part: LoadedPart, outputFormat: OutputFormat, range?: TimeRange): Promise<{ source: Blob | string; filename: string }> {
   if (part.extension === outputFormat && !range) {
-    return { source: getPartSource(part), filename: part.filename };
+    return getRecordingDownload(part);
   }
 
   const { video, url, revoke, duration } = await loadVideoForPart(part, getRecordingDurationFallback());
@@ -1046,7 +1086,7 @@ async function convertPartWithRecorder(part: LoadedPart, outputFormat: OutputFor
 
 async function convertPart(part: LoadedPart, outputFormat: ConvertFormat, range?: TimeRange): Promise<{ source: Blob | string; filename: string }> {
   if (part.extension === outputFormat && !range) {
-    return { source: getPartSource(part), filename: part.filename };
+    return getRecordingDownload(part);
   }
 
   try {
@@ -1108,7 +1148,7 @@ function renderHeader(): void {
   const duration = range.end - range.start;
   const streamer = getStreamerNameFromFilename();
   const size = `${getActiveTimeRange() ? "예상 " : ""}${formatBytes(getSelectedSourceSizeBytes())}`;
-  const summary = [streamer, recording.actualExtension.toUpperCase(), size, formatTimeInput(duration)].filter(Boolean).join(" · ");
+  const summary = [streamer, getCaptureMethodLabel(parts[0]), recording.actualExtension.toUpperCase(), size, formatTimeInput(duration)].filter(Boolean).join(" · ");
   elements.formatChip.textContent = summary;
 }
 
@@ -1325,6 +1365,9 @@ async function boot(): Promise<void> {
 
   for (const part of parts) part.filename = getRecordingFilename(part.filename);
   if (autoDownloadRecording) {
+    if (parts.some(part => part.originalStreamStart !== undefined)) {
+      throw new Error("원본 조각을 정리하지 못했습니다. 결과창에서 녹화 데이터를 확인하세요.");
+    }
     for (const part of parts) {
       const loaded = await loadVideoForPart(part).catch(() => undefined);
       if (loaded) {
@@ -1332,7 +1375,7 @@ async function boot(): Promise<void> {
         releaseVideoSource(loaded.video, loaded.url, loaded.revoke);
       }
     }
-    await downloadSourcesAndConfirm(parts.map((part) => ({ source: getPartSource(part), filename: part.filename })));
+    await downloadSourcesAndConfirm(parts.map(getRecordingDownload));
     await markAutoDownloadHandled();
     allowRecordingDeletion = true;
     window.close();
@@ -1346,7 +1389,7 @@ async function boot(): Promise<void> {
 elements.downloadCurrentButton.addEventListener("click", () => {
   const range = getActiveTimeRange();
   if (!range) {
-    void downloadSourcesSequentially(parts.map((part) => ({ source: getPartSource(part), filename: part.filename })));
+    void downloadSourcesSequentially(parts.map(getRecordingDownload));
     return;
   }
   const part = getSelectedSourcePart();
@@ -1362,7 +1405,7 @@ elements.downloadCurrentButton.addEventListener("click", () => {
 });
 
 elements.downloadOriginalButton.addEventListener("click", () => {
-  void downloadSourcesSequentially(parts.map((part) => ({ source: getPartSource(part), filename: part.filename })));
+  void downloadSourcesSequentially(parts.map(getRecordingDownload));
 });
 
 elements.closeButton.addEventListener("click", () => {

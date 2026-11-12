@@ -26,6 +26,8 @@ export interface Settings {
   videoBitsPerSecond: number;
   enable60fps: boolean;
   allowMutedRecording: boolean;
+  enableOriginalStreamRecording: boolean;
+  showRecordingSize: boolean;
   enableMultiRegion: boolean;
   multiRegionMaxCount: number;
   enableFullRecordButton: boolean;
@@ -83,6 +85,9 @@ export interface RecordingPartRecord {
   objectUrl?: string;
   seekMetadataVersion?: number;
   startupTrimSeconds?: number;
+  originalStreamStart?: number;
+  originalStreamEnd?: number;
+  captureMethod?: "original" | "screen";
   createdAt: number;
 }
 
@@ -96,6 +101,8 @@ export interface RecordingChunkRecord {
   createdAt: number;
   capturedAt: number;
   completesBlob?: boolean;
+  originalStreamStart?: number;
+  originalStreamFallback?: true;
   blob: Blob;
 }
 
@@ -136,6 +143,8 @@ export const DEFAULT_SETTINGS: Settings = {
   videoBitsPerSecond: DEFAULT_VIDEO_BITS_PER_SECOND,
   enable60fps: false,
   allowMutedRecording: false,
+  enableOriginalStreamRecording: false,
+  showRecordingSize: false,
   enableMultiRegion: false,
   multiRegionMaxCount: DEFAULT_MULTI_REGION_COUNT,
   enableFullRecordButton: false,

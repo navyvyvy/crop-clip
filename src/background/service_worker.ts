@@ -1,8 +1,9 @@
 import { deleteRecording, deleteRecordingChunks, getChunksByRecordingId, getRecordingDeletionCandidates, putChunk, putPart, putRecording } from "../shared/idb.js";
-import { fail, ok, type AutoDownloadHandledMessage, type ContentCommand, type DeletionScheduleRequest, type FinalizeRecordingMessage, type MessageResponse, type PopupCommand, type RecordingErrorMessage, type StoreRecordingChunkMessage } from "../shared/messages.js";
+import { fail, ok, type AutoDownloadHandledMessage, type ContentCommand, type DeletionScheduleRequest, type FinalizeRecordingMessage, type MessageResponse, type PopupCommand, type RecordingErrorMessage, type StoreRecordingChunkMessage, type StreamOffsetRequest } from "../shared/messages.js";
 import { loadAppState, loadRecordingState, saveRecordingState } from "../shared/storage.js";
 import { normalizeRegion, normalizeRegions } from "../shared/normalize.js";
 import { MILLISECONDS_PER_SECOND, SECONDS_PER_MINUTE } from "../shared/time_range.js";
+import { ORIGINAL_STREAM_PREFIXES, probeOriginalStream } from "../content/original_stream.js";
 import { RECORDING_MODE, RECORDING_STATUS, STARTUP_TRIM_MIN_SECONDS, STARTUP_TRIM_MAX_SECONDS, type RecordingRecord, type RegionSelection } from "../shared/types.js";
 const DELETE_AFTER_MINUTES = 10;
 const DELETE_RETRY_MINUTES = 1;
@@ -314,7 +315,7 @@ async function cancelDirectRecording(tabId: number, recordingId?: string): Promi
   return await sendCommandToContentScript(tabId, { type: "CANCEL_DIRECT_RECORDING", recordingId });
 }
 
-async function startRecordingSession(fullPlayer: boolean, sourceTab?: chrome.tabs.Tab): Promise<MessageResponse<{ recordingId: string }>> {
+async function startRecordingSession(fullPlayer: boolean, sourceTab?: chrome.tabs.Tab, playback?: Extract<PopupCommand, { type: "START_FULL_RECORDING" }>["playback"]): Promise<MessageResponse<{ recordingId: string }>> {
   const tab = await getActiveRecordableTab(sourceTab);
   const tabId = tab.id;
   if (typeof tabId !== "number") {
@@ -348,7 +349,7 @@ async function startRecordingSession(fullPlayer: boolean, sourceTab?: chrome.tab
   const settings = state.settings;
   const recordingId = crypto.randomUUID();
   // Keep the timer and recording state idle until GPU discovery is complete.
-  const prepared = await sendCommandToContentScript(tabId, { type: "PREPARE_DIRECT_RECORDING", recordingId, settings });
+  const prepared = await sendCommandToContentScript(tabId, { type: "PREPARE_DIRECT_RECORDING", recordingId, settings, fullPlayer });
   if (!prepared.ok) return prepared;
 
   await saveRecordingState({
@@ -387,6 +388,7 @@ async function startRecordingSession(fullPlayer: boolean, sourceTab?: chrome.tab
       type: "START_DIRECT_RECORDING",
       recordingId,
       fullPlayer,
+      playback,
       region: regions[0],
       regions: settings.enableMultiRegion ? regions : undefined,
       settings,
@@ -412,7 +414,7 @@ async function startRecordingSession(fullPlayer: boolean, sourceTab?: chrome.tab
   }
 }
 
-async function startRecording(fullPlayer = false, sourceTab?: chrome.tabs.Tab): Promise<MessageResponse<{ recordingId: string }>> {
+async function startRecording(fullPlayer = false, sourceTab?: chrome.tabs.Tab, playback?: Extract<PopupCommand, { type: "START_FULL_RECORDING" }>["playback"]): Promise<MessageResponse<{ recordingId: string }>> {
   if (recordingStartInFlight) {
     return fail("녹화 시작을 처리 중입니다.");
   }
@@ -420,7 +422,7 @@ async function startRecording(fullPlayer = false, sourceTab?: chrome.tabs.Tab): 
   recordingStartInFlight = true;
   try {
     await pendingRegionWrite;
-    return await startRecordingSession(fullPlayer, sourceTab);
+    return await startRecordingSession(fullPlayer, sourceTab, playback);
   } finally {
     recordingStartInFlight = false;
   }
@@ -615,7 +617,7 @@ function storeRecordingChunk(message: StoreRecordingChunkMessage): Promise<Messa
     });
 }
 
-async function finalizeRecordingFromChunksUnlocked(recordingId: string, endedAt: number, recoverPartial = false, startupTrimSeconds?: number): Promise<MessageResponse<boolean>> {
+async function finalizeRecordingFromChunksUnlocked(recordingId: string, endedAt: number, recoverPartial = false, startupTrimSeconds?: number, originalStreamEnd?: number): Promise<MessageResponse<boolean>> {
   const state = await loadRecordingState();
   if ((state.status !== RECORDING_STATUS.recording && !(recoverPartial && state.status === RECORDING_STATUS.error)) || state.recordingId !== recordingId) {
     return ok(false);
@@ -651,6 +653,9 @@ async function finalizeRecordingFromChunksUnlocked(recordingId: string, endedAt:
 
   const lastCapturedAt = chunks.at(-1)?.capturedAt;
   const actualEndedAt = getFinalRecordingEndedAt(first.createdAt, endedAt, lastCapturedAt);
+  const originalStreamStart = state.mode === RECORDING_MODE.full && first.extension === "mp4"
+    && typeof first.originalStreamStart === "number" && Number.isFinite(first.originalStreamStart) && first.originalStreamStart >= 0
+    ? first.originalStreamStart : undefined;
   await putPart({
     id: `${recordingId}:part:001`,
     recordingId,
@@ -663,6 +668,11 @@ async function finalizeRecordingFromChunksUnlocked(recordingId: string, endedAt:
     createdAt: actualEndedAt,
     startupTrimSeconds: state.mode === RECORDING_MODE.full && typeof startupTrimSeconds === "number"
       && startupTrimSeconds >= STARTUP_TRIM_MIN_SECONDS && startupTrimSeconds <= STARTUP_TRIM_MAX_SECONDS ? startupTrimSeconds : undefined,
+    originalStreamStart,
+    captureMethod: originalStreamStart !== undefined ? "original"
+      : state.mode === RECORDING_MODE.full && first.originalStreamFallback === true ? "screen" : undefined,
+    originalStreamEnd: originalStreamStart !== undefined && typeof originalStreamEnd === "number" && Number.isFinite(originalStreamEnd)
+      && originalStreamEnd > originalStreamStart ? originalStreamEnd : undefined,
   });
 
   const response = await completeRecording({
@@ -675,8 +685,8 @@ async function finalizeRecordingFromChunksUnlocked(recordingId: string, endedAt:
   return response.ok ? ok(true) : response;
 }
 
-function finalizeRecordingFromChunks(recordingId: string, endedAt: number, startupTrimSeconds?: number): Promise<MessageResponse<boolean>> {
-  return runRecordingTerminalOperation(recordingId, () => finalizeRecordingFromChunksUnlocked(recordingId, endedAt, false, startupTrimSeconds));
+function finalizeRecordingFromChunks(recordingId: string, endedAt: number, startupTrimSeconds?: number, originalStreamEnd?: number): Promise<MessageResponse<boolean>> {
+  return runRecordingTerminalOperation(recordingId, () => finalizeRecordingFromChunksUnlocked(recordingId, endedAt, false, startupTrimSeconds, originalStreamEnd));
 }
 
 async function recoverRecording(recordingId: string, endedAt: number): Promise<boolean> {
@@ -798,7 +808,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }).catch(() => {});
 });
 
-chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingErrorMessage | StoreRecordingChunkMessage | FinalizeRecordingMessage | DeletionScheduleRequest | AutoDownloadHandledMessage, sender, sendResponse: (response: MessageResponse<unknown>) => void) => {
+chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingErrorMessage | StoreRecordingChunkMessage | FinalizeRecordingMessage | DeletionScheduleRequest | AutoDownloadHandledMessage | StreamOffsetRequest, sender, sendResponse: (response: MessageResponse<unknown>) => void) => {
   const sourceTab = sender.url?.startsWith(chrome.runtime.getURL("")) ? undefined : sender.tab;
   void (async () => {
     if (message.type === "SELECT_REGION") {
@@ -817,7 +827,28 @@ chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingErrorMess
     }
 
     if (message.type === "START_FULL_RECORDING") {
-      sendResponse(await startRecording(true, sourceTab));
+      sendResponse(await startRecording(true, sourceTab, message.playback));
+      return;
+    }
+
+    if (message.type === "READ_STREAM_OFFSET") {
+      if (typeof sourceTab?.id !== "number" || !sender.url?.startsWith("https://chzzk.naver.com/")
+        || typeof message.src !== "string" || !message.src.startsWith("blob:https://chzzk.naver.com/")) {
+        sendResponse(fail("방송 재생 시각을 읽을 수 없습니다."));
+        return;
+      }
+      const state = await loadRecordingState();
+      if (state.status !== RECORDING_STATUS.recording || state.tabId !== sourceTab.id || state.mode !== RECORDING_MODE.full) {
+        sendResponse(fail("현재 탭에서 전체 녹화 중이 아닙니다."));
+        return;
+      }
+      const [{ result }] = await chrome.scripting.executeScript({
+        target: { tabId: sourceTab.id },
+        world: "MAIN",
+        args: [message.src, ORIGINAL_STREAM_PREFIXES],
+        func: probeOriginalStream,
+      });
+      sendResponse(result ?? fail("방송 재생 정보를 읽지 못했습니다."));
       return;
     }
 
@@ -847,7 +878,7 @@ chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingErrorMess
     }
 
     if (message.type === "FINALIZE_RECORDING") {
-      sendResponse(await finalizeRecordingFromChunks(message.recordingId, message.endedAt, message.startupTrimSeconds));
+      sendResponse(await finalizeRecordingFromChunks(message.recordingId, message.endedAt, message.startupTrimSeconds, message.originalStreamEnd));
       return;
     }
 

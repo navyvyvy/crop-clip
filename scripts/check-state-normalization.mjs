@@ -22,6 +22,8 @@ assert.equal(repaired.multiRegionMaxCount, 2);
 assert.equal(repaired.videoBitsPerSecond, DEFAULT_SETTINGS.videoBitsPerSecond);
 assert.equal(normalizeSettings({ customVideoBitsPerSecond: 2_000_000, enableSeekButtons: true }).videoBitsPerSecond, 2_000_000);
 assert.equal(normalizeSettings({ enableSeekButtons: true }).enableSeek, true);
+assert.equal(normalizeSettings({}).showRecordingSize, false);
+assert.equal(normalizeSettings({ showRecordingSize: true }).showRecordingSize, true);
 for (const value of [null, undefined, 7, 'broken', { x: 0, y: 0, width: 0, height: 4 }]) assert.equal(normalizeRegion(value), null);
 const region = { x: 1, y: 2, width: 300, height: 200 };
 assert.deepEqual(normalizeRegion(region), region);

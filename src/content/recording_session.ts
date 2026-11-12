@@ -6,13 +6,18 @@ export interface DirectRecordingSession {
   recordingId: string;
   settings: Settings;
   video: HTMLVideoElement | null;
-  sourceStream: MediaStream;
-  outputStream: MediaStream;
+  sourceStream?: MediaStream;
+  outputStream?: MediaStream;
   canvas: HTMLCanvasElement | null;
   recorder?: MediaRecorder;
   mimeType: string;
   stabilizeStartup?: boolean;
   startupTrimSeconds?: number;
+  originalStreamStart?: number;
+  originalStreamEnd?: number;
+  originalStreamBytes?: number;
+  originalStreamFallback?: true;
+  stopOriginalStream?: () => void;
   extension: "webm" | "mp4";
   baseName: string;
   checkpointIndex: number;
@@ -24,7 +29,7 @@ export interface DirectRecordingSession {
   checkpointError?: Error;
   createdAt: number;
   endedAt?: number;
-  drawTimerId: number;
+  drawTimerId?: number;
   stopRequested: boolean;
   cancelRequested: boolean;
   cleanedUp: boolean;
@@ -55,8 +60,9 @@ export function releaseDirectRecordingCapture(session: DirectRecordingSession): 
   session.sourceChangeCleanup = undefined;
   session.frameCapture?.close();
   session.frameCapture = undefined;
-  stopRecordingStream(session.sourceStream);
-  stopRecordingStream(session.outputStream);
+  session.stopOriginalStream = undefined;
+  if (session.sourceStream) stopRecordingStream(session.sourceStream);
+  if (session.outputStream) stopRecordingStream(session.outputStream);
   if (session.canvas) {
     session.canvas.width = 0;
     session.canvas.height = 0;
@@ -75,6 +81,11 @@ export function releaseDirectRecordingRecorder(session: DirectRecordingSession):
 }
 
 export function requestDirectPartStop(session: DirectRecordingSession): void {
+  if (session.stopOriginalStream) {
+    session.endedAt ??= Date.now();
+    session.stopOriginalStream();
+    return;
+  }
   if (!session.recorder || session.recorder.state === "inactive" || session.closingPart) {
     return;
   }

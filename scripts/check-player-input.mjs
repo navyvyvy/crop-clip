@@ -1,4 +1,5 @@
 import { normalizeSettings } from "../dist/shared/normalize.js";
+import { formatRecordingSize } from "../dist/shared/time_range.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import ts from "typescript";
@@ -11,7 +12,7 @@ function visit(node) {
 }
 visit(source);
 const compile = (...names) => ts.transpile(names.map(name => functions.get(name)).join("\n"), { target: ts.ScriptTarget.ES2022 });
-const timeText = new Function('recordingCommandInFlight', 'directSession', `
+const timeText = new Function('recordingCommandInFlight', 'directSession', 'showRecordingSize', 'formatRecordingSize', `
   const currentRecordingState = { startedAt: 1 }, formatElapsed = () => '00:42';
   ${compile('getRecordingTimeText')}
   return getRecordingTimeText();
@@ -20,6 +21,9 @@ assert.equal(timeText(null, null), '00:42');
 assert.equal(timeText('STOP_RECORDING', null), '저장 중');
 assert.equal(timeText(null, { stopRequested: true }), '저장 중');
 assert.equal(timeText('CANCEL_RECORDING', null), '취소 중');
+assert.equal(timeText(null, { originalStreamBytes: 35_400_000 }, true, formatRecordingSize), '00:42 · 약 35 MB');
+assert.equal(timeText(null, { originalStreamBytes: 35_400_000 }, false, formatRecordingSize), '00:42');
+assert.equal(timeText(null, {}, true, formatRecordingSize), '00:42');
 let finalizeReply;
 const finalizing = new Function('sendRuntimeMessage', `
   const session = { recordingId: 'saving', endedAt: 1, resolveFinish() {} };
@@ -170,6 +174,7 @@ for (const mode of ['region', 'full']) for (const outcome of ['stop', 'cancel', 
     const RECORDING_STATUS = { idle: 'idle', recording: 'recording' }, RECORDING_MODE = { region: 'region', full: 'full' };
     let currentRecordingState = { status: 'idle' }, recordingCommandInFlight = null, pendingRecordingTerminalCommand = null;
     const directSession = null;
+    const findPrimaryVideoElement = () => null;
     const window = { alert: message => { throw Error(message); } }, showPlayerFeedback = () => {};
     const syncRecordingCommandButtons = () => presentations.push(recordingCommandInFlight);
     ${compile('runRecordingCommand', 'toggleRecording', 'cancelRecording')}

@@ -134,7 +134,7 @@ for (const format of ['webm', 'mp4']) test(`full H.264 ${format} recordings excl
     : 'video/mp4;codecs="avc1,mp4a.40.2"'), format), 'Requires H.264 recording support');
   await worker.evaluate(async outputFormat => {
     const { settings } = await chrome.storage.local.get('settings');
-    await chrome.storage.local.set({ settings: { ...settings, outputFormat } });
+    await chrome.storage.local.set({ settings: { ...settings, outputFormat: outputFormat === 'webm' ? 'mp4' : 'webm', enableOriginalStreamRecording: false } });
     const [tab] = await chrome.tabs.query({ url: 'https://chzzk.naver.com/extension-test' });
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => {
       const start = MediaRecorder.prototype.start;
@@ -147,17 +147,38 @@ for (const format of ['webm', 'mp4']) test(`full H.264 ${format} recordings excl
       };
     } });
   }, format);
+  const popup = await context.newPage();
+  await popup.goto(`chrome-extension://${new URL(worker.url()).host}/popup/popup.html`);
+  await expect(popup.locator('input[name="output-format"]:checked')).toHaveValue(format === 'webm' ? 'mp4' : 'webm');
+  await popup.getByText(format === 'webm' ? 'WebM' : 'MP4', { exact: true }).click();
+  await popup.locator('label:has(input[name="original-stream-mode"][value="on"])').click();
+  await expect.poll(() => worker.evaluate(async () => {
+    const { settings } = await chrome.storage.local.get('settings');
+    return [settings.outputFormat, settings.enableOriginalStreamRecording];
+  })).toEqual([format, true]);
+  await popup.close();
   const cases = [
     { duration: 5000, status: /끊긴 구간을 제외/, min: 2, max: 4.2 },
     { duration: 1000, min: 0.5, max: 2 },
   ];
-  if (format === 'webm') cases.push({ duration: 5000, automatic: true });
+  cases.push({ duration: 5000, automatic: true });
   for (const { duration, status, min, max, automatic } of cases) {
+    const previousDownloadIds = automatic
+      ? await worker.evaluate(async () => (await chrome.downloads.search({})).map(item => item.id))
+      : [];
     if (automatic) {
       const downloads = testInfo.outputPath('automatic');
       await fs.mkdir(downloads, { recursive: true });
       const session = await context.newCDPSession(page);
       await session.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads });
+      await context.addInitScript(() => {
+        if (location.protocol !== 'chrome-extension:' || !globalThis.chrome?.downloads) return;
+        const download = chrome.downloads.download.bind(chrome.downloads);
+        chrome.downloads.download = async options => {
+          await chrome.storage.local.set({ testAutoDownloadFilename: options.filename });
+          return download(options);
+        };
+      });
       await worker.evaluate(async () => {
         const { settings } = await chrome.storage.local.get('settings');
         await chrome.storage.local.set({ settings: { ...settings, enableAutoDownloadRecording: true } });
@@ -168,23 +189,30 @@ for (const format of ['webm', 'mp4']) test(`full H.264 ${format} recordings excl
     const button = page.locator('#crop-clip-chzzk-record-button');
     await expect(button).toHaveAttribute('data-recording', '', { timeout: 20000 });
     await expect(button).toHaveAttribute('aria-busy', 'false');
+    await expect(page.locator('#crop-clip-seek-feedback')).toHaveText(
+      `기존 ${format === 'webm' ? 'WebM' : 'MP4'} 녹화로 전환합니다. 지원하는 라이브 재생이 아닙니다.`,
+    );
     await page.waitForTimeout(duration);
     const opened = context.waitForEvent('page');
     await page.keyboard.press('e');
     const result = await opened;
     if (automatic) {
       await expect.poll(() => result.isClosed(), { timeout: 35000 }).toBe(true);
-      const [download] = await worker.evaluate(() => chrome.downloads.search({ state: 'complete' }));
-      expect(download?.filename).toMatch(/\.webm$/);
+      const download = await worker.evaluate(async previous =>
+        (await chrome.downloads.search({ state: 'complete' })).find(item => !previous.includes(item.id)), previousDownloadIds);
+      const filename = await worker.evaluate(async () => (await chrome.storage.local.get('testAutoDownloadFilename')).testAutoDownloadFilename);
+      expect(filename).toMatch(new RegExp(`_\\d{8}_\\d{6}_\\d+s\\.${format}$`));
+      expect(download?.filename.endsWith(`.${format}`)).toBe(true);
       const bytes = await fs.readFile(download.filename);
-      await page.evaluate(data => {
-        window.testDownloads = [new Blob([Uint8Array.from(atob(data), byte => byte.charCodeAt(0))], { type: 'video/webm' })];
-      }, bytes.toString('base64'));
+      await page.evaluate(({ data, format }) => {
+        window.testDownloads = [new Blob([Uint8Array.from(atob(data), byte => byte.charCodeAt(0))], { type: `video/${format}` })];
+      }, { data: bytes.toString('base64'), format });
       expect(await decodeDownloads(page, 4.2)).toEqual([true]);
       await expect.poll(() => worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState.status)).toBe('idle');
       continue;
     }
     if (status) await expect(result.locator('#split-status')).toHaveText(status, { timeout: 35000 });
+    await expect(result.locator('#format-chip')).toContainText('화면 녹화');
     const video = result.locator('#preview-video');
     await expect.poll(() => video.evaluate(element => element.videoWidth)).toBeGreaterThan(0);
     const saved = await video.evaluate(element => element.duration);

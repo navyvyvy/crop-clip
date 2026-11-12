@@ -440,7 +440,9 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  width: max-content;
   min-width: 42px;
+  flex-shrink: 0;
   height: 100%;
   padding: 0 4px;
   color: var(--crop-clip-danger);

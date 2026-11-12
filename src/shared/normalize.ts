@@ -49,6 +49,8 @@ export function normalizeSettings(value: unknown): Settings {
     videoBitsPerSecond: clamp(Math.round(videoBitsPerSecond), MIN_VIDEO_BITS_PER_SECOND, MAX_VIDEO_BITS_PER_SECOND),
     enable60fps: raw?.enable60fps === true,
     allowMutedRecording: raw?.allowMutedRecording === true,
+    enableOriginalStreamRecording: raw?.enableOriginalStreamRecording === true,
+    showRecordingSize: raw?.showRecordingSize === true,
     enableMultiRegion: raw?.enableMultiRegion === true,
     multiRegionMaxCount: clamp(Math.round(coerceNumber(raw?.multiRegionMaxCount, DEFAULT_MULTI_REGION_COUNT)), MIN_MULTI_REGION_COUNT, MAX_MULTI_REGION_COUNT),
     enableFullRecordButton: raw?.enableFullRecordButton === true,

@@ -4,14 +4,14 @@ export type PopupCommand =
   | { type: "SELECT_REGION" }
   | { type: "SAVE_REGIONS"; regions: RegionSelection[] }
   | { type: "CLEAR_REGION"; region?: RegionSelection }
-  | { type: "START_FULL_RECORDING" }
+  | { type: "START_FULL_RECORDING"; playback?: { src: string; time: number } }
   | { type: "CAPTURE_FULL_SCREENSHOT" }
   | { type: "START_RECORDING" }
   | { type: "STOP_RECORDING"; recordingId?: string }
   | { type: "CANCEL_RECORDING" };
 
 export type ContentCommand =
-  | { type: "PREPARE_DIRECT_RECORDING"; recordingId: string; settings: Settings }
+  | { type: "PREPARE_DIRECT_RECORDING"; recordingId: string; settings: Settings; fullPlayer?: boolean }
   | { type: "START_SELECTION" }
   | { type: "GET_REGION_GEOMETRY" }
   | { type: "GET_REGION_GEOMETRIES" }
@@ -21,15 +21,18 @@ export type ContentCommand =
       type: "START_DIRECT_RECORDING";
       recordingId: string;
       fullPlayer: boolean;
+      playback?: { src: string; time: number };
       region: RegionSelection;
       regions?: RegionSelection[];
       settings: Settings;
     }
   | { type: "STOP_DIRECT_RECORDING"; recordingId?: string }
   | { type: "HAS_DIRECT_RECORDING"; recordingId: string }
+  | { type: "GET_ORIGINAL_RECORDING_SIZE"; recordingId: string }
   | { type: "CANCEL_DIRECT_RECORDING"; recordingId?: string };
 export type DeletionScheduleRequest = { type: "SCHEDULE_RECORDING_DELETION"; recordingId: string };
 export type AutoDownloadHandledMessage = { type: "AUTO_DOWNLOAD_HANDLED"; recordingId: string };
+export type StreamOffsetRequest = { type: "READ_STREAM_OFFSET"; src: string };
 
 export type RecordingErrorMessage = {
   type: "RECORDING_ERROR";
@@ -47,6 +50,7 @@ export type FinalizeRecordingMessage = {
   recordingId: string;
   endedAt: number;
   startupTrimSeconds?: number;
+  originalStreamEnd?: number;
 };
 
 type OkResponse<T = undefined> = { ok: true; data?: T };

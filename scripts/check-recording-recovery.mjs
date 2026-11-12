@@ -100,6 +100,21 @@ test('a delayed stop must not finalize a newer recording', async () => {
   assert.equal(f.results.length, 0);
 });
 
+test('MP4 output identifies the saved source even after checkpoint recovery', async () => {
+  for (const [mode, marker, expected] of [
+    ['full', { originalStreamStart: 12 }, 'original'],
+    ['full', { originalStreamFallback: true }, 'screen'],
+    ['full', {}, undefined],
+    ['region', { originalStreamFallback: true }, undefined],
+  ]) {
+    const f = fixture();
+    f.state = { ...f.state, mode };
+    for (const chunk of f.chunks) Object.assign(chunk, { extension: 'mp4', mimeType: 'video/mp4' }, marker);
+    assert.equal(await f.api.recoverRecording('clip', 2000), true);
+    assert.equal(f.parts[0].captureMethod, expected);
+  }
+});
+
 test('recovery uses only the contiguous prefix ending at a complete blob', async () => {
   for (const kind of ['unfinished-tail', 'missing-middle', 'changed-codec', 'unfinished-first']) {
     const f = fixture();

@@ -24,7 +24,7 @@ function visit(node) {
   if (ts.isFunctionDeclaration(node) && node.name?.text === "selectDirectMimeType") selectDirectMimeTypeSource = node.getText(file);
   if (ts.isFunctionDeclaration(node) && node.name?.text === "toggleRecording") toggleRecordingSource = node.getText(file);
   if (ts.isFunctionDeclaration(node) && node.name?.text === "attachBorderControls") borderControlsSource = node.getText(file);
-  if (ts.isFunctionDeclaration(node) && ["startDirectRecording", "prepareDirectRecordingEncoder", "checkDirectRecordingEncoder", "ignoreRecordingRejection", "releaseDirectRecordingCapture", "stopRecordingStream"].includes(node.name?.text)) startupFunctions.push(node.getText(file));
+  if (ts.isFunctionDeclaration(node) && ["startDirectRecording", "syncStartedRecording", "createRecordingSession", "prepareDirectRecordingEncoder", "checkDirectRecordingEncoder", "ignoreRecordingRejection", "releaseDirectRecordingCapture", "stopRecordingStream"].includes(node.name?.text)) startupFunctions.push(node.getText(file));
   if (ts.isVariableDeclaration(node) && node.name.getText(file) === "drawFrame") drawFrameSource = node.initializer.getText(file);
   if (ts.isFunctionDeclaration(node) && ["getVideoStream", "handleDetachedPlayer", "stopRegionLayoutWatch", "stopRecordingStream", "releaseDirectRecordingCapture", "releaseDirectRecordingRecorder", "cleanupDirectRecordingSession", "startDirectPart", "finalizeDirectRecording", "cancelDirectRecordingSession", "abortDirectRecordingSession", "failDirectRecordingSession", "finishDirectRecording", "requestDirectPartStop"].includes(node.name?.text)) {
     functions.push(node.getText(file));
