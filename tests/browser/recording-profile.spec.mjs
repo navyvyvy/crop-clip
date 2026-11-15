@@ -2,6 +2,7 @@ import { test, expect, prepareVideo } from './fixtures.mjs';
 import fs from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
+import { STARTUP_TRIM_MAX_SECONDS } from '../../dist/shared/types.js';
 
 // Opt-in: identical workloads can target a release build without running tests
 // for the failure-recovery behavior that was deliberately changed after it.
@@ -101,7 +102,7 @@ test('recording resource and performance profile', async ({ extension }, testInf
     const processes = (await browserCdp.send('SystemInfo.getProcessInfo')).processInfo;
     const ids = processes.map(item => Number(item.id)).filter(Number.isInteger);
     const memory = JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-Command',
-      `Get-Process -Id ${ids.join(',')} -ErrorAction SilentlyContinue | Select-Object Id,PrivateMemorySize64,WorkingSet64,HandleCount | ConvertTo-Json -Compress`], { encoding: 'utf8', windowsHide: true }).trim());
+      `Get-Process | Where-Object { $_.Id -in @(${ids.join(',')}) } | Select-Object Id,PrivateMemorySize64,WorkingSet64,HandleCount | ConvertTo-Json -Compress`], { encoding: 'utf8', windowsHide: true }).trim());
     const byId = new Map([memory].flat().map(item => [item.Id, item]));
     const processMemory = processes.map(item => ({ type: item.type, id: item.id,
       privateBytes: byId.get(Number(item.id))?.PrivateMemorySize64 ?? 0,
@@ -167,9 +168,12 @@ test('recording resource and performance profile', async ({ extension }, testInf
     const stopping = performance.now();
     await page.keyboard.press(key);
     const result = await opened;
+    await expect(result.locator('#result-loading')).toBeHidden({ timeout: 30_000 });
     await expect(result.locator('#split-button')).toBeEnabled({ timeout: 30_000 });
     const stopMs = performance.now() - stopping;
-    await expect.poll(() => result.locator('#preview-video').evaluate((video, minimum) => video.readyState >= 2 && video.videoWidth > 0 && video.duration >= minimum, recordingSeconds - 1)).toBe(true);
+    const startupTrimmed = key === 'e' && (await result.locator('#split-status').textContent()) === '녹화 초반의 끊긴 구간을 제외했습니다.';
+    const trimAllowance = startupTrimmed ? STARTUP_TRIM_MAX_SECONDS + 1.25 : 0;
+    await expect.poll(() => result.locator('#preview-video').evaluate((video, minimum) => video.readyState >= 2 && video.videoWidth > 0 && video.duration >= minimum, recordingSeconds - 1 - trimAllowance)).toBe(true);
     const beforeResultClose = await snapshot(false);
     await result.close();
     await expect.poll(() => worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState.status)).toBe('idle');

@@ -46,7 +46,9 @@ assert.match(serviceWorkerText, /chrome\.scripting\.insertCSS\([\s\S]*?content\/
 assert.match(sourceText, /applyBorderGeometry\(border, region, renderedRect\)/);
 assert.match(sourceText, /const bounds = selectionBounds;/);
 assert.match(sourceText, /getContext\("2d", \{ alpha: false, desynchronized: true \}\)/);
-assert.ok(sourceText.indexOf("const canvasStream = canvas.captureStream(frameRate);") < sourceText.indexOf("paintPlacements(layout.placements);"));
+const capturePosition = sourceText.indexOf("const canvasStream = frameCapture?.stream ?? canvas.captureStream(frameRate);");
+const firstPaintPosition = sourceText.indexOf("paintPlacements(layout.placements);");
+assert.ok(capturePosition >= 0 && firstPaintPosition > capturePosition, 'create the capture before painting its first frame');
 assert.doesNotMatch(sourceText, /document\.documentElement\.appendChild\(canvas\)/);
 assert.doesNotMatch(sourceText, /overlayObserver\.observe\(document\.documentElement, \{ childList: true, subtree: true \}\)/);
 assert.match(sourceText, /window\.addEventListener\("scroll", requestRegionLayoutSync, \{ capture: true, passive: true \}\)/);
@@ -101,8 +103,7 @@ assert.doesNotMatch(messagesText, /CANCEL_RECORDING_DELETION/);
 const idbFile = ts.createSourceFile("idb.ts", idbText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 const deletionCursor = idbFile.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "deleteRecordsByRecordingId");
 assert.ok(deletionCursor);
-assert.doesNotMatch(deletionCursor.getText(idbFile), /openKeyCursor/);
-assert.match(deletionCursor.getText(idbFile), /\.openCursor\(IDBKeyRange\.only\(recordingId\)\)/);
+assert.match(deletionCursor.getText(idbFile), /\.openKeyCursor\(IDBKeyRange\.only\(recordingId\)\)/);
 
 const resultHtml = fs.readFileSync(new URL("../src/result/result.html", import.meta.url), "utf8");
 assert.match(resultHtml, /data-split-count="3"[^>]*>3분할<\/button>/);
@@ -120,15 +121,15 @@ function findSplitExec(node) {
 }
 findSplitExec(splitFunction);
 const buildSplitArgs = new Function("outputFormat", `
-  const range = undefined, inputName = "input.webm", segmentSeconds = 3, segmentListName = "output.csv";
-  const expectedCount = 3, selectedRange = { start: 0, end: 9.008 }, TIME_STEP_SECONDS = 0.1;
+  const range = undefined, inputName = "input.webm", segmentListName = "output.csv", segmentSeconds = 3;
+  const boundaries = "3,6", selectedDuration = 9.008, TIME_STEP_SECONDS = 0.1;
   const pattern = "output%03d." + outputFormat, RECORDING_FORMAT = { webm: "webm", mp4: "mp4" };
   return ${splitArgs};
 `);
 const webmSplitArgs = buildSplitArgs("webm");
-assert.equal(webmSplitArgs[webmSplitArgs.indexOf("-segment_format") + 1], "matroska");
+assert.equal(webmSplitArgs[webmSplitArgs.indexOf("-segment_format") + 1], "webm");
 assert.equal(webmSplitArgs[webmSplitArgs.indexOf("-segment_times") + 1], "3,6", "metadata tails must stay in the final segment");
-assert.equal(webmSplitArgs[webmSplitArgs.indexOf("-c") + 1], "copy", "splitting must preserve the encoded video");
+assert.equal(webmSplitArgs[webmSplitArgs.indexOf("-force_key_frames") + 1], "expr:gte(t,n_forced*3)", "each WebM split must start at a keyframe at or after its boundary");
 const presetCode = resultFile.statements
   .filter((node) => ts.isFunctionDeclaration(node) && ["getSplitPresetValue", "updateSplitPresetButtons", "updateSplitEstimate", "formatSecondsLabel", "formatTimeInput", "formatPreciseDuration", "roundTrimTime"].includes(node.name?.text))
   .map((node) => node.getText(resultFile)).join("\n");
@@ -216,6 +217,8 @@ const functionNames = new Set([
   "syncRegionLayoutGeometry",
   "startRegionLayoutWatch",
   "stopRegionLayoutWatch",
+  "getRenderedVideoRect",
+  "computeDirectCrop",
 ]);
 const selectedStatements = [];
 function collectStatements(node, file) {
@@ -229,6 +232,38 @@ collectStatements(sourceFile, sourceFile);
 collectStatements(serviceWorkerFile, serviceWorkerFile);
 collectStatements(resultFile, resultFile);
 const statements = selectedStatements.join("\n");
+class TestRect {
+  constructor(x, y, width, height) {
+    Object.assign(this, { x, y, left: x, top: y, width, height, right: x + width, bottom: y + height });
+  }
+}
+const geometry = new Function('DOMRect', 'getComputedStyle', `
+  ${ts.transpile(statements, { target: ts.ScriptTarget.ES2022 })}
+  return { getRenderedVideoRect, computeDirectCrop };
+`)(TestRect, video => ({ objectFit: video.fit, objectPosition: video.position }));
+for (const [fit, vw, vh, ew, eh, expected] of [
+  ['contain', 640, 360, 400, 400, [400, 225]],
+  ['cover', 640, 360, 400, 400, [400 * 640 / 360, 400]],
+  ['cover', 360, 640, 400, 200, [400, 400 * 640 / 360]],
+  ['none', 640, 360, 400, 400, [640, 360]],
+  ['scale-down', 160, 90, 400, 400, [160, 90]],
+  ['scale-down', 640, 360, 400, 400, [400, 225]],
+  ['fill', 640, 360, 400, 400, [400, 400]],
+]) {
+  const video = { fit, videoWidth: vw, videoHeight: vh, getBoundingClientRect: () => new TestRect(100, 50, ew, eh) };
+  const { rect } = geometry.getRenderedVideoRect(video);
+  assert.ok(Math.abs(rect.width - expected[0]) < 1e-6 && Math.abs(rect.height - expected[1]) < 1e-6, `${fit} must match the displayed video scale`);
+  const crop = geometry.computeDirectCrop({ x: 100 + ew / 2, y: 50 + eh / 2, width: 50, height: 50 }, video);
+  assert.equal(crop.x, vw / 2);
+  assert.equal(crop.y, vh / 2);
+}
+const positionedVideo = { fit: 'cover', position: '100% 12px', videoWidth: 640, videoHeight: 360,
+  getBoundingClientRect: () => new TestRect(100, 50, 400, 400) };
+const positioned = geometry.getRenderedVideoRect(positionedVideo).rect;
+assert.ok(Math.abs(positioned.right - 500) < 1e-6);
+assert.equal(positioned.top, 62);
+const positionedCrop = geometry.computeDirectCrop({ x: 100, y: 62, width: 50, height: 50 }, positionedVideo);
+assert.deepEqual(positionedCrop, { x: 280, y: 0, width: 45, height: 45 });
 const observed = [], disconnected = [];
 const replacement = { closest: () => null };
 const layoutWatch = new Function('replacement', 'observed', 'disconnected', `
@@ -248,7 +283,8 @@ layoutWatch.sync();
 assert.equal(observed.length, 1, 'unchanged players must not create duplicate observers');
 layoutWatch.clear();
 assert.deepEqual(disconnected, ['old', 'new'], 'clearing regions releases the replacement observer');
-const applyBorder = new Function("window", ts.transpile(`${statements}\nreturn applyBorderGeometry;`, { target: ts.ScriptTarget.ES2022 }))({ innerWidth: 1000, innerHeight: 700 });
+let displayedVideo = null;
+const applyBorder = new Function("window", "DOMRect", "findPrimaryVideoElement", ts.transpile(`${statements}\nreturn applyBorderGeometry;`, { target: ts.ScriptTarget.ES2022 }))({ innerWidth: 1000, innerHeight: 700 }, TestRect, () => displayedVideo);
 const border = { style: {} };
 const selection = { x: 100, y: 100, width: 400, height: 200, videoRelative: { x: 0.125, y: 0.25, width: 0.5, height: 0.5 } };
 for (const [left, top, width, height, expected] of [
@@ -258,16 +294,19 @@ for (const [left, top, width, height, expected] of [
   [800, 550, 320, 180, [840, 595, 160, 90]],
   [900, 600, 320, 180, [940, 645, 60, 55]],
 ]) {
-  applyBorder(border, selection, { left, top, width, height });
+  applyBorder(border, selection, new TestRect(left, top, width, height));
   assert.equal(border.style.display, '');
   assert.deepEqual(['left', 'top', 'width', 'height'].map(key => parseFloat(border.style[key])), expected, 'scrolling and mini-player placement must only show the visible intersection');
 }
-applyBorder(border, selection, { left: 0, top: -500, width: 800, height: 400 });
+applyBorder(border, selection, new TestRect(0, -500, 800, 400));
 assert.equal(border.style.display, 'none');
 applyBorder(border, selection, null);
 assert.equal(border.style.display, 'none', 'a temporarily detached player must not leave a stale border');
-applyBorder(border, selection, { left: 0, top: 0, width: 800, height: 400 });
+applyBorder(border, selection, new TestRect(0, 0, 800, 400));
 assert.equal(border.style.display, '', 'reattaching the player must restore the border');
+displayedVideo = { getBoundingClientRect: () => new TestRect(300, 100, 200, 200) };
+applyBorder(border, { x: 200, y: 100, width: 400, height: 200, videoRelative: { x: 0, y: 0, width: 1, height: 1 } }, new TestRect(200, 100, 400, 200));
+assert.deepEqual(['left', 'top', 'width', 'height'].map(key => parseFloat(border.style[key])), [300, 100, 200, 200], 'cover overflow must not draw a selection outside the player');
 const runtime = ts.transpileModule(`const recordingTerminalOperations = new Map();\nconst RECORDING_STATUS = { idle: "idle", recording: "recording", completed: "completed", error: "error" };\nconst RECORDING_MODE = { region: "region", full: "full" };\nconst MILLISECONDS_PER_SECOND = 1_000;\nconst SECONDS_PER_MINUTE = 60;\nconst SECONDS_PER_HOUR = 3_600;\n${statements}\nreturn { computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, getRecordingFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, getRecordingChunkSliceRanges, runRecordingTerminalOperation, normalizeRecordingState };`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
 }).outputText;

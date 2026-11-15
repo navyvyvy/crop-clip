@@ -36,8 +36,41 @@ try {
   const end = await source.record(async blob => { chunks.push(Buffer.from(await blob.arrayBuffer())); }, () => 122.4, () => 122.4);
   assert.equal(end, 122.4);
   assert.deepEqual(chunks, [Buffer.concat([init, first]), last], "keep the click's containing segment and stop after the endpoint is covered");
+  await assert.rejects(() => source.record(() => assert.fail("the first chunk was already handed off"), () => 122.4, () => 122.4), /이미 시작/);
   assert.equal(requested.filter(name => name === "last.m4v").length, 1, "reuse the fragment fetched to find the timeline");
   await assert.rejects(() => openOriginalStream(url, 119, new AbortController().signal), /클릭한 위치/);
+
+  globalThis.fetch = async value => {
+    const name = new URL(value).pathname.split("/").at(-1);
+    const tagged = manifest.replace("first.m4v", "#EXT-X-PROGRAM-DATE-TIME:2026-11-13T00:00:00Z\nfirst.m4v");
+    return new Response({ "live.m3u8": tagged, "init.mp4": init, "first.m4v": first, "last.m4v": last }[name]);
+  };
+  const taggedSource = await openOriginalStream(url, 121.69, new AbortController().signal);
+  const taggedChunks = [];
+  await taggedSource.record(async blob => taggedChunks.push(Buffer.from(await blob.arrayBuffer())), () => 122.4, () => 122.4);
+  assert.deepEqual(taggedChunks, [Buffer.concat([init, first]), last]);
+
+  let finishRequested = false;
+  let interruptedRequest = false;
+  globalThis.fetch = async (value, options) => {
+    const name = new URL(value).pathname.split("/").at(-1);
+    if (name === "live.m3u8" && finishRequested) {
+      return new Promise((_, reject) => options.signal.addEventListener("abort", () => {
+        interruptedRequest = true;
+        reject(options.signal.reason);
+      }, { once: true }));
+    }
+    return new Response({ "live.m3u8": manifest, "init.mp4": init, "first.m4v": first, "last.m4v": last }[name]);
+  };
+  const slowTail = await openOriginalStream(url, 122.2, new AbortController().signal);
+  const stopAt = performance.now();
+  const partial = await slowTail.record(async () => {
+    finishRequested = true;
+    slowTail.stop();
+  }, () => 125, () => 125);
+  assert.equal(partial, 124, "save through the final complete fragment when the CDN stalls");
+  assert.equal(interruptedRequest, true);
+  assert.ok(performance.now() - stopAt < 3_800, "stop must not wait for the normal live fetch timeout");
 
   const requestsWithRange = [];
   globalThis.fetch = async (value, options) => {
@@ -96,6 +129,22 @@ try {
   await assert.rejects(() => openOriginalStream(url, 121, new AbortController().signal), /지원하지 않는 방송 주소/);
   globalThis.fetch = async () => new Response(manifest + "#EXT-X-KEY:METHOD=AES-128,URI=\"key\"\n");
   await assert.rejects(() => openOriginalStream(url, 121, new AbortController().signal), /연속 저장을 지원하지 않는/);
+
+  globalThis.fetch = async () => new Response(manifest.replace(/#EXTINF:[\d.]+/, `#EXTINF:${'9'.repeat(400)}`));
+  await assert.rejects(() => openOriginalStream(url, 121, new AbortController().signal), /필요한 정보가 없습니다/);
+
+  let reads = 0, cancelled = false;
+  globalThis.fetch = async () => new Response(new ReadableStream({
+    pull(controller) {
+      reads++;
+      controller.enqueue(new Uint8Array(1024 * 1024));
+      if (reads === 20) controller.close();
+    },
+    cancel() { cancelled = true; },
+  }));
+  await assert.rejects(() => openOriginalStream(url, 121, new AbortController().signal));
+  assert.equal(cancelled, true, 'oversized responses without Content-Length must be cancelled during reading');
+  assert.ok(reads < 20, 'the response limit must apply before the entire body enters memory');
 } finally {
   globalThis.fetch = realFetch;
 }
@@ -106,12 +155,16 @@ const src = "blob:https://chzzk.naver.com/fixture";
 const buffered = { length: 1, end: () => 50 };
 const latest = { name: `${url.href}?_HLS_msn=11`, startTime: 20_000, duration: 1 };
 const globals = Object.getOwnPropertyDescriptors(globalThis);
-let emitResources, disconnected = false, appends = 0;
-class TestSourceBuffer {
-  buffered = buffered;
+let emitResources, disconnected = false, appends = 0, registeredListeners = 0;
+class TestSourceBuffer extends EventTarget {
+  buffered = { length: 1, end: () => 48 };
   mode = "segments";
   timestampOffset = -120;
   appendBuffer() { appends++; }
+  addEventListener(...args) {
+    registeredListeners++;
+    return super.addEventListener(...args);
+  }
 }
 const originalAppend = TestSourceBuffer.prototype.appendBuffer;
 const replacements = {
@@ -129,13 +182,36 @@ try {
     Object.defineProperty(globalThis, key, { value, configurable: true, writable: true });
   }
   const pending = probeOriginalStream(src, ORIGINAL_STREAM_PREFIXES);
-  new TestSourceBuffer().appendBuffer(new ArrayBuffer(1));
+  const buffer = new TestSourceBuffer();
+  buffer.appendBuffer(new ArrayBuffer(1));
   assert.equal(disconnected, false, "old resource timing entries must not finish the probe");
   emitResources([latest, { ...latest, name: new URL("master.m3u8", url).href }]);
+  assert.equal(disconnected, false, "appendBuffer has not updated the buffered ranges yet");
+  buffer.buffered = buffered;
+  buffer.dispatchEvent(new Event("updateend"));
   assert.deepEqual(await pending, { ok: true, data: { offset: -120, playlist: latest.name } });
   assert.equal(appends, 1);
   assert.equal(disconnected, true);
   assert.equal(TestSourceBuffer.prototype.appendBuffer, originalAppend, "restore playback and release the observer after finding the stream");
+
+  const superseded = probeOriginalStream(src, ORIGINAL_STREAM_PREFIXES);
+  const replacement = probeOriginalStream(src, ORIGINAL_STREAM_PREFIXES);
+  assert.equal((await superseded).ok, false);
+  buffer.appendBuffer(new ArrayBuffer(1));
+  emitResources([latest]);
+  assert.equal((await replacement).ok, true);
+  assert.equal(TestSourceBuffer.prototype.appendBuffer, originalAppend, "a retry must not restore an expired probe");
+
+  const wrapped = probeOriginalStream(src, ORIGINAL_STREAM_PREFIXES);
+  const probeHook = TestSourceBuffer.prototype.appendBuffer;
+  TestSourceBuffer.prototype.appendBuffer = function (...args) { return probeHook.apply(this, args); };
+  buffer.appendBuffer(new ArrayBuffer(1));
+  emitResources([latest]);
+  assert.equal((await wrapped).ok, true);
+  const listenersAfterFinish = registeredListeners;
+  buffer.appendBuffer(new ArrayBuffer(1));
+  assert.equal(registeredListeners, listenersAfterFinish, "a retained hook must not register listeners after completion");
+  TestSourceBuffer.prototype.appendBuffer = originalAppend;
 } finally {
   for (const key of Object.keys(replacements)) {
     if (globals[key]) Object.defineProperty(globalThis, key, globals[key]);

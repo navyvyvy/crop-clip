@@ -2,6 +2,8 @@ import type { Settings } from "../shared/types.js";
 import type { DirectCropPlacement } from "./crop_layout.js";
 import type { createVideoFrameCapture } from "./frame_capture.js";
 
+const RECORDER_STOP_EVENT_TIMEOUT_MS = 5_000;
+
 export interface DirectRecordingSession {
   recordingId: string;
   settings: Settings;
@@ -10,12 +12,17 @@ export interface DirectRecordingSession {
   outputStream?: MediaStream;
   canvas: HTMLCanvasElement | null;
   recorder?: MediaRecorder;
+  finishAfterStop?: (timedOut?: boolean) => void;
+  stopEventTimer?: number;
   mimeType: string;
   stabilizeStartup?: boolean;
+  inspectStartup?: true;
   startupTrimSeconds?: number;
   originalStreamStart?: number;
   originalStreamEnd?: number;
-  originalStreamBytes?: number;
+  recordedBytes: number;
+  startedAt?: number;
+  originalProbe?: AbortController;
   originalStreamFallback?: true;
   stopOriginalStream?: () => void;
   extension: "webm" | "mp4";
@@ -55,6 +62,7 @@ export function releaseDirectRecordingCapture(session: DirectRecordingSession): 
   }
 
   session.cleanedUp = true;
+  session.originalProbe?.abort();
   window.clearInterval(session.drawTimerId);
   session.sourceChangeCleanup?.();
   session.sourceChangeCleanup = undefined;
@@ -73,8 +81,12 @@ export function releaseDirectRecordingCapture(session: DirectRecordingSession): 
 }
 
 export function releaseDirectRecordingRecorder(session: DirectRecordingSession): void {
+  window.clearTimeout(session.stopEventTimer);
+  session.stopEventTimer = undefined;
+  session.finishAfterStop = undefined;
   if (!session.recorder) return;
   session.recorder.ondataavailable = null;
+  session.recorder.onstart = null;
   session.recorder.onerror = null;
   session.recorder.onstop = null;
   session.recorder = undefined;
@@ -95,6 +107,9 @@ export function requestDirectPartStop(session: DirectRecordingSession): void {
   try {
     // stop() delivers the final data; keep its handlers until onstop finishes saving.
     session.recorder.stop();
+    if (!session.cancelRequested && session.finishAfterStop) {
+      session.stopEventTimer = window.setTimeout(() => session.finishAfterStop?.(true), RECORDER_STOP_EVENT_TIMEOUT_MS);
+    }
   } catch (error) {
     // Cancellation discards the result; still finish cleanup if the encoder failed.
     if (!session.cancelRequested) throw error;

@@ -25,6 +25,7 @@ function waitForDownloadCompletion(downloadId: number): Promise<void> {
       }
       settled = true;
       chrome.downloads.onChanged.removeListener(onChanged);
+      chrome.downloads.onErased.removeListener(onErased);
       error ? reject(error) : resolve();
     };
     const checkState = (state?: string, error?: string) => {
@@ -39,8 +40,12 @@ function waitForDownloadCompletion(downloadId: number): Promise<void> {
         checkState(delta.state?.current, delta.error?.current);
       }
     };
+    const onErased = (id: number) => {
+      if (id === downloadId) finish(new Error("다운로드 기록이 지워졌습니다."));
+    };
 
     chrome.downloads.onChanged.addListener(onChanged);
+    chrome.downloads.onErased.addListener(onErased);
     void chrome.downloads.search({ id: downloadId }).then(([item]) => {
       if (!item) {
         finish(new Error("시작한 다운로드를 찾지 못했습니다."));

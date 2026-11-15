@@ -40,11 +40,12 @@ function fixture(options = {}) {
     putChunk: async () => { throw new Error('QuotaExceededError'); },
     putPart: async part => { if (options.failFinalize) throw new Error('Storage full'); parts.push(part); },
     putRecording: async record => { recording = record; },
+    getRecording: async id => recording?.id === id ? recording : undefined,
     deleteRecordingChunks: async () => { chunks = []; },
     deleteRecording: async id => { deleted.push(id); chunks = []; parts.length = 0; recording = undefined; },
   };
   const api = new Function('env', `
-    const { chrome, loadRecordingState, loadAppState, saveRecordingState, getChunksByRecordingId, putChunk, putPart, putRecording, deleteRecordingChunks, deleteRecording } = env;
+    const { chrome, loadRecordingState, loadAppState, saveRecordingState, getChunksByRecordingId, putChunk, putPart, putRecording, getRecording, deleteRecordingChunks, deleteRecording } = env;
     const { RECORDING_MODE, STARTUP_TRIM_MIN_SECONDS, STARTUP_TRIM_MAX_SECONDS } = env;
     const RECORDING_STATUS = { idle: 'idle', recording: 'recording', completed: 'completed', error: 'error' };
     const checkpointStores = new Map(), recordingTerminalOperations = new Map();
@@ -86,8 +87,10 @@ test('only a valid full-recording startup marker reaches the saved file', async 
   for (const [mode, marker, expected] of [['full', 1.5, 1.5], ['full', 20, undefined], ['region', 1.5, undefined]]) {
     const f = fixture();
     f.state = { ...f.state, mode };
+    f.chunks[0].inspectStartup = true;
     assert.equal((await f.api.finalizeRecordingFromChunks('clip', 2000, marker)).ok, true);
     assert.equal(f.parts[0].startupTrimSeconds, expected);
+    assert.equal(f.parts[0].inspectStartup, mode === 'full' ? true : undefined);
     assert.equal(await f.parts[0].blob.text(), 'savedsaved');
   }
 });
@@ -98,6 +101,17 @@ test('a delayed stop must not finalize a newer recording', async () => {
   assert.equal(f.state.status, 'recording');
   assert.equal(f.parts.length, 0);
   assert.equal(f.results.length, 0);
+});
+
+test('a lost finalization reply does not turn a saved clip into a failure', async () => {
+  const f = fixture();
+  await f.api.finalizeRecordingFromChunks('clip', 2000);
+  assert.equal(f.state.status, 'idle');
+  f.state = { status: 'recording', recordingId: 'next-clip', tabId: 7 };
+  assert.equal((await f.api.handleRecordingError({ recordingId: 'clip', error: 'Reply lost' })).ok, true);
+  assert.equal(f.state.recordingId, 'next-clip');
+  assert.equal(f.results.length, 1);
+  assert.equal(f.parts.length, 1);
 });
 
 test('MP4 output identifies the saved source even after checkpoint recovery', async () => {

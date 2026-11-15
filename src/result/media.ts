@@ -1,21 +1,8 @@
 import { putPart } from "../shared/idb.js";
-import { RECORDING_FORMAT, type RecordingFormat, type RecordingPartRecord } from "../shared/types.js";
+import { RECORDING_FORMAT, RECORDING_MIME_CANDIDATES, type RecordingFormat, type RecordingPartRecord } from "../shared/types.js";
 import { MILLISECONDS_PER_SECOND, TIME_STEP_SECONDS } from "../shared/time_range.js";
 
 export type LoadedPart = RecordingPartRecord & ({ blob: Blob } | { objectUrl: string });
-
-const MP4_MIME_CANDIDATES = [
-  'video/mp4;codecs="avc1.42E01E,mp4a.40.2"',
-  'video/mp4;codecs="avc1,mp4a.40.2"',
-  "video/mp4",
-];
-
-const WEBM_MIME_CANDIDATES = [
-  "video/webm;codecs=avc1",
-  "video/webm;codecs=vp8,opus",
-  "video/webm;codecs=vp9,opus",
-  "video/webm",
-];
 
 const MEDIA_EVENT_TIMEOUT_MS = 15_000;
 
@@ -49,18 +36,9 @@ export function getPartSource(part: LoadedPart): Blob | string {
   return part.objectUrl;
 }
 
-export async function getSourceBytes(source: Blob | string): Promise<Uint8Array> {
-  const data = source instanceof Blob
-    ? await source.arrayBuffer()
-    : await (await fetch(source)).arrayBuffer();
-  return new Uint8Array(data);
-}
-
 export function pickRecorderMimeType(format: RecordingFormat, preferred = ""): string {
   const preferredCandidates = preferred.includes(format) ? [preferred] : [];
-  const candidates = format === RECORDING_FORMAT.mp4
-    ? [...preferredCandidates, ...MP4_MIME_CANDIDATES]
-    : [...preferredCandidates, ...WEBM_MIME_CANDIDATES];
+  const candidates = [...preferredCandidates, ...RECORDING_MIME_CANDIDATES[format]];
 
   for (const candidate of candidates) {
     if (MediaRecorder.isTypeSupported(candidate)) {
@@ -73,8 +51,9 @@ export function pickRecorderMimeType(format: RecordingFormat, preferred = ""): s
     : "이 브라우저에서는 WebM 다운로드를 지원하지 않습니다.");
 }
 
-export function waitForMediaEvent(video: HTMLVideoElement, eventName: string): Promise<void> {
+export function waitForMediaEvent(video: HTMLVideoElement, eventName: string, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
+    signal?.throwIfAborted();
     const timeoutId = window.setTimeout(() => {
       cleanup();
       reject(new Error("영상 파일 응답을 기다리는 시간이 초과되었습니다."));
@@ -83,6 +62,7 @@ export function waitForMediaEvent(video: HTMLVideoElement, eventName: string): P
       window.clearTimeout(timeoutId);
       video.removeEventListener(eventName, onEvent);
       video.removeEventListener("error", onError);
+      signal?.removeEventListener("abort", onAbort);
     };
     const onEvent = () => {
       cleanup();
@@ -92,17 +72,22 @@ export function waitForMediaEvent(video: HTMLVideoElement, eventName: string): P
       cleanup();
       reject(new Error("영상 파일을 읽지 못했습니다."));
     };
+    const onAbort = () => {
+      cleanup();
+      reject(signal?.reason);
+    };
     video.addEventListener(eventName, onEvent, { once: true });
     video.addEventListener("error", onError, { once: true });
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
-function waitForVideoMetadata(video: HTMLVideoElement): Promise<void> {
+function waitForVideoMetadata(video: HTMLVideoElement, signal?: AbortSignal): Promise<void> {
   if (video.readyState >= HTMLMediaElement.HAVE_METADATA) {
     return Promise.resolve();
   }
 
-  return waitForMediaEvent(video, "loadedmetadata");
+  return waitForMediaEvent(video, "loadedmetadata", signal);
 }
 
 async function resolveVideoDuration(video: HTMLVideoElement): Promise<number> {
@@ -165,7 +150,8 @@ export async function hydratePart(part: RecordingPartRecord): Promise<LoadedPart
   return hydrated;
 }
 
-export async function loadVideoForPart(part: LoadedPart, fallbackDuration = 0): Promise<{ video: HTMLVideoElement; url: string; revoke: boolean; duration: number }> {
+export async function loadVideoForPart(part: LoadedPart, fallbackDuration = 0, signal?: AbortSignal): Promise<{ video: HTMLVideoElement; url: string; revoke: boolean; duration: number }> {
+  signal?.throwIfAborted();
   const { url, revoke } = createObjectUrlSource(getPartSource(part));
   const video = document.createElement("video");
   video.muted = true;
@@ -179,33 +165,40 @@ export async function loadVideoForPart(part: LoadedPart, fallbackDuration = 0): 
   video.style.height = "1px";
   document.body.appendChild(video);
 
+  const release = () => releaseVideoSource(video, url, revoke);
+  signal?.addEventListener("abort", release, { once: true });
   try {
-    await waitForVideoMetadata(video);
+    await waitForVideoMetadata(video, signal);
     const duration = await resolveVideoDuration(video) || fallbackDuration;
+    signal?.throwIfAborted();
     if (!Number.isFinite(duration) || duration <= 0) {
       throw new Error("영상 길이를 확인할 수 없습니다.");
     }
 
     return { video, url, revoke, duration };
   } catch (error) {
-    releaseVideoSource(video, url, revoke);
+    if (!signal?.aborted) release();
     throw error;
+  } finally {
+    signal?.removeEventListener("abort", release);
   }
 }
 
-export async function seekVideo(video: HTMLVideoElement, seconds: number): Promise<void> {
+export async function seekVideo(video: HTMLVideoElement, seconds: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
   const target = Math.max(0, seconds);
   if (Math.abs(video.currentTime - target) < MEDIA_SEEK_TOLERANCE_SECONDS) {
     return;
   }
 
   video.currentTime = target;
-  await waitForMediaEvent(video, "seeked");
+  await waitForMediaEvent(video, "seeked", signal);
 }
 
-export async function recordVideoRange(video: HTMLVideoElement, startSeconds: number, endSeconds: number, mimeType: string): Promise<Blob> {
+export async function recordVideoRange(video: HTMLVideoElement, startSeconds: number, endSeconds: number, mimeType: string, output?: FileSystemFileHandle, signal?: AbortSignal): Promise<Blob> {
   if (mimeType.startsWith("video/mp4")) await prepareRecordingEncoder();
-  await seekVideo(video, startSeconds);
+  await seekVideo(video, startSeconds, signal);
+  signal?.throwIfAborted();
   const streamSource = video as HTMLVideoElement & { captureStream?: () => MediaStream; mozCaptureStream?: () => MediaStream };
   const stream = streamSource.captureStream?.() ?? streamSource.mozCaptureStream?.();
   if (!stream) {
@@ -214,11 +207,17 @@ export async function recordVideoRange(video: HTMLVideoElement, startSeconds: nu
 
   let recorder: MediaRecorder | undefined;
   let cleanupPlayback = () => {};
+  let writable: FileSystemWritableFileStream | undefined;
+  let stopped = false;
+  let writes = Promise.resolve();
   try {
+    writable = await output?.createWritable();
+    signal?.throwIfAborted();
     const activeRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
     recorder = activeRecorder;
     const blob = await new Promise<Blob>((resolve, reject) => {
       const chunks: BlobPart[] = [];
+      let pendingBytes = 0;
       let timeoutId = 0;
       const check = () => {
         if (video.currentTime >= endSeconds || video.ended) {
@@ -227,18 +226,46 @@ export async function recordVideoRange(video: HTMLVideoElement, startSeconds: nu
         }
       };
       const onError = () => reject(new Error("영상 파일을 재생하지 못했습니다."));
+      const onAbort = () => reject(signal?.reason);
       cleanupPlayback = () => {
         video.removeEventListener("timeupdate", check);
         video.removeEventListener("error", onError);
         window.clearTimeout(timeoutId);
+        signal?.removeEventListener("abort", onAbort);
       };
       activeRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) chunks.push(event.data);
+        const data = event.data;
+        if (!data.size) return;
+        if (!writable) {
+          chunks.push(data);
+          return;
+        }
+        pendingBytes += data.size;
+        if (pendingBytes > 64 * 1024 * 1024) {
+          reject(new Error("임시 저장이 지연되어 변환을 중단했습니다."));
+          return;
+        }
+        const sink = writable;
+        writes = writes.then(async () => {
+          if (!stopped) await sink.write(data);
+          pendingBytes -= data.size;
+        });
+        void writes.catch(reject);
       };
-      activeRecorder.onstop = () => resolve(new Blob(chunks, { type: mimeType || "video/webm" }));
+      activeRecorder.onstop = () => {
+        void writes.then(async () => {
+          if (stopped) throw new Error("영상 변환이 중단되었습니다.");
+          if (!writable || !output) return new Blob(chunks, { type: mimeType || "video/webm" });
+          await writable.close();
+          writable = undefined;
+          const file = await output.getFile();
+          return file.slice(0, file.size, mimeType || "video/webm");
+        }).then(resolve, reject);
+      };
       activeRecorder.onerror = () => reject(new Error("영상 파일을 만드는 중 녹화 오류가 발생했습니다."));
       video.addEventListener("timeupdate", check);
       video.addEventListener("error", onError, { once: true });
+      signal?.addEventListener("abort", onAbort, { once: true });
       activeRecorder.start(MILLISECONDS_PER_SECOND);
       timeoutId = window.setTimeout(() => {
         reject(new Error("영상 구간 처리 시간이 초과되었습니다."));
@@ -250,6 +277,7 @@ export async function recordVideoRange(video: HTMLVideoElement, startSeconds: nu
     }
     return blob;
   } finally {
+    stopped = true;
     cleanupPlayback();
     video.pause();
     if (recorder) {
@@ -259,5 +287,6 @@ export async function recordVideoRange(video: HTMLVideoElement, startSeconds: nu
       if (recorder.state !== "inactive") recorder.stop();
     }
     stream.getTracks().forEach((track) => track.stop());
+    await writable?.abort().catch(() => {});
   }
 }

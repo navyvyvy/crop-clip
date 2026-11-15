@@ -3,18 +3,33 @@ import fs from "node:fs";
 import ts from "typescript";
 
 const source = ts.createSourceFile("recording.ts", ["region_selector.ts", "recording_session.ts"].map(name => fs.readFileSync(new URL(`../src/content/${name}`, import.meta.url), "utf8")).join("\n").replace(/^export /gm, ""), ts.ScriptTarget.Latest, true);
-const names = ["queueDirectChunkCheckpoint", "saveDirectCheckpoints", "sendCheckpointMessage", "getRecordingChunkSliceRanges", "cancelDirectRecordingSession", "abortDirectRecordingSession", "releaseDirectRecordingRecorder"];
+const names = ["queueDirectChunkCheckpoint", "flushDirectCheckpoints", "saveDirectCheckpoints", "sendCheckpointMessage", "getRecordingChunkSliceRanges", "cancelDirectRecordingSession", "abortDirectRecordingSession", "releaseDirectRecordingRecorder", "readBlobAsDataUrl"];
 const functions = [];
 function visit(node) {
   if (ts.isFunctionDeclaration(node) && names.includes(node.name?.text)) functions.push(node.getText(source));
   ts.forEachChild(node, visit);
 }
 visit(source);
+const readSource = functions.splice(functions.findIndex(code => code.startsWith("function readBlobAsDataUrl(")), 1)[0];
+let abortedReads = 0;
+const readBlob = new Function("FileReader", `${ts.transpile(readSource)}\nreturn readBlobAsDataUrl;`)(class {
+  readAsDataURL() {}
+  abort() { abortedReads++; this.onabort(); }
+});
+const readAbort = new AbortController();
+const reading = readBlob(new Blob(["pending checkpoint"]), readAbort.signal);
+readAbort.abort();
+await assert.rejects(reading, { name: "AbortError" });
+assert.equal(abortedReads, 1, "cancel must stop a checkpoint read already in progress");
+
 const limit = 64 * 1024 * 1024;
 const writes = [], notices = [];
 let releaseWrite, blocked = true, failWrite = false;
 const api = new Function("sendRuntimeMessage", "showPlayerFeedback", `
+  const window = { clearTimeout };
+  const CHECKPOINT_REPLY_TIMEOUT_MS = 15000;
   const MAX_RECORDING_MESSAGE_BLOB_BYTES = 8 * 1024 * 1024;
+  const HIGH_RECORDING_FRAME_RATE = 60, STANDARD_RECORDING_FRAME_RATE = 30;
   const MAX_PENDING_RECORDING_BYTES = ${limit}, CHUNK_INDEX_DIGITS = 6;
   const readBlobAsDataUrl = async blob => 'data:' + blob.size;
   const cleanupDirectRecordingSession = () => {};
@@ -28,7 +43,8 @@ const api = new Function("sendRuntimeMessage", "showPlayerFeedback", `
 }, message => notices.push(message));
 const makeSession = () => ({
   recordingId: "test", checkpointIndex: 0, checkpointSaveChain: Promise.resolve(),
-  pendingChunks: [], pendingBytes: 0, checkpointSaving: false, checkpointAbort: new AbortController(),
+  pendingChunks: [], pendingBytes: 0, recordedBytes: 0, checkpointSaving: false, checkpointAbort: new AbortController(),
+  settings: { enable60fps: true },
   stops: 0, resolveFinish() {},
 });
 const tick = async () => { for (let n = 0; n < 10; n++) await Promise.resolve(); };
@@ -47,6 +63,7 @@ releaseWrite();
 await session.checkpointSaveChain;
 assert.equal(writes.length, 9, "save all queued chunks and the encoder's final data without truncating");
 assert.deepEqual(writes.map(item => item.index), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+assert.deepEqual(writes.filter(item => item.frameRate !== undefined).map(item => item.frameRate), [60]);
 assert.equal(session.pendingBytes, 0);
 assert.equal(session.pendingChunks.length, 0);
 

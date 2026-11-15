@@ -44,7 +44,7 @@ async function copyStaticFiles(fromDir, toDir) {
       continue;
     }
 
-    if (/\.[cm]?ts$/.test(entry.name)) {
+    if (/\.[cm]?ts$/.test(entry.name) || (fromDir === path.join(srcDir, "icons") && entry.name.endsWith(".svg"))) {
       continue;
     }
 
@@ -80,6 +80,44 @@ await writeFile(
   ffmpegCorePath,
   ffmpegCore.replace(/https:\/\/[^"']*Dynamic-Linking\.html/g, "Emscripten dynamic linking documentation"),
 );
+
+const ffmpegWorkerPath = path.join(distDir, "vendor", "ffmpeg", "ffmpeg", "worker.js");
+const ffmpegWorker = await readFile(ffmpegWorkerPath, "utf8");
+const readFileHandler = "const readFile = ({ path, encoding }) => ffmpeg.FS.readFile(path, { encoding });";
+const mountHandler = "data = mount(_data);";
+const deleteHandler = "ffmpeg.FS.unlink(path);";
+if (![readFileHandler, mountHandler, deleteHandler].every(marker => ffmpegWorker.includes(marker))) {
+  throw new Error("FFmpeg worker handlers changed");
+}
+await writeFile(ffmpegWorkerPath, 'import { attachDiskOutput } from "../../../result/ffmpeg_disk_output.js";\nconst diskOutputs = new Map();\n' + ffmpegWorker
+  .replace(mountHandler, `if (_data.fsType === "CROPCLIP_OUTPUT") {
+                    diskOutputs.set(_data.mountPoint, await attachDiskOutput(ffmpeg.FS, _data.mountPoint, _data.options.file));
+                    data = true;
+                } else {
+                    data = mount(_data);
+                }`)
+  .replace(deleteHandler, `diskOutputs.get(path)?.();
+    diskOutputs.delete(path);
+    ${deleteHandler}`)
+  .replace(readFileHandler, `const readFile = ({ path, encoding }) => {
+    if (encoding !== "blob") return ffmpeg.FS.readFile(path, { encoding });
+    // Export in bounded reads so the result tab never receives a full-size typed array.
+    const size = ffmpeg.FS.stat(path).size;
+    const stream = ffmpeg.FS.open(path, "r");
+    const bytes = new Uint8Array(Math.min(size, 4 * 1024 * 1024));
+    const chunks = [];
+    try {
+        for (let offset = 0; offset < size;) {
+            const count = ffmpeg.FS.read(stream, bytes, 0, Math.min(bytes.length, size - offset), offset);
+            if (count <= 0) throw new Error("Incomplete FFmpeg output");
+            chunks.push(new Blob([bytes.subarray(0, count)]));
+            offset += count;
+        }
+        return new Blob(chunks);
+    } finally {
+        ffmpeg.FS.close(stream);
+    }
+};`));
 
 function makeCrcTable() {
   const table = new Uint32Array(256);

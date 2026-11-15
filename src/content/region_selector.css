@@ -255,6 +255,7 @@
   background: rgba(6, 13, 20, 0.86);
   color: #f4fbff;
   font: 800 11px/20px "Segoe UI Variable", "Noto Sans KR", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
   text-align: center;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.36);
 }
@@ -439,15 +440,16 @@
 #crop-clip-chzzk-record-time {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-end;
   width: max-content;
   min-width: 42px;
   flex-shrink: 0;
   height: 100%;
   padding: 0 4px;
-  color: var(--crop-clip-danger);
+  color: inherit;
   font-size: 12px;
   font-weight: 800;
+  font-variant-numeric: tabular-nums;
   line-height: 1;
   white-space: nowrap;
   pointer-events: none;
@@ -472,7 +474,11 @@
   font-weight: 900;
   line-height: 1.4;
   max-width: min(480px, calc(100vw - 32px));
+  box-sizing: border-box;
   text-align: center;
+  white-space: pre-line;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
   pointer-events: none;
   opacity: 0;
   transition: opacity 120ms ease;

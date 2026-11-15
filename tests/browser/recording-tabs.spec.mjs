@@ -1,4 +1,5 @@
 import { test, expect, prepareVideo } from './fixtures.mjs';
+import { STARTUP_TRIM_MAX_SECONDS } from '../../dist/shared/types.js';
 
 test('other tabs lock all recording controls and unlock after the owner stops', async ({ extension }) => {
   test.setTimeout(180000);
@@ -190,8 +191,12 @@ test('other tabs lock all recording controls and unlock after the owner stops', 
     const opened = context.waitForEvent('page');
     await ownButton.click({ timeout: 10000 });
     const result = await opened;
+    await expect(result.locator('#result-loading')).toBeHidden({ timeout: 30000 });
     await expect(result.locator('#split-button')).toBeEnabled({ timeout: 30000 });
-    await expect.poll(() => result.locator('#preview-video').evaluate(video => video.duration)).toBeGreaterThan(32);
+    const startupTrimmed = mode === 'full' && (await result.locator('#split-status').textContent()) === '녹화 초반의 끊긴 구간을 제외했습니다.';
+    // The cut can advance to the next keyframe, up to 1.25 seconds past the detected stall.
+    const trimAllowance = startupTrimmed ? STARTUP_TRIM_MAX_SECONDS + 1.25 : 0;
+    await expect.poll(() => result.locator('#preview-video').evaluate(video => video.duration)).toBeGreaterThan(32 - trimAllowance);
     await expect.poll(async () => (await state()).status).toBe('idle');
     if (mode === 'full') {
       expect(await storedRegions()).toEqual({ region: null, regions: [] });

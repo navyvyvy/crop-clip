@@ -80,13 +80,13 @@ let recordingSize: { recordingId: string; bytes?: number; pending: boolean } | u
 let waitingShortcutAction: ShortcutAction | null = null;
 
 function updateRecordingTimer(): void {
-  const { status, startedAt, mode, recordingId, tabId } = appState.recordingState;
+  const { status, startedAt, recordingId, tabId } = appState.recordingState;
   if (status !== RECORDING_STATUS.recording || !startedAt) {
-    elements.recordingTime.textContent = "";
+    elements.recordingTime.textContent = status === RECORDING_STATUS.recording ? "시작 중" : "";
     return;
   }
 
-  if (!appState.settings.showRecordingSize || mode !== RECORDING_MODE.full || !recordingId || tabId === undefined) {
+  if (!appState.settings.showRecordingSize || !recordingId || tabId === undefined) {
     recordingSize = undefined;
     elements.recordingTime.textContent = formatElapsed(Date.now() - startedAt);
     return;
@@ -96,14 +96,14 @@ function updateRecordingTimer(): void {
   const sample = recordingSize;
   const render = () => {
     const elapsed = formatElapsed(Date.now() - startedAt);
-    const text = sample.bytes === undefined ? elapsed : `${elapsed} · ${formatRecordingSize(sample.bytes)}`;
+    const text = sample.bytes === undefined ? elapsed : `${formatRecordingSize(sample.bytes)} · ${elapsed}`;
     if (elements.recordingTime.textContent !== text) elements.recordingTime.textContent = text;
   };
   render();
   if (sample.pending) return;
 
   sample.pending = true;
-  void chrome.tabs.sendMessage(tabId, { type: "GET_ORIGINAL_RECORDING_SIZE", recordingId } satisfies ContentCommand)
+  void chrome.tabs.sendMessage(tabId, { type: "GET_RECORDING_SIZE", recordingId } satisfies ContentCommand)
     .then((response: MessageResponse<number> | undefined) => {
       if (response?.ok && response.data !== undefined) {
         sample.bytes = response.data;
@@ -122,7 +122,7 @@ function syncRecordingTimer(): void {
 
   if (appState.recordingState.status !== RECORDING_STATUS.recording || !appState.recordingState.startedAt) {
     recordingSize = undefined;
-    elements.recordingTime.textContent = "";
+    updateRecordingTimer();
     return;
   }
 
@@ -574,15 +574,17 @@ elements.shortcutCloseButton.addEventListener("click", () => {
 });
 
 elements.shortcutDialog.addEventListener("cancel", (event) => {
+  if (!waitingShortcutAction) return;
   event.preventDefault();
+  waitingShortcutAction = null;
+  renderShortcutList();
+  elements.shortcutDialog.focus();
 });
 
 elements.shortcutDialog.addEventListener("keydown", (event) => {
   event.stopPropagation();
-  if (!waitingShortcutAction || event.key === "Escape") {
-    event.preventDefault();
-    return;
-  }
+  if (!waitingShortcutAction || event.key === "Escape" || event.key === "Tab") return;
+  if ((event.key === "Enter" || event.key === " ") && event.target instanceof HTMLButtonElement) return;
 
   const key = event.key.toLowerCase();
   if (!/^[a-z0-9]$/.test(key) || event.ctrlKey || event.metaKey || event.altKey) {

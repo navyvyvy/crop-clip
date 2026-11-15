@@ -22,33 +22,33 @@ export function createVideoFrameCapture(video: HTMLVideoElement, width: number, 
   let writing = false;
   return {
     stream: new MediaStream([track]),
-    paint(placement: DirectCropPlacement, fallback: () => HTMLCanvasElement): void {
-      if (closed || writing || !source) return;
+    paint(placement: DirectCropPlacement, fallback: () => HTMLCanvasElement): boolean {
+      if (closed || writing || !source) return false;
       const timestamp = Math.round(performance.now() * 1000);
       let frame: VideoFrame | undefined;
-      try {
-        // Chroma alignment and letterboxing can require the existing canvas path.
-        if (placement.dx !== 0 || placement.dy !== 0 || placement.dw !== width || placement.dh !== height) throw new Error("canvas layout");
-        const original = new VideoFrame(source, { timestamp });
+      if (placement.dx === 0 && placement.dy === 0 && placement.dw === width && placement.dh === height) {
         try {
-          const rect = original.visibleRect;
-          const unchanged = rect?.x === placement.crop.x && rect.y === placement.crop.y
-            && rect.width === placement.crop.width && rect.height === placement.crop.height
-            && original.displayWidth === width && original.displayHeight === height;
-          // Cropped native frames crash Chromium's Linux MP4 encoder; normalize their pixels through canvas.
-          if (!allowDirectCrop && !unchanged) throw new Error("canvas crop");
-          frame = unchanged ? original
-            : new VideoFrame(original, { visibleRect: placement.crop, displayWidth: width, displayHeight: height });
-        } finally {
-          if (frame !== original) original.close();
+          const original = new VideoFrame(source, { timestamp });
+          try {
+            const rect = original.visibleRect;
+            const unchanged = rect?.x === placement.crop.x && rect.y === placement.crop.y
+              && rect.width === placement.crop.width && rect.height === placement.crop.height
+              && original.displayWidth === width && original.displayHeight === height;
+            // Cropped native frames can crash Chromium's Linux MP4 encoder.
+            if (unchanged) frame = original;
+            else if (allowDirectCrop) frame = new VideoFrame(original, { visibleRect: placement.crop, displayWidth: width, displayHeight: height });
+          } finally {
+            if (frame !== original) original.close();
+          }
+          const rect = frame?.visibleRect;
+          if (frame && (!rect || rect.x !== placement.crop.x || rect.y !== placement.crop.y || rect.width !== placement.crop.width || rect.height !== placement.crop.height)) {
+            frame.close();
+            frame = undefined;
+          }
+        } catch {
+          frame?.close();
+          frame = undefined;
         }
-        const rect = frame.visibleRect;
-        if (!rect || rect.x !== placement.crop.x || rect.y !== placement.crop.y || rect.width !== placement.crop.width || rect.height !== placement.crop.height) {
-          throw new Error("unsupported crop");
-        }
-      } catch {
-        frame?.close();
-        frame = undefined;
       }
       const outputFrame = frame ?? new VideoFrame(fallback(), { timestamp });
       pendingFrame = outputFrame;
@@ -60,6 +60,7 @@ export function createVideoFrameCapture(video: HTMLVideoElement, width: number, 
         if (pendingFrame === outputFrame) pendingFrame = null;
         writing = false;
       });
+      return true;
     },
     close(): void {
       if (closed) return;

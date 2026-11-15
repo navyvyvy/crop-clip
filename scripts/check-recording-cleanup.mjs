@@ -3,6 +3,7 @@ import fs from "node:fs";
 import ts from "typescript";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { RECORDING_MIME_CANDIDATES } from "../dist/shared/types.js";
 
 if (!global.gc) {
   const result = spawnSync(process.execPath, ["--expose-gc", fileURLToPath(import.meta.url)], { stdio: "inherit" });
@@ -32,19 +33,20 @@ function visit(node) {
   ts.forEachChild(node, visit);
 }
 visit(file);
-const selectMime = new Function("MediaRecorder", `
+const selectMime = new Function("MediaRecorder", "RECORDING_MIME_CANDIDATES", `
   const RECORDING_FORMAT = { webm: 'webm', mp4: 'mp4' };
   ${ts.transpile(selectDirectMimeTypeSource, { target: ts.ScriptTarget.ES2022 })}
   return selectDirectMimeType;
 `);
-assert.equal(selectMime({ isTypeSupported: () => true })({ outputFormat: "webm" }).mimeType,
+const selectSupportedMime = recorder => selectMime(recorder, RECORDING_MIME_CANDIDATES);
+assert.equal(selectSupportedMime({ isTypeSupported: () => true })({ outputFormat: "webm" }).mimeType,
   "video/webm;codecs=avc1", "prefer H.264 to preserve fast MP4 splitting without re-encoding");
-assert.equal(selectMime({ isTypeSupported: type => type.includes("vp8") })({ outputFormat: "webm" }).mimeType,
+assert.equal(selectSupportedMime({ isTypeSupported: type => type.includes("vp8") })({ outputFormat: "webm" }).mimeType,
   "video/webm;codecs=vp8,opus");
-assert.equal(selectMime({ isTypeSupported: type => type.includes("vp9") })({ outputFormat: "webm" }).mimeType,
+assert.equal(selectSupportedMime({ isTypeSupported: type => type.includes("vp9") })({ outputFormat: "webm" }).mimeType,
   "video/webm;codecs=vp9,opus");
-assert.match(selectMime({ isTypeSupported: () => true })({ outputFormat: "mp4" }).mimeType, /^video\/mp4/);
-assert.throws(() => selectMime({ isTypeSupported: () => false })({ outputFormat: "webm" }), /WebM/);
+assert.match(selectSupportedMime({ isTypeSupported: () => true })({ outputFormat: "mp4" }).mimeType, /^video\/mp4/);
+assert.throws(() => selectSupportedMime({ isTypeSupported: () => false })({ outputFormat: "webm" }), /WebM/);
 console.log("recording codec selection checks passed");
 const stopSource = functions.find(code => code.startsWith("function requestDirectPartStop("));
 const stopPart = new Function('releaseDirectRecordingCapture', `${ts.transpile(stopSource, { target: ts.ScriptTarget.ES2022 })}; return requestDirectPartStop;`)(session => { session.releases = (session.releases ?? 0) + 1; });
@@ -74,7 +76,7 @@ const { cleanup, cancel, getVideoStream, startDirectPart, messages, observers, d
   const playerCaptureStreams = new WeakMap();
   const detachTimers = new Map();
   const window = { clearInterval() {}, setTimeout(fn) { detachTimers.set(1, fn); return 1; }, clearTimeout(id) { detachTimers.delete(id); } };
-  const AUDIO_BITS_PER_SECOND = 128000, MILLISECONDS_PER_SECOND = 1000;
+  const AUDIO_BITS_PER_SECOND = 128000, MILLISECONDS_PER_SECOND = 1000, FINALIZE_REPLY_TIMEOUT_MS = 30_000;
   const messages = [];
   const observers = [];
   class MutationObserver {
@@ -88,6 +90,7 @@ const { cleanup, cancel, getVideoStream, startDirectPart, messages, observers, d
       if (message.recordingId === 'finalize-rejection') throw new Error('disk failed');
       return { ok: false, error: 'disk failed' };
     }
+    if (message.type === 'RECORDING_ERROR') return { ok: false, error: message.error };
     return { ok: true };
   };
   class MediaRecorder {
@@ -96,6 +99,8 @@ const { cleanup, cancel, getVideoStream, startDirectPart, messages, observers, d
     requestData() {}
     stop() { this.state = 'inactive'; }
   }
+  const flushDirectCheckpoints = () => {};
+  const sendCheckpointMessage = sendRuntimeMessage;
   ${ts.transpile(functions.join("\n"), { target: ts.ScriptTarget.ES2022 })}
   return { cleanup: cleanupDirectRecordingSession, cancel: cancelDirectRecordingSession, getVideoStream: video => getVideoStream(video, handleDetachedPlayer), startDirectPart, messages, observers, detachTimers, layoutWatch };
 `)(Stream);
@@ -300,7 +305,7 @@ const draw = new Function("video", "paintPlacements", "computeDirectCropFromSele
   const sourceRegions = [{}], session = { placements: [] };
   const getCropLayoutKey = () => 'fixed';
   return ${ts.transpile(drawFrameSource, { target: ts.ScriptTarget.ES2022 })};
-`)(video, () => paints++, () => { cropChecks++; return {}; });
+`)(video, () => { paints++; return true; }, () => { cropChecks++; return {}; });
 for (let tick = 0; tick < 60; tick++) draw();
 assert.equal(paints, 1, "paint each decoded frame only once, even when the recording timer runs faster");
 video.paused = true;
@@ -321,6 +326,42 @@ video.frame++;
 draw();
 assert.equal(paints, 3, "do not draw a frame while the player is loading");
 console.log("recording frame checks passed");
+
+const checkStartupGap = new Function("video", "clock", `
+  let lastPaintedFrame = -1, cropLayoutKey = 'fixed';
+  const layoutDependsOnlyOnVideoSize = true;
+  let layoutVideoWidth = video.videoWidth, layoutVideoHeight = video.videoHeight;
+  let startupStartedAt = 0, lastStartupFrameAt = 0, lastStartupMediaTime = 0;
+  const STARTUP_FRAME_GAP_MS = 150, STARTUP_TRIM_MIN_SECONDS = 0.15, STARTUP_STALL_WINDOW_SECONDS = 2.5, STARTUP_TRIM_MAX_SECONDS = 5;
+  const MILLISECONDS_PER_SECOND = 1000, performance = { now: () => clock.now };
+  const HTMLMediaElement = { HAVE_CURRENT_DATA: 2 }, session = { placements: [] };
+  const paintPlacements = () => !clock.blocked;
+  return { session, draw: ${ts.transpile(drawFrameSource, { target: ts.ScriptTarget.ES2022 }).trim().replace(/;$/, "")} };
+`);
+for (const gap of [33, 350]) {
+  const clock = { now: 0 };
+  const source = { ...video, readyState: 4, currentTime: 0 };
+  const { session, draw } = checkStartupGap(source, clock);
+  for (let now = 33; now <= 2475; now += 33) {
+    clock.now = now;
+    source.currentTime = now / 1000;
+    source.frame++;
+    draw();
+  }
+  const end = clock.now + gap;
+  clock.now += 33;
+  source.currentTime = clock.now / 1000;
+  source.frame++;
+  if (gap > 33) {
+    clock.blocked = true;
+    draw();
+    clock.blocked = false;
+  }
+  clock.now = end;
+  source.currentTime = end / 1000;
+  draw();
+  assert.equal(session.startupTrimSeconds, gap === 33 ? undefined : end / 1000, "a stall crossing the startup deadline should be trimmed through recovery");
+}
 
 // Starting a recording rebuilds the border before its message response arrives.
 // A late response must not restart the disposed border's display timer.
@@ -366,7 +407,7 @@ console.log("recording border timer cleanup checks passed");
 // Exercise the real startup scope: clearing session fields alone cannot detect
 // a pending Promise handler that still retains the drawing closure.
 const createStartup = new Function("playerState", "mimeType", "nativeCapture", `
-  let directSession = null, currentRecordingState, recordingEncoderCheck;
+  let directSession = null, currentRecordingState, recordingEncoderCheck, savedFirstScreenRecording = false;
   const currentRegions = [], timers = new Map(), refs = {};
   const window = { setInterval(fn) { timers.set(1, fn); return 1; }, clearInterval(id) { timers.delete(id); } };
   class MediaStream {
@@ -381,8 +422,12 @@ const createStartup = new Function("playerState", "mimeType", "nativeCapture", `
     const player = { ...playerState }; refs.video = new WeakRef(player); return player;
   };
   const waitForCurrentVideoFrame = async () => true;
+  const getMultiRegionLimit = () => 2;
   const prepareRecordingEncoder = async () => { refs.encoderPreparations = (refs.encoderPreparations ?? 0) + 1; };
-  const computeDirectCropFromSelection = () => ({});
+  const computeDirectCropFromSelection = () => {
+    refs.cropReads = (refs.cropReads ?? 0) + 1;
+    return {};
+  };
   const computeDirectLayout = () => ({ output: { width: 1920, height: 1080 }, placements: [] });
   const selectDirectMimeType = () => ({ mimeType: mimeType ?? 'video/webm', extension: mimeType?.startsWith('video/mp4') ? 'mp4' : 'webm' });
   const getVideoStream = () => new MediaStream(), handleDetachedPlayer = () => {};
@@ -430,6 +475,15 @@ for (const nativeCapture of [true, 'fallback']) {
   assert.equal(recording.refs.canvasContexts ?? 0, nativeCapture === true ? 0 : 1, 'fallback must reuse its prepared context');
   recording.stop(); recording.finish();
 }
+const stableRegions = createStartup({ muted: false, volume: 1, readyState: 4, videoWidth: 1920, videoHeight: 1080 });
+const relativeRegion = { videoRelative: { x: 0.1, y: 0.1, width: 0.3, height: 0.4 } };
+await stableRegions.start({ recordingId: 'stable-regions', fullPlayer: false, region: relativeRegion, regions: [relativeRegion, relativeRegion], settings: { enableMultiRegion: true } });
+stableRegions.timers.get(1)();
+assert.equal(stableRegions.refs.cropReads, 2, 'unchanged video-relative regions must reuse their layout');
+stableRegions.refs.video.deref().videoWidth = 1280;
+stableRegions.timers.get(1)();
+assert.equal(stableRegions.refs.cropReads, 4, 'a resolution change must rebuild video-relative crops');
+stableRegions.stop(); stableRegions.finish();
 const croppedMp4 = createStartup({ muted: false, volume: 1 }, 'video/mp4', true);
 await croppedMp4.start({ recordingId: 'cropped-mp4', fullPlayer: false, region: {}, settings: {} });
 assert.equal(croppedMp4.refs.canvasContexts, 1, 'cropped MP4 must use the native canvas track');

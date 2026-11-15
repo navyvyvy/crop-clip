@@ -1,6 +1,7 @@
-import { deleteRecording, deleteRecordingChunks, getChunksByRecordingId, getRecordingDeletionCandidates, putChunk, putPart, putRecording } from "../shared/idb.js";
-import { fail, ok, type AutoDownloadHandledMessage, type ContentCommand, type DeletionScheduleRequest, type FinalizeRecordingMessage, type MessageResponse, type PopupCommand, type RecordingErrorMessage, type StoreRecordingChunkMessage, type StreamOffsetRequest } from "../shared/messages.js";
+import { deleteRecording, deleteRecordingChunks, getChunksByRecordingId, getRecording, getRecordingDeletionCandidates, putChunk, putPart, putRecording } from "../shared/idb.js";
+import { fail, ok, type AutoDownloadHandledMessage, type ContentCommand, type DeletionScheduleRequest, type FinalizeRecordingMessage, type MessageResponse, type PopupCommand, type RecordingErrorMessage, type RecordingStartedMessage, type StoreRecordingChunkMessage, type StreamOffsetRequest } from "../shared/messages.js";
 import { loadAppState, loadRecordingState, saveRecordingState } from "../shared/storage.js";
+import { removeEditOutputs } from "../shared/temporary_outputs.js";
 import { normalizeRegion, normalizeRegions } from "../shared/normalize.js";
 import { MILLISECONDS_PER_SECOND, SECONDS_PER_MINUTE } from "../shared/time_range.js";
 import { ORIGINAL_STREAM_PREFIXES, probeOriginalStream } from "../content/original_stream.js";
@@ -102,6 +103,7 @@ async function scheduleRecordingDeletion(recordingId: string): Promise<MessageRe
 
 async function deleteRecordingNow(recordingId: string): Promise<void> {
   await deleteRecording(recordingId);
+  await removeEditOutputs(recordingId);
   await chrome.alarms.clear(getDeleteAlarmName(recordingId));
   await chrome.storage.local.remove(getDeleteAlarmName(recordingId));
 }
@@ -356,7 +358,6 @@ async function startRecordingSession(fullPlayer: boolean, sourceTab?: chrome.tab
     status: RECORDING_STATUS.recording,
     recordingId,
     tabId,
-    startedAt: Date.now(),
     mode: fullPlayer ? RECORDING_MODE.full : RECORDING_MODE.region,
   });
 
@@ -666,6 +667,8 @@ async function finalizeRecordingFromChunksUnlocked(recordingId: string, endedAt:
     size: blob.size,
     blob,
     createdAt: actualEndedAt,
+    frameRate: first.frameRate,
+    inspectStartup: state.mode === RECORDING_MODE.full && originalStreamStart === undefined && first.inspectStartup === true ? true : undefined,
     startupTrimSeconds: state.mode === RECORDING_MODE.full && typeof startupTrimSeconds === "number"
       && startupTrimSeconds >= STARTUP_TRIM_MIN_SECONDS && startupTrimSeconds <= STARTUP_TRIM_MAX_SECONDS ? startupTrimSeconds : undefined,
     originalStreamStart,
@@ -705,7 +708,8 @@ async function recoverRecording(recordingId: string, endedAt: number): Promise<b
         return true;
       }
       if ((state.status !== RECORDING_STATUS.recording && state.status !== RECORDING_STATUS.error) || state.recordingId !== recordingId) {
-        return false;
+        // A result tab may already have unlocked recording before its reply arrived.
+        return Boolean(await getRecording(recordingId));
       }
       if (attempt + 1 < RECOVERY_FINALIZE_ATTEMPTS) {
         await delay(CHECKPOINT_FINALIZE_DELAY_MS);
@@ -808,7 +812,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }).catch(() => {});
 });
 
-chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingErrorMessage | StoreRecordingChunkMessage | FinalizeRecordingMessage | DeletionScheduleRequest | AutoDownloadHandledMessage | StreamOffsetRequest, sender, sendResponse: (response: MessageResponse<unknown>) => void) => {
+chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingErrorMessage | RecordingStartedMessage | StoreRecordingChunkMessage | FinalizeRecordingMessage | DeletionScheduleRequest | AutoDownloadHandledMessage | StreamOffsetRequest, sender, sendResponse: (response: MessageResponse<unknown>) => void) => {
   const sourceTab = sender.url?.startsWith(chrome.runtime.getURL("")) ? undefined : sender.tab;
   void (async () => {
     if (message.type === "SELECT_REGION") {
@@ -869,6 +873,21 @@ chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingErrorMess
 
     if (message.type === "RECORDING_ERROR") {
       sendResponse(await handleRecordingError(message));
+      return;
+    }
+
+    if (message.type === "RECORDING_STARTED") {
+      if (typeof sourceTab?.id === "number" && typeof message.recordingId === "string"
+        && Number.isFinite(message.startedAt) && message.startedAt > 0) {
+        await runRecordingTerminalOperation(message.recordingId, async () => {
+          const state = await loadRecordingState();
+          if (state.status === RECORDING_STATUS.recording && state.recordingId === message.recordingId
+            && state.tabId === sourceTab.id && !state.startedAt) {
+            await saveRecordingState({ ...state, startedAt: message.startedAt });
+          }
+        });
+      }
+      sendResponse(ok());
       return;
     }
 

@@ -3,7 +3,7 @@ import { setTimeout as wait } from 'node:timers/promises';
 import { downloadSourcesAndConfirm } from '../dist/result/downloads.js';
 
 function mockDownloads({ state = 'in_progress', failStart = false, failSearch = false } = {}) {
-  const started = [], listeners = new Set(), urls = new Set();
+  const started = [], listeners = new Set(), erased = new Set(), urls = new Set();
   URL.createObjectURL = () => { const url = `blob:test-${started.length}`; urls.add(url); return url; };
   URL.revokeObjectURL = url => urls.delete(url);
   globalThis.window = { setTimeout: callback => setTimeout(callback, 0) };
@@ -21,8 +21,14 @@ function mockDownloads({ state = 'in_progress', failStart = false, failSearch = 
       addListener: listener => listeners.add(listener),
       removeListener: listener => listeners.delete(listener),
     },
+    onErased: {
+      addListener: listener => erased.add(listener),
+      removeListener: listener => erased.delete(listener),
+    },
   } };
-  return { started, urls, listeners, finish(id, state = 'complete') {
+  return { started, urls, listeners, erased, erase(id) {
+    for (const listener of [...erased]) listener(id);
+  }, finish(id, state = 'complete') {
     for (const listener of [...listeners]) listener({ id, state: { current: state } });
   } };
 }
@@ -45,6 +51,7 @@ for (const reverseOrder of [false, true]) {
   await pending;
   assert.equal(mock.urls.size, 0);
   assert.equal(mock.listeners.size, 0);
+  assert.equal(mock.erased.size, 0);
 }
 
 for (const options of [{}, { failStart: true }, { failSearch: true }]) {
@@ -57,6 +64,17 @@ for (const options of [{}, { failStart: true }, { failSearch: true }]) {
   assert.equal(mock.urls.size, 0);
   assert.equal(mock.listeners.size, 0);
 }
+
+const erased = mockDownloads();
+const erasedResult = downloadSourcesAndConfirm(items, true).catch(error => error);
+await wait(10);
+erased.erase(999);
+assert.equal(erased.started.length, 1);
+erased.erase(1);
+const failure = await Promise.race([erasedResult, wait(100)]);
+assert.match(failure?.message ?? '', /다운로드 기록/);
+assert.equal(erased.started.length, 1);
+assert.equal(erased.urls.size + erased.listeners.size + erased.erased.size, 0);
 
 const complete = mockDownloads({ state: 'complete' });
 await downloadSourcesAndConfirm(items, true);

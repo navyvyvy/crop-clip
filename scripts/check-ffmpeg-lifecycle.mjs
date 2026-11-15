@@ -1,6 +1,29 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import ts from "typescript";
+import { attachDiskOutput } from "../src/result/ffmpeg_disk_output.js";
+
+for (const quotaError of [false, true]) {
+  const node = { node_ops: {}, stream_ops: {}, usedBytes: 0 };
+  let closed = false;
+  const close = await attachDiskOutput({ create: () => node }, "output-original.mp4", {
+    async createSyncAccessHandle() {
+      return {
+        truncate() {},
+        write() {
+          if (quotaError) throw new DOMException("Disk quota exceeded", "QuotaExceededError");
+          return 1;
+        },
+        close() { closed = true; },
+      };
+    },
+  });
+  assert.throws(() => node.stream_ops.write(null, new Uint8Array(2), 0, 2, 0),
+    quotaError ? { name: "QuotaExceededError" } : /Incomplete temporary output write/);
+  assert.equal(node.usedBytes, 0, "an incomplete write must not report completed output");
+  close();
+  assert.equal(closed, true);
+}
 
 const text = ["result.ts", "ffmpeg.ts", "media.ts"].map(name => fs.readFileSync(new URL(`../src/result/${name}`, import.meta.url), "utf8")).join("\n");
 const file = ts.createSourceFile("result.ts", text, ts.ScriptTarget.Latest, true);
@@ -26,6 +49,7 @@ const jobSource = file.statements.find(node => ts.isFunctionDeclaration(node) &&
 assert.ok(jobSource, 'result operations must share their job lifecycle');
 const jobState = { busy: false, releases: 0, hidden: 0, alerts: [], statuses: [] };
 const runJob = new Function('state', `
+  const resultLifetime = new AbortController();
   let workBusy = false;
   const setSplitBusy = busy => { workBusy = busy; state.busy = busy; };
   const releaseFfmpeg = async () => { state.releases++; };
@@ -60,17 +84,21 @@ console.log('shared result job success, failure and overlap checks passed');
 const functions = file.statements.filter((node) => ts.isFunctionDeclaration(node)
   && ["loadFfmpeg", "releaseFfmpeg"].includes(node.name?.text)).map(node => node.getText(file)).join("\n");
 const instances = [];
-let failLoad = false;
+let failLoad = false, blockLoad = false;
 class FFmpeg {
   terminated = false;
   constructor() { instances.push(this); }
   on(_event, listener) { this.progress = listener; }
-  async load() { if (failLoad) throw new Error("load failed"); }
-  terminate() { this.terminated = true; }
+  async load() {
+    if (failLoad) throw new Error("load failed");
+    if (blockLoad) await new Promise((_, reject) => { this.rejectLoad = reject; });
+  }
+  async createDir() {}
+  terminate() { this.terminated = true; this.rejectLoad?.(new Error("terminated")); }
 }
 const code = compile(functions).replace(/import\(chrome\.runtime\.getURL\([^)]*\)\)/g, "Promise.resolve({ FFmpeg })");
 const api = new Function("FFmpeg", `
-  let ffmpegLoadPromise = null;
+  let ffmpegLoadPromise = null, activeFfmpeg = null;
   const chrome = { runtime: { getURL: x => x } };
   ${code}
   return { loadFfmpeg, releaseFfmpeg };
@@ -94,6 +122,19 @@ failLoad = false;
 await api.loadFfmpeg(() => {});
 await api.releaseFfmpeg();
 assert.ok(instances.every(instance => instance.terminated));
+blockLoad = true;
+const loading = api.loadFfmpeg(() => {});
+await Promise.resolve();
+const abandonedLoad = instances.at(-1);
+assert.equal(typeof abandonedLoad.rejectLoad, "function");
+const expectedRejection = assert.rejects(loading, /terminated/);
+await api.releaseFfmpeg();
+assert.equal(abandonedLoad.terminated, true, "closing must stop a worker even before it finishes loading");
+blockLoad = false;
+const restarted = api.loadFfmpeg(() => {});
+await expectedRejection;
+assert.equal(await api.loadFfmpeg(() => {}), await restarted, "an old failed load must not clear the newer worker");
+await api.releaseFfmpeg();
 const releaseSource = file.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "releaseVideoSource");
 const revoked = [];
 const releaseVideoSource = new Function("URL", `${compile(releaseSource.getText(file))}; return releaseVideoSource;`)(
@@ -121,7 +162,9 @@ const convertSource = file.statements.find(node => ts.isFunctionDeclaration(node
 for (const outputFormat of ["mp4", "webm"]) {
   let abandonedEngine;
   const convert = new Function("convertPartWithFfmpeg", "convertPartWithRecorder", "releaseFfmpeg", `
+    const resultLifetime = new AbortController();
     const setWorkStatus = () => {};
+    class EditStorageError extends Error {}
     ${compile(convertSource.getText(file))}
     return convertPart;
   `)(async () => {
@@ -137,10 +180,19 @@ for (const outputFormat of ["mp4", "webm"]) {
 console.log("conversion fallback resource checks passed");
 
 const inputJob = file.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "withFfmpegInput");
-for (const failure of ["clear", "read", "write", "operation", "none"]) {
+for (const failure of ["clear", "mount", "operation", "none"]) {
   const events = [];
-  const ffmpeg = { writeFile: async () => { events.push("write"); if (failure === "write") throw new Error(failure); } };
+  const ffmpeg = {
+    mount: async (_type, options) => {
+      events.push("mount");
+      assert.ok(options.blobs[0].data instanceof Blob);
+      if (failure === "mount") throw new Error(failure);
+      return true;
+    },
+    unmount: async () => { events.push("unmount"); },
+  };
   const withInput = new Function("ffmpeg", "events", "failure", `
+    const resultLifetime = new AbortController();
     const loadFfmpeg = async () => ffmpeg, getPartSource = part => part.blob;
     const setFfmpegProgressBase = () => {}, setWorkStatus = () => {};
     const FFMPEG_LOAD_START_PERCENT = 3, FFMPEG_READY_PERCENT = 8, FFMPEG_SOURCE_READ_PERCENT = 10, FFMPEG_SOURCE_LOADED_PERCENT = 12, FFMPEG_TRANSCODE_START_PERCENT = 15;
@@ -148,13 +200,12 @@ for (const failure of ["clear", "read", "write", "operation", "none"]) {
       events.push(bestEffort ? 'cleanup' : 'clear');
       if (!bestEffort && failure === 'clear') throw new Error(failure);
     };
-    const getSourceBytes = async () => { events.push('read'); if (failure === 'read') throw new Error(failure); return new Uint8Array([1]); };
     ${compile(inputJob.getText(file))}
     return withFfmpegInput;
   `)(ffmpeg, events, failure);
   const result = withInput({ extension: "webm", blob: new Blob(["video"]) }, async (engine, inputName) => {
     assert.equal(engine, ffmpeg);
-    assert.equal(inputName, "input.webm");
+    assert.equal(inputName, "/source/input.webm");
     events.push("operation");
     if (failure === "operation") throw new Error(failure);
     return "saved";
@@ -163,12 +214,39 @@ for (const failure of ["clear", "read", "write", "operation", "none"]) {
   else await assert.rejects(result, new RegExp(failure));
   assert.equal(events.at(-1), "cleanup", `${failure}: release temporary files on every exit`);
   assert.equal(events.filter(event => event === "cleanup").length, 1);
+  assert.equal(events.includes("unmount"), failure === "none" || failure === "operation");
 }
 console.log("FFmpeg input job cleanup checks passed");
 
+const splitSource = file.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'createDurationSplitWithFfmpeg');
+const splitMany = new Function(`
+  const RECORDING_FORMAT = { mp4: 'mp4', webm: 'webm' }, TIME_STEP_SECONDS = 0.1;
+  const FFMPEG_TRANSCODE_START_PERCENT = 18, FFMPEG_EXEC_PROGRESS_MAX = 92, PERCENT_SCALE = 100, SPLIT_FILE_INDEX_DIGITS = 3;
+  const getExpectedSplitCount = () => 1001, setProgressPercent = () => {};
+  const parseSegmentTimeList = text => JSON.parse(text);
+  const readEditOutput = async (_, name) => new Blob([name]), deleteFfmpegFile = async () => {};
+  const getFilenameBase = name => name.replace(/\\.[^.]+$/, ''), getRecordingFilename = name => name;
+  ${compile(splitSource.getText(file))}
+  return createDurationSplitWithFfmpeg;
+`)();
+const manyFiles = Array.from({ length: 1001 }, (_, index) => ({ name: `output${String(index).padStart(3, '0')}.webm`, isDir: false }));
+const manySegments = await splitMany({ filename: 'source.webm' }, 1001, 1, 'webm', undefined, {
+  inputName: '/source/input.webm', ffmpeg: {
+    exec: async () => 0,
+    listDir: async () => [...manyFiles].reverse(),
+    readFile: async () => JSON.stringify(manyFiles.map((_, index) => ({ start: index, end: index + 1 }))),
+  },
+});
+for (const [index, segment] of manySegments.entries()) {
+  assert.equal(await segment.blob.text(), manyFiles[index].name, 'file contents must stay in timeline order after index 999');
+  assert.equal(segment.startSeconds, index);
+}
+console.log('split output numeric ordering checks passed');
+
 const rangeSource = file.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "recordVideoRange");
-for (const failure of ["constructor", "start", "play", "encoder", "video", "timeout", "none"]) {
+for (const failure of ["constructor", "start", "play", "encoder", "video", "timeout", "abort", "none"]) {
   const track = { readyState: "live", stop() { this.readyState = "ended"; } };
+  const controller = new AbortController();
   const timers = new Map(), listeners = new Set();
   let encoder;
   class Video extends EventTarget {
@@ -184,6 +262,7 @@ for (const failure of ["constructor", "start", "play", "encoder", "video", "time
         if (failure === "encoder") encoder.onerror();
         else if (failure === "video") this.dispatchEvent(new Event("error"));
         else if (failure === "timeout") timers.values().next().value();
+        else if (failure === "abort") controller.abort();
         else { this.currentTime = 10; this.dispatchEvent(new Event("timeupdate")); }
       });
     }
@@ -206,7 +285,7 @@ for (const failure of ["constructor", "start", "play", "encoder", "video", "time
     return recordVideoRange;
   `)(Recorder, { setTimeout(fn) { timers.set(1, fn); return 1; }, clearTimeout(id) { timers.delete(id); } });
   const video = new Video();
-  const result = recordRange(video, 0, 10, "video/webm");
+  const result = recordRange(video, 0, 10, "video/webm", undefined, controller.signal);
   if (failure === "none") assert.ok((await result).size > 0);
   else await assert.rejects(result);
   assert.equal(track.readyState, "ended", failure + ": release captured tracks on every exit");

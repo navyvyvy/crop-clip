@@ -1,6 +1,7 @@
 import { test, expect, prepareVideo } from './fixtures.mjs';
 import { test as browserTest, chromium } from '@playwright/test';
-import { mkdir } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 async function inDatabase(worker, operation, argument = null) {
@@ -61,8 +62,11 @@ test('33-second recording data expires after result close and retries failed del
   // Native alarms execute the production handler; only their due time is shortened.
   await expire(id);
   await expect.poll(() => counts(id), { timeout: 15000 }).toEqual({ recording: false, parts: 0, chunks: 0 });
+  await expect.poll(() => worker.evaluate(async id => {
+    const key = `delete-recording:${id}`;
+    return (await chrome.storage.local.get(key))[key];
+  }, id)).toBeUndefined();
   expect(await alarmTime(id)).toBe(0);
-  expect(await worker.evaluate(async id => (await chrome.storage.local.get(`delete-recording:${id}`))[`delete-recording:${id}`], id)).toBeUndefined();
 
   const retryId = 'retry-deletion';
   await inDatabase(worker, async (db, id, _request, done) => {
@@ -72,6 +76,15 @@ test('33-second recording data expires after result close and retries failed del
     tx.objectStore('chunks').put({ id: 'retry-chunk', recordingId: id, index: 1, mimeType: 'video/webm', extension: 'webm', baseName: 'retry', createdAt: 1, capturedAt: 2, completesBlob: true, blob: new Blob(['chunk']) });
     await done(tx);
   }, retryId);
+  await worker.evaluate(() => {
+    const openCursor = IDBIndex.prototype.openCursor;
+    IDBIndex.prototype.openCursor = function (...args) {
+      if (this.name === 'recordingId' && ['parts', 'chunks'].includes(this.objectStore.name)) {
+        globalThis.testVideoValueCursors = (globalThis.testVideoValueCursors ?? 0) + 1;
+      }
+      return openCursor.apply(this, args);
+    };
+  });
   await worker.evaluate(() => {
     const transaction = IDBDatabase.prototype.transaction;
     IDBDatabase.prototype.transaction = function (...args) {
@@ -89,13 +102,14 @@ test('33-second recording data expires after result close and retries failed del
   expect(await counts(retryId)).toEqual({ recording: true, parts: 1, chunks: 1 });
   await expire(retryId);
   await expect.poll(() => counts(retryId), { timeout: 15000 }).toEqual({ recording: false, parts: 0, chunks: 0 });
+  expect(await worker.evaluate(() => globalThis.testVideoValueCursors ?? 0)).toBe(0);
 });
 
-browserTest('lost deletion alarms are restored across a real browser restart', async ({}, testInfo) => {
+browserTest('lost deletion alarms are restored across a real browser restart', async () => {
   browserTest.setTimeout(90000);
   const directory = path.resolve(process.env.CROPCLIP_TEST_EXTENSION_DIR || 'dist');
-  const profile = testInfo.outputPath('profile');
-  await mkdir(profile, { recursive: true });
+  // IndexedDB adds long filenames under the profile on Windows.
+  const profile = await mkdtemp(path.join(tmpdir(), 'cropclip-restart-'));
   const launch = () => chromium.launchPersistentContext(profile, {
     channel: process.env.CROPCLIP_TEST_BROWSER || 'chromium', headless: true,
     args: [`--load-extension=${directory}`, `--disable-extensions-except=${directory}`],
@@ -140,7 +154,7 @@ browserTest('lost deletion alarms are restored across a real browser restart', a
     });
     await expect.poll(counts, { timeout: 15000 }).toEqual({ ids: ['remaining'], expiredParts: 0, expiredChunks: 0, legacyParts: 0, legacyChunks: 0, orphanParts: 1, orphanChunks: 1, recoveryChunks: 1 });
     expect(await worker.evaluate(async () => (await chrome.alarms.get('delete-recording:remaining'))?.scheduledTime)).toBe(deadline);
-    expect(await worker.evaluate(async () => (await chrome.storage.local.get('delete-recording:expired'))['delete-recording:expired'])).toBeUndefined();
+    await expect.poll(() => worker.evaluate(async () => (await chrome.storage.local.get('delete-recording:expired'))['delete-recording:expired'])).toBeUndefined();
     for (const id of ['orphan-part', 'orphan-chunk', 'recovering']) {
       expect(await worker.evaluate(async id => (await chrome.storage.local.get(`delete-recording:${id}`))[`delete-recording:${id}`], id)).toBeGreaterThan(Date.now() + 9 * 60000);
       await worker.evaluate(async id => {
@@ -152,6 +166,10 @@ browserTest('lost deletion alarms are restored across a real browser restart', a
     await expect.poll(counts, { timeout: 15000 }).toEqual({ ids: ['remaining'], expiredParts: 0, expiredChunks: 0, legacyParts: 0, legacyChunks: 0, orphanParts: 0, orphanChunks: 0, recoveryChunks: 1 });
     await expect.poll(() => worker.evaluate(async () => (await chrome.alarms.get('delete-recording:recovering'))?.scheduledTime ?? 0)).toBeGreaterThan(Date.now() + 9 * 60000);
   } finally {
-    await context?.close();
+    try {
+      await context?.close();
+    } finally {
+      await rm(profile, { recursive: true, force: true, maxRetries: 3 });
+    }
   }
 });

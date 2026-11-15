@@ -9,6 +9,11 @@ export const RECORDING_FORMAT = {
   mp4: "mp4",
 } as const satisfies Record<RecordingFormat, RecordingFormat>;
 
+export const RECORDING_MIME_CANDIDATES: Record<RecordingFormat, readonly string[]> = {
+  mp4: ['video/mp4;codecs="avc1.42E01E,mp4a.40.2"', 'video/mp4;codecs="avc1,mp4a.40.2"', "video/mp4"],
+  webm: ["video/webm;codecs=avc1", "video/webm;codecs=vp8,opus", "video/webm;codecs=vp9,opus", "video/webm"],
+};
+
 export const RECORDING_STATUS = {
   idle: "idle",
   recording: "recording",
@@ -84,7 +89,9 @@ export interface RecordingPartRecord {
   dataUrl?: string;
   objectUrl?: string;
   seekMetadataVersion?: number;
+  frameRate?: number;
   startupTrimSeconds?: number;
+  inspectStartup?: true;
   originalStreamStart?: number;
   originalStreamEnd?: number;
   captureMethod?: "original" | "screen";
@@ -101,6 +108,8 @@ export interface RecordingChunkRecord {
   createdAt: number;
   capturedAt: number;
   completesBlob?: boolean;
+  frameRate?: number;
+  inspectStartup?: true;
   originalStreamStart?: number;
   originalStreamFallback?: true;
   blob: Blob;
@@ -119,8 +128,9 @@ const DEFAULT_VIDEO_BITS_PER_SECOND = 6_000_000;
 export const FPS_WARNING_VIDEO_BITS_PER_SECOND = DEFAULT_VIDEO_BITS_PER_SECOND;
 export const STANDARD_RECORDING_FRAME_RATE = 30;
 export const HIGH_RECORDING_FRAME_RATE = 60;
-export const STARTUP_TRIM_MIN_SECONDS = 1.5;
-export const STARTUP_TRIM_MAX_SECONDS = 2.5;
+export const STARTUP_TRIM_MIN_SECONDS = 0.15;
+export const STARTUP_STALL_WINDOW_SECONDS = 2.5;
+export const STARTUP_TRIM_MAX_SECONDS = 5;
 export const MIN_MULTI_REGION_COUNT = 2;
 export const MAX_MULTI_REGION_COUNT = 4;
 export const DEFAULT_MULTI_REGION_COUNT = 2;

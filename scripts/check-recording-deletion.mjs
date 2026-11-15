@@ -30,6 +30,7 @@ function fixture() {
     const ok = () => ({ ok: true });
     const getRecordingDeletionCandidates = async () => env.recordings;
     const loadRecordingState = async () => env.state;
+    const removeEditOutputs = async () => {};
     const runRecordingTerminalOperation = (_id, operation) => operation();
     const deleteRecording = async id => {
       if (env.failDelete) throw Error('storage unavailable');

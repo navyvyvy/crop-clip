@@ -101,6 +101,12 @@ export async function getRecording(recordingId: string): Promise<RecordingRecord
   return await requestToPromise<RecordingRecord | undefined>(request);
 }
 
+export async function getPart(partId: string): Promise<RecordingPartRecord | undefined> {
+  const db = await getDb();
+  const tx = db.transaction(PARTS_STORE, "readonly");
+  return requestToPromise<RecordingPartRecord | undefined>(tx.objectStore(PARTS_STORE).get(partId));
+}
+
 export async function getRecordingDeletionCandidates(): Promise<{ id: string; endedAt?: number }[]> {
   const db = await getDb();
   const tx = db.transaction([RECORDINGS_STORE, PARTS_STORE, CHUNKS_STORE], "readonly");
@@ -143,13 +149,13 @@ export async function getChunksByRecordingId(recordingId: string): Promise<Recor
 }
 
 function deleteRecordsByRecordingId(store: IDBObjectStore, recordingId: string): void {
-  const request = store.index("recordingId").openCursor(IDBKeyRange.only(recordingId));
+  const request = store.index("recordingId").openKeyCursor(IDBKeyRange.only(recordingId));
   request.onsuccess = () => {
     const cursor = request.result;
     if (!cursor) {
       return;
     }
-    cursor.delete();
+    store.delete(cursor.primaryKey);
     cursor.continue();
   };
 }

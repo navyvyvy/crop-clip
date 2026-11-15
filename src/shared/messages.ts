@@ -28,11 +28,12 @@ export type ContentCommand =
     }
   | { type: "STOP_DIRECT_RECORDING"; recordingId?: string }
   | { type: "HAS_DIRECT_RECORDING"; recordingId: string }
-  | { type: "GET_ORIGINAL_RECORDING_SIZE"; recordingId: string }
+  | { type: "GET_RECORDING_SIZE"; recordingId: string }
   | { type: "CANCEL_DIRECT_RECORDING"; recordingId?: string };
 export type DeletionScheduleRequest = { type: "SCHEDULE_RECORDING_DELETION"; recordingId: string };
 export type AutoDownloadHandledMessage = { type: "AUTO_DOWNLOAD_HANDLED"; recordingId: string };
 export type StreamOffsetRequest = { type: "READ_STREAM_OFFSET"; src: string };
+export type RecordingStartedMessage = { type: "RECORDING_STARTED"; recordingId: string; startedAt: number };
 
 export type RecordingErrorMessage = {
   type: "RECORDING_ERROR";

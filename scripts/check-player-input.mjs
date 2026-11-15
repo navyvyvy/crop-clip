@@ -12,24 +12,26 @@ function visit(node) {
 }
 visit(source);
 const compile = (...names) => ts.transpile(names.map(name => functions.get(name)).join("\n"), { target: ts.ScriptTarget.ES2022 });
-const timeText = new Function('recordingCommandInFlight', 'directSession', 'showRecordingSize', 'formatRecordingSize', `
-  const currentRecordingState = { startedAt: 1 }, formatElapsed = () => '00:42';
+const timeText = new Function('recordingCommandInFlight', 'directSession', 'showRecordingSize', 'formatRecordingSize', 'startedAt', `
+  const currentRecordingState = { startedAt }, formatElapsed = () => '00:42';
   ${compile('getRecordingTimeText')}
   return getRecordingTimeText();
 `);
-assert.equal(timeText(null, null), '00:42');
+assert.equal(timeText(null, null), '시작 중');
+assert.equal(timeText(null, { startedAt: 1 }), '00:42');
 assert.equal(timeText('STOP_RECORDING', null), '저장 중');
 assert.equal(timeText(null, { stopRequested: true }), '저장 중');
 assert.equal(timeText('CANCEL_RECORDING', null), '취소 중');
-assert.equal(timeText(null, { originalStreamBytes: 35_400_000 }, true, formatRecordingSize), '00:42 · 약 35 MB');
-assert.equal(timeText(null, { originalStreamBytes: 35_400_000 }, false, formatRecordingSize), '00:42');
-assert.equal(timeText(null, {}, true, formatRecordingSize), '00:42');
+assert.equal(timeText(null, { startedAt: 1, recordedBytes: 35_400_000 }, true, formatRecordingSize), '약 35 MB · 00:42');
+assert.equal(timeText(null, { startedAt: 1, recordedBytes: 35_400_000 }, false, formatRecordingSize), '00:42');
+assert.equal(timeText(null, {}, true, formatRecordingSize, 1), '00:42');
 let finalizeReply;
 const finalizing = new Function('sendRuntimeMessage', `
-  const session = { recordingId: 'saving', endedAt: 1, resolveFinish() {} };
+  const session = { recordingId: 'saving', endedAt: 1, checkpointAbort: new AbortController(), resolveFinish() {} };
+  const FINALIZE_REPLY_TIMEOUT_MS = 30_000;
   let directSession = session;
   const cleanupDirectRecordingSession = () => { directSession = null; };
-  ${compile('finalizeDirectRecording')}
+  ${compile('sendCheckpointMessage', 'finalizeDirectRecording')}
   return { finish: () => finalizeDirectRecording(session), ownsRecording: () => directSession === session };
 `)(() => new Promise(resolve => { finalizeReply = resolve; }));
 const finalization = finalizing.finish();
@@ -106,20 +108,22 @@ await new Promise(resolve => setImmediate(resolve));
 assert.equal(reads.length, 1, 'a changed snapshot must be read again before it can overwrite current settings');
 reads.shift()({ settings: { enableShortcuts: false }, recordingState: { status: 'recording' } });
 const freshState = await loading;
-assert.equal(freshState.shortcutsEnabled, false);
+assert.equal(freshState.settings.enableShortcuts, false);
 assert.equal(freshState.recordingState.status, 'recording');
 
 const actions = [];
-const handleShortcut = new Function("actions", `
+const makeShortcutHandler = new Function("actions", "multiRegionEnabled = false", "recordKey = 'r'", `
   const isChzzkClipEditorPage = () => false, isEditableShortcutTarget = target => target === 'input';
-  const seekEnabled = false, shortcutsEnabled = true, multiRegionEnabled = false, fullRecordButtonEnabled = true, fullScreenshotButtonEnabled = true;
-  const shortcutKeys = { regionRecord: 'r', fullRecord: 'e', cancelRecording: 'c', fullScreenshot: 'd' };
+  const seekEnabled = false, shortcutsEnabled = true, fullRecordButtonEnabled = true, fullScreenshotButtonEnabled = true;
+  const shortcutKeys = { regionRecord: recordKey, fullRecord: 'e', cancelRecording: 'c', fullScreenshot: 'd' };
+  const currentRegions = [{}, {}], getActiveRegionLimit = () => 2, setActiveRegion = index => actions.push(index);
   const toggleRecording = async full => actions.push(full ? 'full' : 'region');
   const cancelRecording = async () => actions.push('cancel');
   const captureFullScreenshot = () => actions.push('screenshot');
   ${compile('handleShortcut')}
   return handleShortcut;
-`)(actions);
+`);
+const handleShortcut = makeShortcutHandler(actions);
 for (const [key, code, action] of [['r','KeyR','region'], ['ㄱ','KeyR','region'], ['Process','KeyE','full'], ['ㅊ','KeyC','cancel'], ['ㅇ','KeyD','screenshot']]) {
   actions.length = 0;
   const event = { key, code, preventDefault() {} };
@@ -131,6 +135,13 @@ for (const [key, code, action] of [['r','KeyR','region'], ['ㄱ','KeyR','region'
     assert.deepEqual(actions, [], 'typing, modifiers and held keys must remain untouched');
   }
 }
+
+actions.length = 0;
+makeShortcutHandler(actions, true, '1')({ key: '1', code: 'Digit1', preventDefault() {} });
+assert.deepEqual(actions, ['region'], 'a configured recording shortcut must take priority over implicit region selection');
+actions.length = 0;
+makeShortcutHandler(actions, true)({ key: '2', code: 'Digit2', preventDefault() {} });
+assert.deepEqual(actions, [1], 'unassigned number keys must still select a region');
 
 let captures = 0, now = 1000;
 // Use the production renderer for both button layouts, including rebuilt controls.

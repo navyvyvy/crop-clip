@@ -1,11 +1,12 @@
 import { stopRecordingStream, releaseDirectRecordingCapture, releaseDirectRecordingRecorder, requestDirectPartStop, type DirectRecordingSession } from "./recording_session.js";
 import { getVideoStream } from "./player_capture.js";
+import { RECORDING_MIME_CANDIDATES } from "../shared/types.js";
 import { createVideoFrameCapture } from "./frame_capture.js";
 import { getOriginalPlaylist, openOriginalStream, OriginalStreamError, type OriginalStreamProbe } from "./original_stream.js";
 import { computeDirectLayout, scaleLayout, type DirectCrop, type DirectCropPlacement } from "./crop_layout.js";
 import { formatElapsed, formatRecordingSize, MAX_ORIGINAL_STREAM_SECONDS, MILLISECONDS_PER_SECOND, SECONDS_PER_MINUTE } from "../shared/time_range.js";
 import { normalizeSettings, normalizeRegion, normalizeRegions } from "../shared/normalize.js";
-import { RECORDING_FORMAT, RECORDING_STATUS, RECORDING_MODE, DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, STANDARD_RECORDING_FRAME_RATE, HIGH_RECORDING_FRAME_RATE, STARTUP_TRIM_MIN_SECONDS, STARTUP_TRIM_MAX_SECONDS, DEFAULT_SHORTCUT_KEYS as DEFAULT_CONTENT_SHORTCUT_KEYS } from "../shared/types.js";
+import { RECORDING_FORMAT, RECORDING_STATUS, RECORDING_MODE, DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, STANDARD_RECORDING_FRAME_RATE, HIGH_RECORDING_FRAME_RATE, STARTUP_STALL_WINDOW_SECONDS, STARTUP_TRIM_MIN_SECONDS, STARTUP_TRIM_MAX_SECONDS, DEFAULT_SHORTCUT_KEYS as DEFAULT_CONTENT_SHORTCUT_KEYS } from "../shared/types.js";
 
 (() => {
   // The build bundles shared imports into one classic content script.
@@ -59,6 +60,8 @@ const AUDIO_BITS_PER_SECOND = 128_000;
 const STARTUP_FRAME_GAP_MS = 150;
 const MAX_RECORDING_MESSAGE_BLOB_BYTES = 8 * 1024 * 1024;
 const MAX_PENDING_RECORDING_BYTES = 64 * 1024 * 1024;
+const CHECKPOINT_REPLY_TIMEOUT_MS = 15_000;
+const FINALIZE_REPLY_TIMEOUT_MS = 30_000;
 const CHZZK_RECORD_BUTTON_ID = "crop-clip-chzzk-record-button";
 const CHZZK_RECORD_TIME_ID = "crop-clip-chzzk-record-time";
 const CHZZK_CANCEL_BUTTON_ID = "crop-clip-chzzk-cancel-button";
@@ -108,6 +111,7 @@ let removeSelectionHandlers: (() => void) | null = null;
 let removeBorderHandlers: (() => void) | null = null;
 let currentRecordingState: LocalRecordingState = { status: RECORDING_STATUS.idle };
 let directSession: DirectRecordingSession | null = null;
+let savedFirstScreenRecording = false;
 let preparedRecordingId: string | undefined;
 type RecordingControlCommand = "START_RECORDING" | "START_FULL_RECORDING" | "STOP_RECORDING" | "CANCEL_RECORDING";
 let recordingCommandInFlight: RecordingControlCommand | null = null;
@@ -169,19 +173,27 @@ function waitForCurrentVideoFrame(video: HTMLVideoElement): Promise<boolean> {
 
 function getRenderedVideoRect(video: HTMLVideoElement): { rect: DOMRect; fit: "fill" | "uniform" } {
   const elementRect = video.getBoundingClientRect();
-  const objectFit = getComputedStyle(video).objectFit || "fill";
+  const style = getComputedStyle(video);
+  const objectFit = style.objectFit || "fill";
   if (objectFit === "fill" || video.videoWidth <= 0 || video.videoHeight <= 0) {
     return { rect: elementRect, fit: "fill" };
   }
 
-  const videoRatio = video.videoWidth / video.videoHeight;
-  const elementRatio = elementRect.width / elementRect.height;
-  const useCover = objectFit === "cover";
-  const useElementWidth = useCover ? elementRatio < videoRatio : elementRatio <= videoRatio;
-  const width = useElementWidth ? elementRect.width : elementRect.height * videoRatio;
-  const height = useElementWidth ? elementRect.width / videoRatio : elementRect.height;
-  const left = elementRect.left + (elementRect.width - width) / 2;
-  const top = elementRect.top + (elementRect.height - height) / 2;
+  const scaleX = elementRect.width / video.videoWidth;
+  const scaleY = elementRect.height / video.videoHeight;
+  const scale = objectFit === "none" ? 1
+    : objectFit === "cover" ? Math.max(scaleX, scaleY)
+    : Math.min(scaleX, scaleY, objectFit === "scale-down" ? 1 : Infinity);
+  const width = video.videoWidth * scale;
+  const height = video.videoHeight * scale;
+  const position = (style.objectPosition || "").match(/^(-?[\d.]+)(%|px) (-?[\d.]+)(%|px)$/);
+  // shortcut: complex positions use the center, until the player uses edge offsets or calc().
+  const left = elementRect.left + (position
+    ? Number(position[1]) * (position[2] === "%" ? (elementRect.width - width) / 100 : 1)
+    : (elementRect.width - width) / 2);
+  const top = elementRect.top + (position
+    ? Number(position[3]) * (position[4] === "%" ? (elementRect.height - height) / 100 : 1)
+    : (elementRect.height - height) / 2);
 
   return {
     rect: new DOMRect(left, top, width, height),
@@ -194,10 +206,11 @@ function getVideoSelectionRect(renderedRect: DOMRect | null = getVideoRenderedVi
     return null;
   }
 
-  const left = clamp(renderedRect.left, 0, window.innerWidth);
-  const top = clamp(renderedRect.top, 0, window.innerHeight);
-  const right = clamp(renderedRect.right, left, window.innerWidth);
-  const bottom = clamp(renderedRect.bottom, top, window.innerHeight);
+  const elementRect = findPrimaryVideoElement()?.getBoundingClientRect() ?? renderedRect;
+  const left = Math.max(renderedRect.left, elementRect.left, 0);
+  const top = Math.max(renderedRect.top, elementRect.top, 0);
+  const right = Math.min(renderedRect.right, elementRect.right, window.innerWidth);
+  const bottom = Math.min(renderedRect.bottom, elementRect.bottom, window.innerHeight);
   if (right - left <= 0 || bottom - top <= 0) {
     return null;
   }
@@ -415,19 +428,8 @@ function getActiveRegionLimit(): number {
 }
 
 function selectDirectMimeType(settings: Settings): { mimeType: string; extension: "webm" | "mp4" } {
-  const mp4Candidates = [
-    'video/mp4;codecs="avc1.42E01E,mp4a.40.2"',
-    'video/mp4;codecs="avc1,mp4a.40.2"',
-    "video/mp4",
-  ];
-  const webmCandidates = [
-    "video/webm;codecs=avc1",
-    "video/webm;codecs=vp8,opus",
-    "video/webm;codecs=vp9,opus",
-    "video/webm",
-  ];
   const extension = settings.outputFormat === RECORDING_FORMAT.mp4 ? RECORDING_FORMAT.mp4 : RECORDING_FORMAT.webm;
-  const candidates = extension === RECORDING_FORMAT.mp4 ? mp4Candidates : webmCandidates;
+  const candidates = RECORDING_MIME_CANDIDATES[extension];
 
   for (const mimeType of candidates) {
     if (MediaRecorder.isTypeSupported(mimeType)) {
@@ -831,9 +833,11 @@ function sendRuntimeMessage<T = undefined>(message: Record<string, unknown>): Pr
   });
 }
 
-function readBlobAsDataUrl(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
+function readBlobAsDataUrl(blob: Blob, signal: AbortSignal): Promise<string> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  const reader = new FileReader();
+  const abort = () => reader.abort();
+  return new Promise<string>((resolve, reject) => {
     reader.onload = () => {
       if (typeof reader.result === "string") {
         resolve(reader.result);
@@ -842,8 +846,10 @@ function readBlobAsDataUrl(blob: Blob): Promise<string> {
       }
     };
     reader.onerror = () => reject(reader.error ?? new Error("녹화 체크포인트를 변환하지 못했습니다."));
+    reader.onabort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
     reader.readAsDataURL(blob);
-  });
+  }).finally(() => signal.removeEventListener("abort", abort));
 }
 
 function getRecordingChunkSliceRanges(size: number, maxBytes: number): Array<{ start: number; end: number }> {
@@ -860,25 +866,30 @@ function queueDirectChunkCheckpoint(session: DirectRecordingSession, blob: Blob)
   }
 
   session.pendingChunks.push({ blob, capturedAt: Date.now() });
+  session.recordedBytes += blob.size;
   session.pendingBytes += blob.size;
   if (session.pendingBytes >= MAX_PENDING_RECORDING_BYTES && !session.stopRequested) {
     session.stopRequested = true;
     requestDirectPartStop(session);
     showPlayerFeedback("저장이 지연되어 녹화를 종료했습니다. 녹화한 내용은 계속 저장합니다.", 8_000);
   }
-  if (!session.checkpointSaving) {
+  flushDirectCheckpoints(session);
+}
+
+function flushDirectCheckpoints(session: DirectRecordingSession): void {
+  if (!session.originalProbe && !session.checkpointSaving && session.pendingChunks.length) {
     session.checkpointSaving = true;
     session.checkpointSaveChain = saveDirectCheckpoints(session);
   }
 }
 
-function sendCheckpointMessage(message: Record<string, unknown>, signal: AbortSignal): Promise<MessageResponse> {
+function sendCheckpointMessage<T = undefined>(message: Record<string, unknown>, signal: AbortSignal): Promise<MessageResponse<T>> {
   if (signal.aborted) return Promise.reject(signal.reason);
   let abort: () => void;
-  return new Promise<MessageResponse>((resolve, reject) => {
+  return new Promise<MessageResponse<T>>((resolve, reject) => {
     abort = () => reject(signal.reason);
     signal.addEventListener("abort", abort, { once: true });
-    void sendRuntimeMessage(message).then(resolve, reject);
+    void sendRuntimeMessage<T>(message).then(resolve, reject);
   }).finally(() => signal.removeEventListener("abort", abort));
 }
 
@@ -892,10 +903,11 @@ async function saveDirectCheckpoints(session: DirectRecordingSession): Promise<v
           return;
         }
 
-        const dataUrl = await readBlobAsDataUrl(blob.slice(range.start, range.end, blob.type));
+        const dataUrl = await readBlobAsDataUrl(blob.slice(range.start, range.end, blob.type), session.checkpointAbort.signal);
         if (session.cancelRequested) {
           return;
         }
+        const deadline = AbortSignal.timeout(CHECKPOINT_REPLY_TIMEOUT_MS);
         const response = await sendCheckpointMessage({
           type: "STORE_RECORDING_CHUNK",
           chunk: {
@@ -908,11 +920,18 @@ async function saveDirectCheckpoints(session: DirectRecordingSession): Promise<v
             createdAt: session.createdAt,
             capturedAt,
             completesBlob: rangeIndex === ranges.length - 1,
+            frameRate: session.checkpointIndex === 1 && session.originalStreamStart === undefined
+              ? session.settings.enable60fps ? HIGH_RECORDING_FRAME_RATE : STANDARD_RECORDING_FRAME_RATE
+              : undefined,
+            inspectStartup: session.checkpointIndex === 1 ? session.inspectStartup : undefined,
             originalStreamStart: session.checkpointIndex === 1 ? session.originalStreamStart : undefined,
             originalStreamFallback: session.checkpointIndex === 1 ? session.originalStreamFallback : undefined,
             dataUrl,
           },
-        }, session.checkpointAbort.signal);
+        }, AbortSignal.any([session.checkpointAbort.signal, deadline])).catch(error => {
+          if (deadline.aborted && error === deadline.reason) throw new Error("녹화 저장 응답이 늦어 받은 구간을 복구합니다.");
+          throw error;
+        });
         if (!response.ok) {
           throw new Error(response.error);
         }
@@ -940,17 +959,18 @@ function cleanupDirectRecordingSession(session: DirectRecordingSession): void {
 }
 
 async function finalizeDirectRecording(session: DirectRecordingSession): Promise<void> {
-  const response = await sendRuntimeMessage({
+  const response = await sendCheckpointMessage({
     type: "FINALIZE_RECORDING",
     recordingId: session.recordingId,
     endedAt: session.endedAt ?? Date.now(),
     startupTrimSeconds: session.startupTrimSeconds,
     originalStreamEnd: session.originalStreamEnd,
-  });
+  }, AbortSignal.any([session.checkpointAbort.signal, AbortSignal.timeout(FINALIZE_REPLY_TIMEOUT_MS)]));
   if (!response.ok) {
     // Let finishDirectRecording route this failure through checkpoint recovery too.
     throw new Error(response.error);
   }
+  if (session.inspectStartup) savedFirstScreenRecording = true;
   cleanupDirectRecordingSession(session);
   session.resolveFinish();
 }
@@ -973,16 +993,24 @@ function cancelDirectRecordingSession(session: DirectRecordingSession): void {
 }
 
 function failDirectRecordingSession(session: DirectRecordingSession, error: Error): void {
+  if (session.cancelRequested) return;
   abortDirectRecordingSession(session);
-  session.rejectFinish(error);
-  void sendRuntimeMessage({ type: "RECORDING_ERROR", recordingId: session.recordingId, error: error.message }).catch(() => {});
+  void sendRuntimeMessage({ type: "RECORDING_ERROR", recordingId: session.recordingId, error: error.message })
+    .then(response => {
+      if (response.ok) session.resolveFinish();
+      else session.rejectFinish(error);
+    }, () => session.rejectFinish(error));
 }
 
 async function finishDirectRecording(session: DirectRecordingSession): Promise<void> {
   releaseDirectRecordingCapture(session);
   releaseDirectRecordingRecorder(session);
   try {
-    if (!session.cancelRequested) await session.checkpointSaveChain;
+    if (!session.cancelRequested) {
+      session.originalProbe = undefined;
+      flushDirectCheckpoints(session);
+      await session.checkpointSaveChain;
+    }
     if (session.cancelRequested) {
       cancelDirectRecordingSession(session);
       return;
@@ -1017,7 +1045,7 @@ function watchDirectRecordingSource(session: DirectRecordingSession): void {
   };
 }
 
-async function startDirectPart(session: DirectRecordingSession): Promise<void> {
+async function startDirectPart(session: DirectRecordingSession, onStarted?: () => void): Promise<void> {
   session.closingPart = false;
 
   if (!session.outputStream) throw new Error("녹화 화면을 준비하지 못했습니다.");
@@ -1028,6 +1056,11 @@ async function startDirectPart(session: DirectRecordingSession): Promise<void> {
     ...(session.stabilizeStartup ? { videoKeyFrameIntervalDuration: MILLISECONDS_PER_SECOND } : {}),
   });
   session.recorder = recorder;
+  recorder.onstart = () => {
+    recorder.onstart = null;
+    markDirectRecordingStarted(session);
+    if (session.startedAt && !session.stopRequested && !session.cancelRequested) onStarted?.();
+  };
 
   recorder.ondataavailable = (event) => {
     if (event.data.size <= 0 || session.cancelRequested) {
@@ -1038,7 +1071,11 @@ async function startDirectPart(session: DirectRecordingSession): Promise<void> {
   };
 
   recorder.onerror = () => failDirectRecordingSession(session, new Error("녹화 중 오류가 발생했습니다."));
-  recorder.onstop = () => { void finishDirectRecording(session); };
+  session.finishAfterStop = timedOut => {
+    if (timedOut) showPlayerFeedback("녹화 종료 신호가 늦어 받은 영상까지 저장합니다.", 8_000);
+    void finishDirectRecording(session);
+  };
+  recorder.onstop = () => session.finishAfterStop?.();
 
   recorder.start(MILLISECONDS_PER_SECOND);
 }
@@ -1096,6 +1133,7 @@ function createRecordingSession(
     checkpointSaveChain: Promise.resolve(),
     pendingChunks: [],
     pendingBytes: 0,
+    recordedBytes: 0,
     checkpointSaving: false,
     checkpointAbort: new AbortController(),
     createdAt: Date.now(),
@@ -1110,6 +1148,17 @@ function createRecordingSession(
   };
 }
 
+function markDirectRecordingStarted(session: DirectRecordingSession): void {
+  if (directSession !== session || session.startedAt || session.stopRequested || session.cancelRequested) return;
+  session.startedAt = session.createdAt = Date.now();
+  syncRecordingCommandButtons();
+  void sendRuntimeMessage({
+    type: "RECORDING_STARTED",
+    recordingId: session.recordingId,
+    startedAt: session.startedAt,
+  }).catch(ignoreRecordingRejection);
+}
+
 async function syncStartedRecording(session: DirectRecordingSession): Promise<void> {
   const { recordingState } = await loadState();
   if (directSession !== session) return;
@@ -1119,42 +1168,47 @@ async function syncStartedRecording(session: DirectRecordingSession): Promise<vo
   syncChzzkRecordTimer();
 }
 
-async function startOriginalRecording(command: Extract<ContentCommand, { type: "START_DIRECT_RECORDING" }>, video: HTMLVideoElement): Promise<string | undefined> {
+async function startOriginalRecording(command: Extract<ContentCommand, { type: "START_DIRECT_RECORDING" }>, video: HTMLVideoElement, fallback: DirectRecordingSession, probe: AbortController): Promise<string | undefined> {
   const src = video.currentSrc;
   if (video.paused || !src.startsWith("blob:") || (video.duration !== Infinity && !location.pathname.startsWith("/live/"))) {
     return "지원하는 라이브 재생이 아닙니다.";
   }
   if (command.playback && command.playback.src !== src) return "방송 영상이 바뀌었습니다.";
-  const clickTime = command.playback?.time ?? video.currentTime;
-  if (!Number.isFinite(clickTime) || clickTime < 0) return "방송의 재생 시각을 읽지 못했습니다.";
+  const startTime = video.currentTime;
+  if (!Number.isFinite(startTime) || startTime < 0) return "방송의 재생 시각을 읽지 못했습니다.";
   const session = createRecordingSession(command, video, "video/mp4", "mp4");
-  const timeout = window.setTimeout(() => session.checkpointAbort.abort(), 5_000);
+  const timeout = window.setTimeout(() => probe.abort(), 5_000);
   let source;
   let offset: number;
   let start: number;
   try {
-    const response = await sendRuntimeMessage<OriginalStreamProbe>({ type: "READ_STREAM_OFFSET", src });
+    const response = await sendCheckpointMessage<OriginalStreamProbe>({ type: "READ_STREAM_OFFSET", src }, probe.signal);
     if (!response.ok) return response.error;
     if (!response.data || !Number.isFinite(response.data.offset) || video.currentSrc !== src) return "방송의 재생 시각을 읽지 못했습니다.";
     offset = response.data.offset;
-    start = clickTime - offset;
+    start = startTime - offset;
     if (start < 0) return "방송의 재생 시각을 원본과 맞추지 못했습니다.";
-    source = await openOriginalStream(getOriginalPlaylist(response.data.playlist), start, session.checkpointAbort.signal);
+    source = await openOriginalStream(getOriginalPlaylist(response.data.playlist), start, probe.signal);
   } catch (error) {
-    if (session.checkpointAbort.signal.aborted) return "원본 응답이 지연되었습니다.";
+    if (probe.signal.aborted) return "원본 응답이 지연되었습니다.";
     return error instanceof OriginalStreamError ? error.message : "원본 방송 데이터를 받지 못했습니다.";
   } finally {
     window.clearTimeout(timeout);
   }
 
+  if (directSession !== fallback || fallback.stopRequested || fallback.cancelRequested || probe.signal.aborted) return;
+  if (video.currentSrc !== src || video.seeking) return "방송 영상이 바뀌었습니다.";
+  session.startedAt = fallback.startedAt;
+  session.createdAt = fallback.createdAt;
+  session.checkpointAbort = probe;
   session.originalStreamStart = start;
-  session.originalStreamBytes = 0;
   let end: number | undefined;
   let lastPlaybackTime = video.currentTime;
   const updatePlaybackTime = () => { if (!video.seeking && video.currentSrc === src) lastPlaybackTime = video.currentTime; };
   session.stopOriginalStream = () => {
     const position = video.currentSrc === src && !video.seeking ? Math.max(video.currentTime, lastPlaybackTime) : lastPlaybackTime;
     end ??= Math.max(start + 1 / STANDARD_RECORDING_FRAME_RATE, position - offset);
+    source.stop();
   };
   const stop = () => stopDirectRecordingAfterSourceChange(session);
   const stopEvents = ["ended", "loadstart", "emptied", "seeking", "resize"];
@@ -1164,10 +1218,12 @@ async function startOriginalRecording(command: Extract<ContentCommand, { type: "
     stopEvents.forEach(event => video.removeEventListener(event, stop));
     video.removeEventListener("timeupdate", updatePlaybackTime);
   };
+  // Neither path has written a checkpoint yet. Commit to the original once its first fragment is ready.
+  fallback.originalProbe = undefined;
+  cancelDirectRecordingSession(fallback);
   directSession = session;
   let saved = false;
   void source.record(async blob => {
-    session.originalStreamBytes = (session.originalStreamBytes ?? 0) + blob.size;
     queueDirectChunkCheckpoint(session, blob);
     await session.checkpointSaveChain;
     if (session.checkpointError) throw session.checkpointError;
@@ -1178,6 +1234,9 @@ async function startOriginalRecording(command: Extract<ContentCommand, { type: "
       showPlayerFeedback(last >= start + MAX_ORIGINAL_STREAM_SECONDS
         ? `최대 녹화 시간인 ${MAX_ORIGINAL_STREAM_SECONDS / SECONDS_PER_MINUTE}분에 도달해 저장합니다.`
         : "원본 저장 용량 한도에 도달해 받은 구간을 저장합니다.", 8_000);
+    }
+    if (end !== undefined && last < end - 1 / STANDARD_RECORDING_FRAME_RATE) {
+      showPlayerFeedback("마지막 방송 조각이 늦어 먼저 받은 구간까지 저장합니다.", 8_000);
     }
     session.originalStreamEnd = last;
     await finishDirectRecording(session);
@@ -1192,6 +1251,23 @@ async function startOriginalRecording(command: Extract<ContentCommand, { type: "
   });
   await syncStartedRecording(session);
   return undefined;
+}
+
+function tryOriginalRecording(command: Extract<ContentCommand, { type: "START_DIRECT_RECORDING" }>, video: HTMLVideoElement, session: DirectRecordingSession, probe: AbortController): void {
+  void startOriginalRecording(command, video, session, probe).then(reason => {
+    if (directSession !== session) {
+      if (directSession?.recordingId === session.recordingId) showPlayerFeedback("원본 저장 중");
+      return;
+    }
+    if (!session.stopRequested) {
+      const format = session.extension === "webm" ? "WebM" : "MP4";
+      showPlayerFeedback([`화면 녹화 중 · ${format}`, reason].filter(Boolean).join("\n"), 8_000);
+    }
+  }).catch(ignoreRecordingRejection).finally(() => {
+    if (session.originalProbe !== probe) return;
+    session.originalProbe = undefined;
+    if (directSession === session && !session.cancelRequested) flushDirectCheckpoints(session);
+  });
 }
 
 async function startDirectRecording(command: Extract<ContentCommand, { type: "START_DIRECT_RECORDING" }>): Promise<MessageResponse> {
@@ -1212,18 +1288,8 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
     return { ok: false, error: "영상이 음소거되어 녹화할 수 없습니다." };
   }
 
-  let originalFailure: string | undefined;
-  if (command.fullPlayer && command.settings.enableOriginalStreamRecording) {
-    originalFailure = await startOriginalRecording(command, video);
-    if (originalFailure === undefined) {
-      showPlayerFeedback("방송 원본으로 저장합니다.");
-      return { ok: true };
-    }
-  }
+  const originalProbe = command.fullPlayer && command.settings.enableOriginalStreamRecording ? new AbortController() : undefined;
   const mime = await prepareDirectRecordingEncoder(command.settings);
-  if (originalFailure) {
-    showPlayerFeedback(`기존 ${mime.extension === RECORDING_FORMAT.webm ? "WebM" : "MP4"} 녹화로 전환합니다. ${originalFailure}`, 8_000);
-  }
 
   const sourceRegions = (command.regions?.length ? command.regions : [command.region]).slice(0, command.settings.enableMultiRegion ? getMultiRegionLimit(command.settings) : 1);
   const crops = sourceRegions
@@ -1258,15 +1324,20 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
   };
   const paintPlacements = (placements: DirectCropPlacement[]) => {
     if (frameCapture) {
-      frameCapture.paint(placements[0], () => { paintCanvas(placements); return canvas; });
-    } else {
-      paintCanvas(placements);
+      return frameCapture.paint(placements[0], () => { paintCanvas(placements); return canvas; });
     }
+    paintCanvas(placements);
+    return true;
   };
 
   const frameRate = command.settings.enable60fps ? HIGH_RECORDING_FRAME_RATE : STANDARD_RECORDING_FRAME_RATE;
   const canvasStream = frameCapture?.stream ?? canvas.captureStream(frameRate);
-  const releaseOutput = () => { frameCapture?.close(); stopRecordingStream(canvasStream); };
+  const releaseOutput = () => {
+    frameCapture?.close();
+    stopRecordingStream(canvasStream);
+    canvas.width = 0;
+    canvas.height = 0;
+  };
   try {
     paintPlacements(layout.placements);
   } catch {
@@ -1292,7 +1363,7 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
   ];
   const outputStream = new MediaStream(tracks);
   let cropLayoutKey = getCropLayoutKey(crops);
-  const layoutDependsOnlyOnVideoSize = command.fullPlayer && sourceRegions.every(region => region.videoRelative);
+  const layoutDependsOnlyOnVideoSize = sourceRegions.every(region => region.videoRelative);
   let layoutVideoWidth = video.videoWidth;
   let layoutVideoHeight = video.videoHeight;
   let lastPaintedFrame = -1;
@@ -1323,7 +1394,7 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
       }
     }
     try {
-      paintPlacements(session.placements);
+      if (!paintPlacements(session.placements)) return;
     } catch (error) {
       failDirectRecordingSession(session, error instanceof Error ? error : new Error("녹화 프레임을 준비하지 못했습니다."));
       return;
@@ -1332,10 +1403,11 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
     if (startupStartedAt !== undefined) {
       const now = performance.now();
       const elapsedSeconds = (now - startupStartedAt) / MILLISECONDS_PER_SECOND;
-      if (elapsedSeconds > STARTUP_TRIM_MAX_SECONDS) {
-        startupStartedAt = undefined;
-      } else if (now - lastStartupFrameAt >= STARTUP_FRAME_GAP_MS && video.currentTime >= lastStartupMediaTime) {
+      if (elapsedSeconds <= STARTUP_TRIM_MAX_SECONDS && now - lastStartupFrameAt >= STARTUP_FRAME_GAP_MS && video.currentTime >= lastStartupMediaTime) {
         session.startupTrimSeconds = Math.max(STARTUP_TRIM_MIN_SECONDS, elapsedSeconds);
+      }
+      if (elapsedSeconds > STARTUP_STALL_WINDOW_SECONDS) {
+        startupStartedAt = undefined;
       }
       lastStartupFrameAt = now;
       lastStartupMediaTime = video.currentTime;
@@ -1344,12 +1416,14 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
 
   const session: DirectRecordingSession = {
     ...createRecordingSession(command, video, mime.mimeType, mime.extension),
-    originalStreamFallback: originalFailure ? true : undefined,
+    originalStreamFallback: originalProbe ? true : undefined,
+    originalProbe,
     sourceStream,
     outputStream,
     canvas,
     frameCapture: frameCapture ?? undefined,
     stabilizeStartup,
+    inspectStartup: stabilizeStartup && !savedFirstScreenRecording ? true : undefined,
     drawTimerId: window.setInterval(drawFrame, Math.round(MILLISECONDS_PER_SECOND / frameRate)),
     placements: layout.placements,
   };
@@ -1357,7 +1431,7 @@ async function startDirectRecording(command: Extract<ContentCommand, { type: "ST
   directSession = session;
   try {
     if (stabilizeStartup) startupStartedAt = lastStartupFrameAt = performance.now();
-    await startDirectPart(session);
+    await startDirectPart(session, originalProbe ? () => tryOriginalRecording(command, video, session, originalProbe) : undefined);
     watchDirectRecordingSource(session);
     await syncStartedRecording(session);
     return { ok: true };
@@ -1528,15 +1602,16 @@ function startRegionLayoutWatch(): void {
 }
 
 function applyBorderGeometry(border: HTMLDivElement, region: RegionSelection, renderedRect: DOMRect | null = getVideoRenderedViewportRect()): void {
-  if (!renderedRect || renderedRect.width <= 0 || renderedRect.height <= 0) {
+  const bounds = getVideoSelectionRect(renderedRect);
+  if (!bounds) {
     border.style.display = "none";
     return;
   }
   const displayRegion = resolveRegionToViewport(region, renderedRect);
-  const visibleLeft = Math.max(displayRegion.x, 0);
-  const visibleTop = Math.max(displayRegion.y, 0);
-  const visibleRight = Math.min(displayRegion.x + displayRegion.width, window.innerWidth);
-  const visibleBottom = Math.min(displayRegion.y + displayRegion.height, window.innerHeight);
+  const visibleLeft = Math.max(displayRegion.x, bounds.left);
+  const visibleTop = Math.max(displayRegion.y, bounds.top);
+  const visibleRight = Math.min(displayRegion.x + displayRegion.width, bounds.right);
+  const visibleBottom = Math.min(displayRegion.y + displayRegion.height, bounds.bottom);
   if (visibleRight <= visibleLeft || visibleBottom <= visibleTop) {
     border.style.display = "none";
     return;
@@ -1777,7 +1852,7 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
     const needsTimer = isRegionRecording && index === activeRegionIndex;
     if (needsTimer && recordTimerId === null) {
       recordTimerId = window.setInterval(() => {
-        if (recordTime && currentRecordingState.startedAt) {
+        if (recordTime) {
           recordTime.textContent = getRecordingTimeText();
         }
       }, MILLISECONDS_PER_SECOND);
@@ -2024,7 +2099,20 @@ function attachBorderControls(border: HTMLDivElement, index: number): () => void
   };
 }
 
-async function loadState(): Promise<{ region: RegionSelection | null; regions: RegionSelection[]; recordingState: LocalRecordingState; multiRegionEnabled: boolean; multiRegionMaxCount: number; fullRecordButtonEnabled: boolean; showRecordingSize: boolean; fullScreenshotButtonEnabled: boolean; seekEnabled: boolean; seekSeconds: number; streamerFilenameEnabled: boolean; shortcutsEnabled: boolean; shortcutKeys: ShortcutKeys }> {
+function applyPlayerSettings(settings: Settings): void {
+  multiRegionEnabled = settings.enableMultiRegion;
+  multiRegionMaxCount = settings.multiRegionMaxCount;
+  fullRecordButtonEnabled = settings.enableFullRecordButton;
+  showRecordingSize = settings.showRecordingSize;
+  fullScreenshotButtonEnabled = settings.enableFullScreenshotButton;
+  seekEnabled = settings.enableSeek;
+  seekSeconds = settings.seekSeconds;
+  streamerFilenameEnabled = settings.enableStreamerFilename;
+  shortcutsEnabled = settings.enableShortcuts;
+  shortcutKeys = settings.shortcutKeys;
+}
+
+async function loadState(): Promise<{ region: RegionSelection | null; regions: RegionSelection[]; recordingState: LocalRecordingState; settings: Settings }> {
   let result: { region?: unknown; regions?: unknown; recordingState?: unknown; settings?: unknown } = {};
   if (isExtensionContextAvailable()) {
     try {
@@ -2038,22 +2126,12 @@ async function loadState(): Promise<{ region: RegionSelection | null; regions: R
       result = {};
     }
   }
-  const settings = normalizeSettings(result.settings);
   const region = normalizeRegion(result.region);
   return {
     region,
     regions: normalizeRegions(result.regions, region),
     recordingState: normalizeRecordingState(result.recordingState, getLocalRecordingId()),
-    multiRegionEnabled: settings.enableMultiRegion,
-    multiRegionMaxCount: settings.multiRegionMaxCount,
-    fullRecordButtonEnabled: settings.enableFullRecordButton,
-    showRecordingSize: settings.showRecordingSize,
-    fullScreenshotButtonEnabled: settings.enableFullScreenshotButton,
-    seekEnabled: settings.enableSeek,
-    seekSeconds: settings.seekSeconds,
-    streamerFilenameEnabled: settings.enableStreamerFilename,
-    shortcutsEnabled: settings.enableShortcuts,
-    shortcutKeys: settings.shortcutKeys,
+    settings: normalizeSettings(result.settings),
   };
 }
 
@@ -2116,17 +2194,8 @@ async function refreshBorder(): Promise<void> {
   currentRegions = state.regions;
   activeRegionIndex = Math.min(activeRegionIndex, Math.max(0, currentRegions.length - 1));
   currentRecordingState = state.recordingState;
-  multiRegionEnabled = state.multiRegionEnabled;
-  multiRegionMaxCount = state.multiRegionMaxCount;
+  applyPlayerSettings(state.settings);
   trimRegionsToLimit();
-  fullRecordButtonEnabled = state.fullRecordButtonEnabled;
-  showRecordingSize = state.showRecordingSize;
-  fullScreenshotButtonEnabled = state.fullScreenshotButtonEnabled;
-  seekEnabled = state.seekEnabled;
-  seekSeconds = state.seekSeconds;
-  streamerFilenameEnabled = state.streamerFilenameEnabled;
-  shortcutsEnabled = state.shortcutsEnabled;
-  shortcutKeys = state.shortcutKeys;
   showSelectionBorders(currentRegions);
 
   if (selectionActive && isRegionEditingLocked(state.recordingState)) {
@@ -2137,16 +2206,7 @@ async function refreshBorder(): Promise<void> {
 async function initializePageState(): Promise<void> {
   const state = await loadState();
   currentRecordingState = state.recordingState;
-  multiRegionEnabled = state.multiRegionEnabled;
-  multiRegionMaxCount = state.multiRegionMaxCount;
-  fullRecordButtonEnabled = state.fullRecordButtonEnabled;
-  showRecordingSize = state.showRecordingSize;
-  fullScreenshotButtonEnabled = state.fullScreenshotButtonEnabled;
-  seekEnabled = state.seekEnabled;
-  seekSeconds = state.seekSeconds;
-  streamerFilenameEnabled = state.streamerFilenameEnabled;
-  shortcutsEnabled = state.shortcutsEnabled;
-  shortcutKeys = state.shortcutKeys;
+  applyPlayerSettings(state.settings);
 
   if (state.recordingState.status !== RECORDING_STATUS.recording && !state.recordingState.recordingElsewhere && state.regions.length > 0) {
     const cleared = await saveRegions([]);
@@ -2542,9 +2602,11 @@ function setRecordButtonContent(button: HTMLElement, full = false): void {
 function getRecordingTimeText(): string {
   if (recordingCommandInFlight === "CANCEL_RECORDING") return "취소 중";
   if (recordingCommandInFlight === "STOP_RECORDING" || directSession?.stopRequested) return "저장 중";
-  const elapsed = currentRecordingState.startedAt ? formatElapsed(Date.now() - currentRecordingState.startedAt) : "00:00";
-  const bytes = directSession?.originalStreamBytes;
-  return showRecordingSize && bytes !== undefined ? `${elapsed} · ${formatRecordingSize(bytes)}` : elapsed;
+  const startedAt = directSession?.startedAt ?? currentRecordingState.startedAt;
+  if (!startedAt) return "시작 중";
+  const elapsed = formatElapsed(Date.now() - startedAt);
+  const bytes = directSession?.recordedBytes;
+  return showRecordingSize && bytes !== undefined ? `${formatRecordingSize(bytes)} · ${elapsed}` : elapsed;
 }
 
 function syncRecordingCommandButtons(): void {
@@ -2912,7 +2974,7 @@ function syncChzzkRecordTimer(): void {
 
   chzzkRecordTimerId = window.setInterval(() => {
     const timeBadge = document.getElementById(CHZZK_RECORD_TIME_ID);
-    if (timeBadge && currentRecordingState.startedAt) {
+    if (timeBadge) {
       timeBadge.textContent = getRecordingTimeText();
     }
   }, MILLISECONDS_PER_SECOND);
@@ -3086,7 +3148,7 @@ function handleShortcut(event: KeyboardEvent): void {
   const key = /^[a-z0-9]$/i.test(event.key) || !/^(Key[A-Z]|Digit[0-9])$/.test(event.code)
     ? event.key.toLowerCase()
     : event.code.slice(-1).toLowerCase();
-  if (multiRegionEnabled && /^[1-4]$/.test(key)) {
+  if (multiRegionEnabled && /^[1-4]$/.test(key) && !Object.values(shortcutKeys).includes(key)) {
     const nextIndex = Number(key) - 1;
     if (nextIndex < getActiveRegionLimit() && currentRegions[nextIndex]) {
       event.preventDefault();
@@ -3188,8 +3250,8 @@ if (isExtensionContextAvailable()) {
       return false;
     }
 
-    if (message.type === "GET_ORIGINAL_RECORDING_SIZE") {
-      sendResponse({ ok: true, data: directSession?.recordingId === message.recordingId ? directSession.originalStreamBytes : undefined });
+    if (message.type === "GET_RECORDING_SIZE") {
+      sendResponse({ ok: true, data: directSession?.recordingId === message.recordingId ? directSession.recordedBytes : undefined });
       return false;
     }
 
@@ -3254,8 +3316,7 @@ if (isExtensionContextAvailable()) {
       currentRegion = state.region;
       currentRegions = state.regions;
       currentRecordingState = state.recordingState;
-      multiRegionEnabled = state.multiRegionEnabled;
-      multiRegionMaxCount = state.multiRegionMaxCount;
+      applyPlayerSettings(state.settings);
       if (trimRegionsToLimit()) showSelectionBorders(currentRegions);
       startSelection();
       sendResponse({ ok: true });
@@ -3303,17 +3364,7 @@ if (isExtensionContextAvailable()) {
     }
 
     if (changes.settings) {
-      const settings = normalizeSettings(changes.settings.newValue);
-      multiRegionEnabled = settings.enableMultiRegion;
-      multiRegionMaxCount = settings.multiRegionMaxCount;
-      fullRecordButtonEnabled = settings.enableFullRecordButton;
-      showRecordingSize = settings.showRecordingSize;
-      fullScreenshotButtonEnabled = settings.enableFullScreenshotButton;
-      seekEnabled = settings.enableSeek;
-      seekSeconds = settings.seekSeconds;
-      streamerFilenameEnabled = settings.enableStreamerFilename;
-      shortcutsEnabled = settings.enableShortcuts;
-      shortcutKeys = settings.shortcutKeys;
+      applyPlayerSettings(normalizeSettings(changes.settings.newValue));
       requestChzzkToolSync();
       syncChzzkRecordTimer();
     }

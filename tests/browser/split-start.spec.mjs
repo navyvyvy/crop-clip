@@ -26,9 +26,9 @@ function firstSyncSample(bytes) {
   throw Error('Missing video track');
 }
 
-async function prepareSplitSource(result, base, sizeMode = false) {
+async function prepareSplitSource(result, base, sizeMode = false, large = false) {
   await result.goto(base);
-  const source = await result.evaluate(async sizeMode => {
+  const source = await result.evaluate(async ({ sizeMode, large }) => {
     const { loadFfmpeg, readFfmpegBlob, releaseFfmpeg } = await import('/result/ffmpeg.js');
     const { putRecording, putPart } = await import('/shared/idb.js');
     const ffmpeg = await loadFfmpeg(() => {});
@@ -42,21 +42,386 @@ async function prepareSplitSource(result, base, sizeMode = false) {
         '-c:a', 'libopus', '-f', 'matroska', 'source.webm',
       ]);
       if (code !== 0) throw Error('Could not generate long-GOP source');
-      const blob = await readFfmpegBlob(ffmpeg, 'source.webm', 'video/webm');
+      let blob = await readFfmpegBlob(ffmpeg, 'source.webm', 'video/webm');
+      if (large) {
+        // Top-level EBML Void makes this a large WebM without changing its frames.
+        const padding = new Uint8Array(64 * 1024 * 1024 + 5);
+        padding.set([0xec, 0x14, 0x00, 0x00, 0x00]);
+        blob = new Blob([blob, padding], { type: blob.type });
+      }
       const id = crypto.randomUUID(), createdAt = Date.now();
       await putRecording({ id, createdAt, endedAt: createdAt + 9000, totalSize: blob.size, actualExtension: 'webm' });
       await putPart({ id: crypto.randomUUID(), recordingId: id, index: 0, filename: 'motion_20260717_120000_45s.webm',
-        mimeType: 'video/webm', extension: 'webm', size: blob.size, blob, createdAt, seekMetadataVersion: 1 });
-      const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer()))).join(',');
+        mimeType: 'video/webm', extension: 'webm', size: blob.size, blob, createdAt, seekMetadataVersion: large ? undefined : 1 });
+      const hash = large ? undefined : Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer()))).join(',');
       return { id, bytes: blob.size, hash };
     } finally { await releaseFfmpeg(); }
-  }, sizeMode);
+  }, { sizeMode, large });
   await result.goto(`${base}?id=${source.id}`);
   await expect(result.locator('#split-button')).toBeEnabled({ timeout: 30000 });
   await expect.poll(() => result.locator('#preview-video').evaluate(video => video.readyState >= 2 && video.duration > 8)).toBe(true);
   await expect(result.locator('#trim-thumbnails')).not.toHaveAttribute('data-loading');
   return source;
 }
+
+test('original MP4 playback cap preserves the start and media bytes', async ({ extension }) => {
+  const { context, worker } = extension;
+  const result = await context.newPage();
+  await result.goto(`chrome-extension://${new URL(worker.url()).host}/result/result.html`);
+  const measured = await result.evaluate(async () => {
+    const { loadFfmpeg, readFfmpegBlob, releaseFfmpeg } = await import('/result/ffmpeg.js');
+    const { capMp4PlaybackDuration } = await import('/result/mp4_duration.js');
+    const ffmpeg = await loadFfmpeg(() => {});
+    try {
+      const code = await ffmpeg.exec([
+        '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=30:duration=4',
+        '-f', 'lavfi', '-i', 'sine=frequency=440:duration=4',
+        '-c:v', 'libx264', '-c:a', 'aac', '-use_editlist', '1', '-movflags', '+faststart', 'fixture.mp4',
+      ]);
+      if (code !== 0) throw Error('Could not generate MP4 fixture');
+      const output = await ffmpeg.readFile('fixture.mp4', 'blob');
+      if (!(output instanceof Blob)) throw Error('Media output must leave the worker as a Blob');
+      const binary = await ffmpeg.readFile('fixture.mp4');
+      const digest = async bytes => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
+      const sameBytes = JSON.stringify(await digest(await output.arrayBuffer())) === JSON.stringify(await digest(binary));
+      const root = await navigator.storage.getDirectory();
+      const file = await root.getFileHandle('test-output.mp4', { create: true });
+      const diskName = 'disk.mp4';
+      if (!await ffmpeg.mount('CROPCLIP_OUTPUT', { file }, diskName)) throw Error('Could not mount temporary output');
+      const remux = name => ffmpeg.exec(['-i', 'fixture.mp4', '-t', '2.37', '-map', '0', '-c', 'copy', '-use_editlist', '1', '-movflags', '+faststart', name]);
+      let diskMatchesMemory;
+      try {
+        if (await remux(diskName) !== 0 || await remux('memory.mp4') !== 0) throw Error('MP4 remux failed');
+        const disk = await ffmpeg.readFile(diskName, 'blob');
+        const memory = await ffmpeg.readFile('memory.mp4', 'blob');
+        diskMatchesMemory = JSON.stringify(await digest(await disk.arrayBuffer())) === JSON.stringify(await digest(await memory.arrayBuffer()));
+      } finally {
+        await ffmpeg.deleteFile(diskName);
+        await root.removeEntry('test-output.mp4');
+      }
+      const source = await readFfmpegBlob(ffmpeg, 'fixture.mp4', 'video/mp4');
+      const capped = await capMp4PlaybackDuration(source, 2.37);
+      const read = async blob => {
+        const video = document.createElement('video');
+        const url = URL.createObjectURL(blob);
+        try {
+          await new Promise((resolve, reject) => {
+            video.onloadeddata = resolve;
+            video.onerror = () => reject(Error('Could not decode MP4'));
+            video.src = url;
+          });
+          const canvas = document.createElement('canvas');
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(video, 0, 0);
+          const frame = await crypto.subtle.digest('SHA-256', ctx.getImageData(0, 0, canvas.width, canvas.height).data);
+          return { duration: video.duration, frame: Array.from(new Uint8Array(frame)) };
+        } finally { video.removeAttribute('src'); video.load(); URL.revokeObjectURL(url); }
+      };
+      const media = async blob => {
+        const ftyp = new DataView(await blob.slice(0, 8).arrayBuffer()).getUint32(0);
+        const moov = new DataView(await blob.slice(ftyp, ftyp + 8).arrayBuffer()).getUint32(0);
+        return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.slice(ftyp + moov).arrayBuffer())));
+      };
+      const invalid = new Blob(['invalid']);
+      return { sameBytes, diskMatchesMemory, original: await read(source), capped: await read(capped), media: await media(source),
+        cappedMedia: await media(capped), invalidUnchanged: await capMp4PlaybackDuration(invalid, 2) === invalid };
+    } finally { await releaseFfmpeg(); }
+  });
+  expect(measured.original.duration).toBeGreaterThan(3.9);
+  expect(measured.sameBytes).toBe(true);
+  expect(measured.diskMatchesMemory).toBe(true);
+  expect(Math.abs(measured.capped.duration - 2.37)).toBeLessThan(0.1);
+  expect(measured.capped.frame).toEqual(measured.original.frame);
+  expect(measured.cappedMedia).toEqual(measured.media);
+  expect(measured.invalidUnchanged).toBe(true);
+});
+
+test('large WebM seek metadata is prepared on disk and remains playable after cleanup', async ({ extension }) => {
+  const { context, worker } = extension;
+  const result = await context.newPage();
+  const base = `chrome-extension://${new URL(worker.url()).host}/result/result.html`;
+  await result.addInitScript(() => {
+    window.diskMounts = 0;
+    const post = Worker.prototype.postMessage;
+    Worker.prototype.postMessage = function (message, ...args) {
+      if (message.type === 'MOUNT' && message.data.fsType === 'CROPCLIP_OUTPUT') window.diskMounts++;
+      return post.call(this, message, ...args);
+    };
+  });
+  const source = await prepareSplitSource(result, base, false, true);
+  expect(await result.evaluate(() => window.diskMounts)).toBe(1);
+  expect(result.workers()).toHaveLength(0);
+  expect(await result.evaluate(async id => {
+    const { getPartsByRecordingId } = await import('/shared/idb.js');
+    const [part] = await getPartsByRecordingId(id);
+    const root = await navigator.storage.getDirectory();
+    const folder = await root.getDirectoryHandle(`cropclip-edit-${id}`);
+    const hasWorkspace = !(await folder.keys().next()).done;
+    return { version: part.seekMetadataVersion, hasWorkspace };
+  }, source.id)).toEqual({ version: 1, hasWorkspace: false });
+});
+
+test('large original survives disk errors and a closed result without a RAM fallback', async ({ extension }) => {
+  test.setTimeout(120_000);
+  const { context, worker } = extension;
+  const base = `chrome-extension://${new URL(worker.url()).host}/result/result.html`;
+  let result = await context.newPage();
+  await result.goto(base);
+  const source = await result.evaluate(async () => {
+    const { loadFfmpeg, readFfmpegBlob, releaseFfmpeg } = await import('/result/ffmpeg.js');
+    const { putRecording, putPart } = await import('/shared/idb.js');
+    const ffmpeg = await loadFfmpeg(() => {});
+    try {
+      const code = await ffmpeg.exec([
+        '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=30:duration=4',
+        '-f', 'lavfi', '-i', 'sine=duration=4',
+        '-c:v', 'libx264', '-c:a', 'aac', '-movflags', '+frag_keyframe+empty_moov', 'source.mp4',
+      ]);
+      if (code !== 0) throw Error('Could not generate original fixture');
+      const video = await readFfmpegBlob(ffmpeg, 'source.mp4', 'video/mp4');
+      const padding = new Uint8Array(64 * 1024 * 1024);
+      new DataView(padding.buffer).setUint32(0, padding.length);
+      padding.set([102, 114, 101, 101], 4); // MP4 free box
+      const blob = new Blob([video, padding], { type: video.type });
+      const id = crypto.randomUUID(), createdAt = Date.now();
+      await putRecording({ id, createdAt, endedAt: createdAt + 3000, totalSize: blob.size, actualExtension: 'mp4' });
+      await putPart({ id: 'test-original', recordingId: id, index: 1, filename: 'source.mp4',
+        mimeType: blob.type, extension: 'mp4', blob, size: blob.size, createdAt,
+        originalStreamStart: 0.25, originalStreamEnd: 3.25, captureMethod: 'original' });
+      return { id, size: blob.size };
+    } finally { await releaseFfmpeg(); }
+  });
+  const checkSource = async page => {
+    expect(await page.evaluate(async id => {
+      const { getPartsByRecordingId } = await import('/shared/idb.js');
+      const [part] = await getPartsByRecordingId(id);
+      return { size: part.blob.size, start: part.originalStreamStart };
+    }, source.id)).toEqual({ size: source.size, start: 0.25 });
+  };
+  await context.addInitScript(() => {
+    const mode = new URLSearchParams(location.search).get('fault');
+    if (mode === 'storage') navigator.storage.getDirectory = async () => { throw new DOMException('Test disk full', 'QuotaExceededError'); };
+    const post = Worker.prototype.postMessage;
+    Worker.prototype.postMessage = function (message, ...args) {
+      if (mode === 'mount' && message.type === 'MOUNT' && message.data.fsType === 'CROPCLIP_OUTPUT') {
+        message = { ...message, data: { ...message.data, options: { file: null } } };
+      }
+      if (message.type === 'EXEC') {
+        window.testExecCount = (window.testExecCount ?? 0) + 1;
+        if (mode === 'close') return;
+        if (mode === 'exec') message = { ...message, data: { ...message.data, args: ['-i', '/missing.mp4', 'output-original.mp4'] } };
+      }
+      if (message.type === 'READ_FILE' && message.data.path === 'output-original.mp4') {
+        window.testFullOutputReads = (window.testFullOutputReads ?? 0) + 1;
+      }
+      return post.call(this, message, ...args);
+    };
+  });
+  const url = `${base}?id=${source.id}`;
+  for (const fault of ['storage', 'mount', 'exec', 'close']) {
+    await result.goto(`${url}&fault=${fault}`);
+    if (fault === 'close') {
+      await expect.poll(() => result.evaluate(() => window.testExecCount ?? 0)).toBe(1);
+      await result.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pagehide')));
+      await expect.poll(() => result.workers().length).toBe(0);
+      await result.close();
+      result = await context.newPage();
+      await result.goto(base);
+      await checkSource(result);
+    } else {
+      await expect(result.getByRole('button', { name: 'MP4 저장 다시 시도' })).toBeVisible({ timeout: 30000 });
+      await expect(result.locator('#result-loading')).toBeHidden();
+      await expect(result.locator('#download-current-button')).toBeDisabled();
+      await checkSource(result);
+      expect(result.workers()).toHaveLength(0);
+      expect(await result.evaluate(() => window.testExecCount ?? 0)).toBe(fault === 'exec' ? 1 : 0);
+      if (fault === 'storage') {
+        const download = result.waitForEvent('download');
+        await result.getByRole('button', { name: '방송 조각 백업 (.fmp4)' }).click();
+        const backup = await download;
+        expect(backup.suggestedFilename()).toBe('source.fmp4');
+        expect((await stat(await backup.path())).size).toBe(source.size);
+      }
+    }
+  }
+  await result.goto(url);
+  await expect(result.locator('#result-loading')).toBeHidden({ timeout: 30000 });
+  await expect.poll(() => result.locator('#preview-video').evaluate(video => video.duration)).toBeCloseTo(3, 1);
+  expect(await result.evaluate(() => window.testFullOutputReads ?? 0)).toBe(0);
+  await expect(result.locator('#trim-thumbnails .trim-thumbnail')).toHaveCount(0);
+  await expect(result.locator('video[src]')).toHaveCount(1);
+  const thumbnails = result.getByRole('button', { name: '장면 미리보기' });
+  await thumbnails.click();
+  await expect(result.locator('#trim-thumbnails .trim-thumbnail').first()).toBeAttached();
+  await expect(result.locator('#trim-thumbnails')).not.toHaveAttribute('data-loading');
+  await expect(result.locator('video[src]')).toHaveCount(1);
+  expect(result.workers()).toHaveLength(0);
+  expect(await result.evaluate(async () => {
+    const root = await navigator.storage.getDirectory();
+    try { await root.getFileHandle('output-original.mp4'); return false; }
+    catch (error) { return error.name === 'NotFoundError'; }
+  })).toBe(true);
+  await result.reload();
+  await expect(thumbnails).toBeVisible();
+  await result.evaluate(() => {
+    document.addEventListener('loadedmetadata', event => {
+      if (event.target instanceof HTMLVideoElement && event.target.id !== 'preview-video') {
+        event.stopImmediatePropagation();
+      }
+    }, true);
+  });
+  await thumbnails.click();
+  await expect(result.locator('video[src]')).toHaveCount(2);
+  await result.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pagehide')));
+  await expect(result.locator('video[src]')).toHaveCount(0);
+  await expect(result.locator('#trim-thumbnails')).not.toHaveAttribute('data-loading');
+});
+
+test('large normal MP4 edits download from disk without reading full outputs into the worker', async ({ extension }) => {
+  test.setTimeout(120000);
+  const { context, worker } = extension;
+  const result = await context.newPage();
+  const base = `chrome-extension://${new URL(worker.url()).host}/result/result.html`;
+  await result.goto(base);
+  const id = await result.evaluate(async () => {
+    const { loadFfmpeg, readFfmpegBlob, releaseFfmpeg } = await import('/result/ffmpeg.js');
+    const { putRecording, putPart } = await import('/shared/idb.js');
+    const ffmpeg = await loadFfmpeg(() => {});
+    let blob;
+    try {
+      if (await ffmpeg.exec(['-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=30:duration=4', '-c:v', 'libx264', '-g', '30', '-movflags', '+faststart', 'source.mp4']) !== 0) throw Error('Fixture encoding failed');
+      const video = await readFfmpegBlob(ffmpeg, 'source.mp4', 'video/mp4');
+      const padding = new Uint8Array(64 * 1024 * 1024);
+      new DataView(padding.buffer).setUint32(0, padding.length);
+      padding.set([102, 114, 101, 101], 4);
+      blob = new Blob([video, padding], { type: video.type });
+    } finally { await releaseFfmpeg(); }
+    const id = crypto.randomUUID(), createdAt = Date.now();
+    await putRecording({ id, createdAt, endedAt: createdAt + 4000, totalSize: blob.size, actualExtension: 'mp4' });
+    await putPart({ id: `${id}:part:001`, recordingId: id, index: 1, filename: 'large.mp4', mimeType: blob.type, extension: 'mp4', blob, size: blob.size, createdAt });
+    return id;
+  });
+  await result.goto(`${base}?id=${id}`);
+  await expect(result.locator('#split-button')).toBeEnabled();
+  await expect.poll(() => result.locator('#preview-video').evaluate(video => video.duration)).toBe(4);
+  await result.evaluate(() => {
+    window.splitDiskAudit = { mounts: 0, reads: 0 };
+    const post = Worker.prototype.postMessage;
+    Worker.prototype.postMessage = function (message, ...args) {
+      if (message.type === 'MOUNT' && message.data.fsType === 'CROPCLIP_OUTPUT') window.splitDiskAudit.mounts++;
+      if (message.type === 'READ_FILE') window.splitDiskAudit.reads++;
+      return post.call(this, message, ...args);
+    };
+  });
+  await result.locator('[data-split-ratio="0.5"]').click();
+  await result.locator('#split-button').click();
+  await expect(result.locator('#split-result-summary')).toHaveText('나눈 파일 (2개)');
+  expect(await result.evaluate(() => window.splitDiskAudit)).toEqual({ mounts: 2, reads: 0 });
+  await expect(result.locator('#split-button')).toBeEnabled();
+  const jobCount = () => worker.evaluate(async id => {
+    const root = await navigator.storage.getDirectory();
+    try {
+      const dir = await root.getDirectoryHandle(`cropclip-edit-${id}`);
+      let count = 0;
+      for await (const _ of dir.keys()) count++;
+      return count;
+    } catch (error) {
+      if (error.name === 'NotFoundError') return -1;
+      throw error;
+    }
+  }, id);
+  expect(await jobCount()).toBe(1);
+  const download = result.waitForEvent('download');
+  await result.getByRole('button', { name: '1번 파일 다운로드' }).click();
+  const first = await download;
+  expect(await first.failure()).toBeNull();
+  expect((await stat(await first.path())).size).toBeGreaterThan(0);
+  await result.locator('#split-format-select').selectOption('webm');
+  await result.locator('#split-button').click();
+  await expect(result.locator('#split-result-summary')).toHaveText('나눈 파일 (2개)');
+  await expect(result.locator('#split-button')).toBeEnabled();
+  expect(await result.evaluate(() => window.splitDiskAudit)).toEqual({ mounts: 4, reads: 1 });
+  await interceptDownloads(result);
+  for (const button of await result.locator('#split-files-list button').all()) await button.click();
+  expect(await decodeDownloads(result)).toEqual([true, true]);
+  await result.locator('#split-format-select').selectOption('mp4');
+  await result.locator('#trim-start-input').fill('0.3');
+  await result.locator('#trim-start-input').press('Tab');
+  await expect.poll(jobCount).toBe(0);
+  await result.locator('[data-split-ratio="0.5"]').click();
+  await result.evaluate(() => {
+    const post = Worker.prototype.postMessage;
+    Worker.prototype.postMessage = function (message, ...args) {
+      if (message.type === 'MOUNT' && message.data.fsType === 'CROPCLIP_OUTPUT') {
+        Worker.prototype.postMessage = post;
+        message = { ...message, data: { ...message.data, options: { file: null } } };
+      }
+      return post.call(this, message, ...args);
+    };
+  });
+  const failure = result.waitForEvent('dialog');
+  const started = result.locator('#split-button').click();
+  const dialog = await failure;
+  await dialog.dismiss();
+  await started;
+  await expect(result.locator('#split-button')).toBeEnabled();
+  await expect.poll(jobCount).toBe(0);
+  expect(await result.evaluate(() => window.splitDiskAudit.reads)).toBe(1);
+  await result.locator('#split-button').click();
+  await expect(result.locator('#split-result-summary')).toHaveText('나눈 파일 (2개)');
+  await expect(result.locator('#split-button')).toBeEnabled();
+  await result.evaluate(() => {
+    window.testDownloads = [];
+    const download = chrome.downloads.download.bind(chrome.downloads);
+    chrome.downloads.download = async options => {
+      window.testDownloads.push(await (await fetch(options.url)).blob());
+      return download(options);
+    };
+  });
+  await result.locator('#speed-select').selectOption('2');
+  await result.locator('#speed-convert-button').click();
+  await expect(result.locator('#split-status')).toHaveText('2배속 MP4 다운로드가 준비되었습니다.');
+  expect(await decodeDownloads(result, 2.5)).toEqual([true]);
+  await expect.poll(jobCount).toBe(1);
+  expect(await result.evaluate(() => window.splitDiskAudit.reads)).toBe(1);
+  await result.evaluate(() => {
+    const post = Worker.prototype.postMessage;
+    Worker.prototype.postMessage = function (message, ...args) {
+      if (message.type === 'EXEC') {
+        Worker.prototype.postMessage = post;
+        message = { ...message, data: { ...message.data, args: ['-i', '/missing.mp4', 'output.mp4'] } };
+      }
+      return post.call(this, message, ...args);
+    };
+  });
+  await result.locator('#download-current-button').click();
+  await expect(result.locator('#split-status')).toHaveText('선택 구간 다운로드가 준비되었습니다.');
+  expect(await decodeDownloads(result, 4)).toEqual([true]);
+  await expect.poll(jobCount).toBe(1);
+  expect(await result.evaluate(() => window.splitDiskAudit.reads)).toBe(1);
+  await result.evaluate(async id => {
+    const { getPartsByRecordingId, putPart } = await import('/shared/idb.js');
+    const [source] = await getPartsByRecordingId(id);
+    const padding = new Uint8Array(64 * 1024 * 1024);
+    new DataView(padding.buffer).setUint32(0, padding.length);
+    padding.set([102, 114, 101, 101], 4);
+    const blob = new Blob([source.blob, padding], { type: source.mimeType });
+    await putPart({ ...source, blob, size: blob.size, startupTrimSeconds: 1.6 });
+  }, id);
+  await result.reload();
+  await expect(result.locator('#split-status')).toHaveText('녹화 초반의 끊긴 구간을 제외했습니다.');
+  await expect.poll(() => result.locator('#preview-video').evaluate(video => video.duration)).toBeCloseTo(2, 1);
+  await expect.poll(jobCount).toBe(1);
+  await result.close();
+  await worker.evaluate(async id => {
+    const key = `delete-recording:${id}`;
+    await chrome.storage.local.set({ [key]: Date.now() - 1 });
+    await chrome.alarms.create(key, { when: Date.now() });
+  }, id);
+  await expect.poll(jobCount).toBe(-1);
+});
 
 test('WebM to MP4 splits start with independently decodable video', async ({ extension }) => {
   test.setTimeout(150_000);
@@ -68,6 +433,12 @@ test('WebM to MP4 splits start with independently decodable video', async ({ ext
   await interceptDownloads(result);
   await result.evaluate(() => {
     window.testSplitCommands = [];
+    window.testSplitVideos = 0;
+    const create = document.createElement.bind(document);
+    document.createElement = (...args) => {
+      if (args[0] === 'video') window.testSplitVideos++;
+      return create(...args);
+    };
     const post = Worker.prototype.postMessage;
     Worker.prototype.postMessage = function (message, ...args) {
       if (message?.type === 'EXEC') window.testSplitCommands.push(message.data.args);
@@ -87,9 +458,11 @@ test('WebM to MP4 splits start with independently decodable video', async ({ ext
       await result.locator(count === 2 ? '[data-split-ratio="0.5"]' : `[data-split-count="${count}"]`).click();
       if (!trimmed && count === 3) await result.locator('#split-value-input').fill('3');
       const seconds = Number(await result.locator('#split-value-input').inputValue());
+      await result.evaluate(() => { window.testSplitVideos = 0; });
       await result.locator('#split-button').click();
       await expect(result.locator('#split-result-summary')).toHaveText(`나눈 파일 (${count}개)`, { timeout: 30000 });
       await expect(result.locator('#split-button')).toBeEnabled();
+      expect(await result.evaluate(() => window.testSplitVideos)).toBe(0);
       const commands = await result.evaluate(() => window.testSplitCommands.splice(0));
       expect(commands.length).toBeGreaterThan(0);
       expect(commands.every(args => args[args.indexOf('-c') + 1] === 'copy'), 'fast splitting must not re-encode the video').toBe(true);
@@ -141,6 +514,34 @@ test('WebM to MP4 splits start with independently decodable video', async ({ ext
   }
 });
 
+test('WebM splits begin with playable video even between source keyframes', async ({ extension }) => {
+  const { context, worker } = extension;
+  const result = await context.newPage();
+  await prepareSplitSource(result, `chrome-extension://${new URL(worker.url()).host}/result/result.html`);
+  await interceptDownloads(result);
+  await result.locator('#split-format-select').selectOption('webm');
+  await result.locator('#split-value-input').fill('3.1');
+  await result.locator('#split-button').click();
+  await expect(result.locator('#split-result-summary')).toHaveText('나눈 파일 (3개)', { timeout: 30000 });
+  for (const button of await result.locator('#split-files-list button').all()) await button.click();
+  const firstFrames = await result.evaluate(async () => Promise.all((await Promise.all(window.testDownloads)).map(async blob => {
+    const video = document.createElement('video');
+    const url = URL.createObjectURL(blob);
+    try {
+      return await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('No first frame')), 5000);
+        video.requestVideoFrameCallback((_now, frame) => { clearTimeout(timeout); resolve(frame.mediaTime); });
+        video.src = url;
+        document.body.append(video);
+      });
+    } finally {
+      video.removeAttribute('src'); video.load(); video.remove(); URL.revokeObjectURL(url);
+    }
+  })));
+  expect(firstFrames).toHaveLength(3);
+  for (const time of firstFrames) expect(time).toBeLessThan(0.1);
+});
+
 test('size split retries reuse one prepared source and recover from failure', async ({ extension }) => {
   test.setTimeout(150000);
   const { context, worker } = extension;
@@ -158,14 +559,14 @@ test('size split retries reuse one prepared source and recover from failure', as
     document.createElement = (...args) => { if (args[0] === 'video') audit.videos++; return create(...args); };
     const post = Worker.prototype.postMessage;
     Worker.prototype.postMessage = function (message, ...args) {
-      if (message?.type === 'WRITE_FILE' && message.data.path === 'input.webm') {
-        audit.inputs++; audit.inputBytes += message.data.data.byteLength;
+      if (message?.type === 'MOUNT' && message.data.mountPoint === '/source') {
+        audit.inputs++; audit.inputBytes += message.data.options.blobs[0].data.size;
       }
       if (message?.type === 'EXEC') {
         audit.executions++;
         if (audit.failNext) {
           audit.failNext = false;
-          message = { ...message, data: { ...message.data, args: ['-i', 'input.webm', '-c:v', 'cropclip-invalid-codec', 'output-invalid.mp4'] } };
+          message = { ...message, data: { ...message.data, args: ['-i', '/source/input.webm', '-c:v', 'cropclip-invalid-codec', 'output-invalid.mp4'] } };
         }
       }
       return post.call(this, message, ...args);
@@ -183,7 +584,7 @@ test('size split retries reuse one prepared source and recover from failure', as
   expect(audit.executions).toBeGreaterThan(sizes.length); // The workload must actually exercise the size retry.
   expect(audit.inputs, 'all size attempts must share the prepared input').toBe(1);
   expect(audit.inputBytes).toBe(source.bytes);
-  expect(audit.videos, 'source metadata must be loaded only once').toBe(1);
+  expect(audit.videos, 'reuse the loaded preview metadata across size attempts').toBe(0);
   expect(sizes.every(bytes => bytes > 0 && bytes <= 1000000)).toBe(true);
   expect(await decodeDownloads(result)).toEqual(Array(sizes.length).fill(true));
   await expectResultResourcesReleased(result, retained);

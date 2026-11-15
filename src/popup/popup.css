@@ -65,7 +65,9 @@ input {
   color: var(--warn);
   font-size: 12px;
   font-weight: 800;
+  font-variant-numeric: tabular-nums;
   text-align: right;
+  white-space: nowrap;
 }
 
 .eyebrow {
