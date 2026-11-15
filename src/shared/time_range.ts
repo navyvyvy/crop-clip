@@ -128,3 +128,8 @@ export function formatElapsed(ms: number): string {
   }
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
+
+export function formatRecordingTimer(ms: number, bytes?: number): string {
+  const elapsed = formatElapsed(ms);
+  return bytes === undefined ? elapsed : `${formatRecordingSize(bytes)} · ${elapsed}`;
+}

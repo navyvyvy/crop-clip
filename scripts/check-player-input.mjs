@@ -1,10 +1,10 @@
 import { normalizeSettings } from "../dist/shared/normalize.js";
-import { formatRecordingSize } from "../dist/shared/time_range.js";
+import { formatRecordingTimer } from "../dist/shared/time_range.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import ts from "typescript";
 
-const source = ts.createSourceFile("recording.ts", ["region_selector.ts", "recording_session.ts"].map(name => fs.readFileSync(new URL(`../src/content/${name}`, import.meta.url), "utf8")).join("\n").replace(/^export /gm, ""), ts.ScriptTarget.Latest, true);
+const source = ts.createSourceFile("recording.ts", ["region_selector.ts", "recording_controller.ts", "recording_session.ts"].map(name => fs.readFileSync(new URL(`../src/content/${name}`, import.meta.url), "utf8")).join("\n").replace(/^export /gm, ""), ts.ScriptTarget.Latest, true);
 const functions = new Map();
 function visit(node) {
   if (ts.isFunctionDeclaration(node)) functions.set(node.name?.text, node.getText(source));
@@ -12,19 +12,21 @@ function visit(node) {
 }
 visit(source);
 const compile = (...names) => ts.transpile(names.map(name => functions.get(name)).join("\n"), { target: ts.ScriptTarget.ES2022 });
-const timeText = new Function('recordingCommandInFlight', 'directSession', 'showRecordingSize', 'formatRecordingSize', 'startedAt', `
-  const currentRecordingState = { startedAt }, formatElapsed = () => '00:42';
+const timeText = new Function('recordingCommandInFlight', 'directSession', 'showRecordingSize', 'formatRecordingTimer', 'startedAt', `
+  const currentRecordingState = { startedAt };
+  const getDirectRecording = () => directSession;
+  const Date = { now: () => 42001 };
   ${compile('getRecordingTimeText')}
   return getRecordingTimeText();
 `);
 assert.equal(timeText(null, null), '시작 중');
-assert.equal(timeText(null, { startedAt: 1 }), '00:42');
+assert.equal(timeText(null, { startedAt: 1 }, false, formatRecordingTimer), '00:42');
 assert.equal(timeText('STOP_RECORDING', null), '저장 중');
 assert.equal(timeText(null, { stopRequested: true }), '저장 중');
 assert.equal(timeText('CANCEL_RECORDING', null), '취소 중');
-assert.equal(timeText(null, { startedAt: 1, recordedBytes: 35_400_000 }, true, formatRecordingSize), '약 35 MB · 00:42');
-assert.equal(timeText(null, { startedAt: 1, recordedBytes: 35_400_000 }, false, formatRecordingSize), '00:42');
-assert.equal(timeText(null, {}, true, formatRecordingSize, 1), '00:42');
+assert.equal(timeText(null, { startedAt: 1, recordedBytes: 35_400_000 }, true, formatRecordingTimer), '약 35 MB · 00:42');
+assert.equal(timeText(null, { startedAt: 1, recordedBytes: 35_400_000 }, false, formatRecordingTimer), '00:42');
+assert.equal(timeText(null, {}, true, formatRecordingTimer, 1), '00:42');
 let finalizeReply;
 const finalizing = new Function('sendRuntimeMessage', `
   const session = { recordingId: 'saving', endedAt: 1, checkpointAbort: new AbortController(), resolveFinish() {} };
@@ -68,6 +70,7 @@ for (const mode of ['region', 'full']) {
   const toggle = new Function('directSession', 'sendRuntimeMessage', `
     const RECORDING_STATUS = { recording: 'recording' }, RECORDING_MODE = { full: 'full' };
     const currentRecordingState = { status: 'recording', mode: '${mode}' };
+    const getDirectRecording = () => directSession;
     let recordingCommandInFlight = null, pendingRecordingTerminalCommand = null;
     const window = { clearInterval() {} };
     const syncRecordingCommandButtons = () => {}, showPlayerFeedback = () => {};
@@ -184,7 +187,7 @@ for (const mode of ['region', 'full']) for (const outcome of ['stop', 'cancel', 
   const api = new Function('sendRuntimeMessage', 'presentations', `
     const RECORDING_STATUS = { idle: 'idle', recording: 'recording' }, RECORDING_MODE = { region: 'region', full: 'full' };
     let currentRecordingState = { status: 'idle' }, recordingCommandInFlight = null, pendingRecordingTerminalCommand = null;
-    const directSession = null;
+    const getDirectRecording = () => null;
     const findPrimaryVideoElement = () => null;
     const window = { alert: message => { throw Error(message); } }, showPlayerFeedback = () => {};
     const syncRecordingCommandButtons = () => presentations.push(recordingCommandInFlight);

@@ -297,6 +297,14 @@ for (const format of ['webm', 'mp4']) test(`full H.264 ${format} recordings excl
       });
     }
     await page.bringToFront();
+    // Keep the injected opening stall away from the fixture's three-second loop seek.
+    await page.evaluate(async () => {
+      const video = document.querySelector('video');
+      if (video.currentTime < 0.05) return;
+      const seeked = new Promise(resolve => video.addEventListener('seeked', resolve, { once: true }));
+      video.currentTime = 0;
+      await seeked;
+    });
     await page.keyboard.press('e');
     const button = page.locator('#crop-clip-chzzk-record-button');
     await expect(button).toHaveAttribute('data-recording', '', { timeout: 20000 });

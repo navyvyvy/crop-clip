@@ -2,7 +2,7 @@ import { DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, DEFAULT_SETTINGS, DEF
 import { loadAppState, saveSettings } from "../shared/storage.js";
 import { normalizeRecordingState, normalizeRegion, normalizeRegions, normalizeSettings } from "../shared/normalize.js";
 import type { ContentCommand, MessageResponse, PopupCommand } from "../shared/messages.js";
-import { formatElapsed, formatRecordingSize, MILLISECONDS_PER_SECOND } from "../shared/time_range.js";
+import { formatRecordingTimer, MILLISECONDS_PER_SECOND } from "../shared/time_range.js";
 
 const elements = {
   versionBadge: document.getElementById("version-badge") as HTMLSpanElement,
@@ -88,15 +88,14 @@ function updateRecordingTimer(): void {
 
   if (!appState.settings.showRecordingSize || !recordingId || tabId === undefined) {
     recordingSize = undefined;
-    elements.recordingTime.textContent = formatElapsed(Date.now() - startedAt);
+    elements.recordingTime.textContent = formatRecordingTimer(Date.now() - startedAt);
     return;
   }
 
   if (recordingSize?.recordingId !== recordingId) recordingSize = { recordingId, pending: false };
   const sample = recordingSize;
   const render = () => {
-    const elapsed = formatElapsed(Date.now() - startedAt);
-    const text = sample.bytes === undefined ? elapsed : `${formatRecordingSize(sample.bytes)} · ${elapsed}`;
+    const text = formatRecordingTimer(Date.now() - startedAt, sample.bytes);
     if (elements.recordingTime.textContent !== text) elements.recordingTime.textContent = text;
   };
   render();

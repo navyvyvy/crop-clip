@@ -5,6 +5,7 @@ import fs from "node:fs";
 import ts from "typescript";
 
 const sourceText = fs.readFileSync(new URL("../src/content/region_selector.ts", import.meta.url), "utf8");
+const controllerText = fs.readFileSync(new URL("../src/content/recording_controller.ts", import.meta.url), "utf8");
 const contentStyleText = fs.readFileSync(new URL("../src/content/region_selector.css", import.meta.url), "utf8");
 const sourceFile = ts.createSourceFile("region_selector.ts", sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 const serviceWorkerText = fs.readFileSync(new URL("../src/background/service_worker.ts", import.meta.url), "utf8");
@@ -45,11 +46,11 @@ assert.doesNotMatch(sourceText, /function ensureStyle\(/);
 assert.match(serviceWorkerText, /chrome\.scripting\.insertCSS\([\s\S]*?content\/region_selector\.css/);
 assert.match(sourceText, /applyBorderGeometry\(border, region, renderedRect\)/);
 assert.match(sourceText, /const bounds = selectionBounds;/);
-assert.match(sourceText, /getContext\("2d", \{ alpha: false, desynchronized: true \}\)/);
-const capturePosition = sourceText.indexOf("const canvasStream = frameCapture?.stream ?? canvas.captureStream(frameRate);");
-const firstPaintPosition = sourceText.indexOf("paintPlacements(layout.placements);");
+assert.match(controllerText, /getContext\("2d", \{ alpha: false, desynchronized: true \}\)/);
+const capturePosition = controllerText.indexOf("const canvasStream = frameCapture?.stream ?? canvas.captureStream(frameRate);");
+const firstPaintPosition = controllerText.indexOf("paintPlacements(layout.placements);");
 assert.ok(capturePosition >= 0 && firstPaintPosition > capturePosition, 'create the capture before painting its first frame');
-assert.doesNotMatch(sourceText, /document\.documentElement\.appendChild\(canvas\)/);
+assert.doesNotMatch(controllerText, /document\.documentElement\.appendChild\(canvas\)/);
 assert.doesNotMatch(sourceText, /overlayObserver\.observe\(document\.documentElement, \{ childList: true, subtree: true \}\)/);
 assert.match(sourceText, /window\.addEventListener\("scroll", requestRegionLayoutSync, \{ capture: true, passive: true \}\)/);
 assert.doesNotMatch(sourceText, /window\.addEventListener\("scroll", \(\) => syncRegionLayoutGeometry/);
@@ -71,9 +72,9 @@ assert.match(serviceWorkerText, /recoverResultAfterTabExit\(tabId, removeInfo\.i
 assert.match(serviceWorkerText, /state\.status === RECORDING_STATUS\.completed\) \{\s*await ensureCompletedRecordingResult/);
 assert.match(serviceWorkerText, /chunk\.index !== index \+ 1/);
 assert.match(serviceWorkerText, /chunks\.at\(-1\)\?\.completesBlob === false/);
-assert.match(sourceText, /function readBlobAsDataUrl\(/);
-assert.match(sourceText, /if \(event\.data\.size <= 0 \|\| session\.cancelRequested\)/);
-assert.match(sourceText, /if \(session\.cancelRequested\) \{\s*return;\s*\}\s*const dataUrl = await readBlobAsDataUrl/);
+assert.match(controllerText, /function readBlobAsDataUrl\(/);
+assert.match(controllerText, /if \(event\.data\.size <= 0 \|\| session\.cancelRequested\)/);
+assert.match(controllerText, /if \(session\.cancelRequested\) \{\s*return;\s*\}\s*const dataUrl = await readBlobAsDataUrl/);
 assert.match(messagesText, /dataUrl: string/);
 assert.doesNotMatch(serviceWorkerText, /message\.chunk\.objectUrl/);
 assert.match(resultText, /function startDeletionKeepalive\(\)/);
@@ -229,6 +230,8 @@ function collectStatements(node, file) {
   ts.forEachChild(node, (child) => collectStatements(child, file));
 }
 collectStatements(sourceFile, sourceFile);
+const controllerFile = ts.createSourceFile("recording_controller.ts", controllerText, ts.ScriptTarget.Latest, true);
+collectStatements(controllerFile, controllerFile);
 collectStatements(serviceWorkerFile, serviceWorkerFile);
 collectStatements(resultFile, resultFile);
 const statements = selectedStatements.join("\n");

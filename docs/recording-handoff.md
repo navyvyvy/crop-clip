@@ -2,7 +2,8 @@
 
 | 작업 | 주로 수정할 파일 | 인계 조건 |
 | --- | --- | --- |
-| 방송 탐색과 녹화 상태 | `src/content/original_stream.ts`, `src/content/recording_session.ts`, `src/content/region_selector.ts` | 원본 조회 성공·실패, 정지·취소, 검색 이동과 재시작을 확인한다. |
+| 방송 탐색과 녹화 상태 | `src/content/original_stream.ts`, `src/content/recording_controller.ts`, `src/content/recording_session.ts` | 원본 조회 성공·실패, 정지·취소, 검색 이동과 재시작을 확인한다. |
+| 영역과 플레이어 UI | `src/content/region_selector.ts` | 영역 테두리와 플레이어 버튼이 영상 이동 및 녹화 상태를 따라가는지 확인한다. |
 | 저장과 복구 | `src/background/service_worker.ts`, `src/shared/idb.ts` | 응답 누락과 저장 실패를 주입하고, 마지막으로 정상 기록한 구간과 새 녹화 상태를 확인한다. |
 | 결과창·변환 | `src/result/`, `scripts/build.mjs` | 디스크 출력 장애와 결과창 종료를 주입한다. 기존 녹화의 바이트, 재시도, 임시 파일 해제와 다운로드를 확인한다. |
 | 검증과 배포 준비 | `tests/browser/`, README 패치노트, [점검 기록](audit-0.4.0.md) | 같은 빌드를 검사하고 실패한 검사와 실제 방송에서 남은 검증을 기록한다. |

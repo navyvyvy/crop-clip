@@ -11,7 +11,7 @@ if (!global.gc) {
   process.exit(result.status ?? 1);
 }
 
-const text = ["region_selector.ts", "player_capture.ts", "recording_session.ts"].map(name => fs.readFileSync(new URL(`../src/content/${name}`, import.meta.url), "utf8")).join("\n").replace(/^export /gm, "");
+const text = ["region_selector.ts", "recording_controller.ts", "player_capture.ts", "recording_session.ts"].map(name => fs.readFileSync(new URL(`../src/content/${name}`, import.meta.url), "utf8")).join("\n").replace(/^export /gm, "");
 const file = ts.createSourceFile("region_selector.ts", text, ts.ScriptTarget.Latest, true);
 const functions = [];
 const startupFunctions = [];
@@ -27,7 +27,7 @@ function visit(node) {
   if (ts.isFunctionDeclaration(node) && node.name?.text === "attachBorderControls") borderControlsSource = node.getText(file);
   if (ts.isFunctionDeclaration(node) && ["startDirectRecording", "syncStartedRecording", "createRecordingSession", "prepareDirectRecordingEncoder", "checkDirectRecordingEncoder", "ignoreRecordingRejection", "releaseDirectRecordingCapture", "stopRecordingStream"].includes(node.name?.text)) startupFunctions.push(node.getText(file));
   if (ts.isVariableDeclaration(node) && node.name.getText(file) === "drawFrame") drawFrameSource = node.initializer.getText(file);
-  if (ts.isFunctionDeclaration(node) && ["getVideoStream", "handleDetachedPlayer", "stopRegionLayoutWatch", "stopRecordingStream", "releaseDirectRecordingCapture", "releaseDirectRecordingRecorder", "cleanupDirectRecordingSession", "startDirectPart", "finalizeDirectRecording", "cancelDirectRecordingSession", "abortDirectRecordingSession", "failDirectRecordingSession", "finishDirectRecording", "requestDirectPartStop"].includes(node.name?.text)) {
+  if (ts.isFunctionDeclaration(node) && ["getVideoStream", "handleDetachedPlayer", "stopDirectRecordingForUnload", "stopDirectRecordingAfterSourceChange", "stopRegionLayoutWatch", "stopRecordingStream", "releaseDirectRecordingCapture", "releaseDirectRecordingRecorder", "cleanupDirectRecordingSession", "startDirectPart", "finalizeDirectRecording", "cancelDirectRecordingSession", "abortDirectRecordingSession", "failDirectRecordingSession", "finishDirectRecording", "requestDirectPartStop"].includes(node.name?.text)) {
     functions.push(node.getText(file));
   }
   ts.forEachChild(node, visit);
@@ -378,7 +378,7 @@ for (const outcome of ["success", "failure", "rejection"]) {
     const RECORDING_STATUS = { idle: 'idle', recording: 'recording' }, RECORDING_MODE = { full: 'full', region: 'region' };
     const MILLISECONDS_PER_SECOND = 1000, activeRegionIndex = 0;
     let currentRecordingState = { status: 'idle' }, recordingCommandInFlight = null, pendingRecordingTerminalCommand = null;
-    const directSession = null;
+    const getDirectRecording = () => null;
     const showPlayerFeedback = () => {}, syncRecordingCommandButtons = () => {}, setRecordButtonContent = () => {}, getRecordingTimeText = () => '00:00';
     const isRegionEditingLocked = () => currentRecordingState.status === 'recording';
     const withShortcut = label => label, getRecordIconSvg = () => '';
@@ -407,8 +407,8 @@ console.log("recording border timer cleanup checks passed");
 // Exercise the real startup scope: clearing session fields alone cannot detect
 // a pending Promise handler that still retains the drawing closure.
 const createStartup = new Function("playerState", "mimeType", "nativeCapture", `
-  let directSession = null, currentRecordingState, recordingEncoderCheck, savedFirstScreenRecording = false;
-  const currentRegions = [], timers = new Map(), refs = {};
+  let directSession = null, recordingEncoderCheck, savedFirstScreenRecording = false;
+  const timers = new Map(), refs = {};
   const window = { setInterval(fn) { timers.set(1, fn); return 1; }, clearInterval(id) { timers.delete(id); } };
   class MediaStream {
     getTracks() { return []; } getVideoTracks() { return []; } getAudioTracks() { return []; }
@@ -438,8 +438,7 @@ const createStartup = new Function("playerState", "mimeType", "nativeCapture", `
   const handleVideoFrameError = () => {};
   const getCropLayoutKey = () => '', buildBaseName = () => 'recording';
   const startDirectPart = async () => {};
-  const watchDirectRecordingSource = () => {}, showSelectionBorders = () => {};
-  const requestChzzkToolSync = () => {}, syncChzzkRecordTimer = () => {};
+  const watchDirectRecordingSource = () => {}, renderRecordingState = () => {};
   const loadState = async () => ({ recordingState: {} });
   const HIGH_RECORDING_FRAME_RATE = 60, STANDARD_RECORDING_FRAME_RATE = 30, MILLISECONDS_PER_SECOND = 1000;
   const RECORDING_FORMAT = { mp4: "mp4" };

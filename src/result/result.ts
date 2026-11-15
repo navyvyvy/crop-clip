@@ -356,6 +356,21 @@ async function readEditOutput(ffmpeg: FfmpegLike, name: string, mimeType: string
   }
 }
 
+async function finishConversion(
+  ffmpeg: FfmpegLike,
+  name: string,
+  mimeType: string,
+  output: FileSystemFileHandle | undefined,
+  emptyFileMessage: string,
+): Promise<Blob> {
+  setWorkStatus("파일을 마무리하는 중입니다.");
+  setProgressPercent(FFMPEG_OUTPUT_READ_PERCENT);
+  const blob = await readEditOutput(ffmpeg, name, mimeType, output);
+  if (!blob.size) throw new Error(emptyFileMessage);
+  setProgressPercent(PROGRESS_FINALIZING_PERCENT);
+  return blob;
+}
+
 async function createEditWorkspace(recordingId: string) {
   try {
     const root = await openEditOutputs(recordingId);
@@ -388,11 +403,7 @@ async function convertPartWithFfmpeg(part: LoadedPart, outputFormat: ConvertForm
     if (code !== 0) {
       throw new Error("빠른 변환에 실패했습니다.");
     }
-    setWorkStatus("파일을 마무리하는 중입니다.");
-    setProgressPercent(FFMPEG_OUTPUT_READ_PERCENT);
-    const blob = await readEditOutput(ffmpeg, outputName, getConvertedMimeType(outputFormat), output);
-    if (!blob.size) throw new Error("변환한 파일이 비어 있습니다.");
-    setProgressPercent(PROGRESS_FINALIZING_PERCENT);
+    const blob = await finishConversion(ffmpeg, outputName, getConvertedMimeType(outputFormat), output, "변환한 파일이 비어 있습니다.");
     return { source: blob, filename: getRangeFilename(part, outputFormat, range) };
   });
 }
@@ -424,11 +435,7 @@ async function convertPartAtSpeed(part: LoadedPart, speed: number, range?: TimeR
     if (code !== 0) {
       throw new Error("배속 변환에 실패했습니다.");
     }
-    setWorkStatus("파일을 마무리하는 중입니다.");
-    setProgressPercent(FFMPEG_OUTPUT_READ_PERCENT);
-    const blob = await readEditOutput(ffmpeg, outputName, "video/mp4", output);
-    if (!blob.size) throw new Error("배속 파일이 비어 있습니다.");
-    setProgressPercent(PROGRESS_FINALIZING_PERCENT);
+    const blob = await finishConversion(ffmpeg, outputName, "video/mp4", output, "배속 파일이 비어 있습니다.");
     return { source: blob, filename: getSpeedFilename(part, speed, range) };
   }, "배속 파일을 준비하는 중입니다.");
 }

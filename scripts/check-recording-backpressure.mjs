@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import ts from "typescript";
 
-const source = ts.createSourceFile("recording.ts", ["region_selector.ts", "recording_session.ts"].map(name => fs.readFileSync(new URL(`../src/content/${name}`, import.meta.url), "utf8")).join("\n").replace(/^export /gm, ""), ts.ScriptTarget.Latest, true);
+const source = ts.createSourceFile("recording.ts", ["recording_controller.ts", "recording_session.ts"].map(name => fs.readFileSync(new URL(`../src/content/${name}`, import.meta.url), "utf8")).join("\n").replace(/^export /gm, ""), ts.ScriptTarget.Latest, true);
 const names = ["queueDirectChunkCheckpoint", "flushDirectCheckpoints", "saveDirectCheckpoints", "sendCheckpointMessage", "getRecordingChunkSliceRanges", "cancelDirectRecordingSession", "abortDirectRecordingSession", "releaseDirectRecordingRecorder", "readBlobAsDataUrl"];
 const functions = [];
 function visit(node) {

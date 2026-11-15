@@ -1,12 +1,8 @@
-import { stopRecordingStream, releaseDirectRecordingCapture, releaseDirectRecordingRecorder, requestDirectPartStop, type DirectRecordingSession } from "./recording_session.js";
-import { getVideoStream } from "./player_capture.js";
-import { RECORDING_MIME_CANDIDATES } from "../shared/types.js";
-import { createVideoFrameCapture } from "./frame_capture.js";
-import { getOriginalPlaylist, openOriginalStream, OriginalStreamError, type OriginalStreamProbe } from "./original_stream.js";
-import { computeDirectLayout, scaleLayout, type DirectCrop, type DirectCropPlacement } from "./crop_layout.js";
-import { formatElapsed, formatRecordingSize, MAX_ORIGINAL_STREAM_SECONDS, MILLISECONDS_PER_SECOND, SECONDS_PER_MINUTE } from "../shared/time_range.js";
+import { createRecordingController, type LocalRecordingState } from "./recording_controller.js";
+import type { DirectCrop } from "./crop_layout.js";
+import { formatRecordingTimer, MILLISECONDS_PER_SECOND } from "../shared/time_range.js";
 import { normalizeSettings, normalizeRegion, normalizeRegions } from "../shared/normalize.js";
-import { RECORDING_FORMAT, RECORDING_STATUS, RECORDING_MODE, DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, STANDARD_RECORDING_FRAME_RATE, HIGH_RECORDING_FRAME_RATE, STARTUP_STALL_WINDOW_SECONDS, STARTUP_TRIM_MIN_SECONDS, STARTUP_TRIM_MAX_SECONDS, DEFAULT_SHORTCUT_KEYS as DEFAULT_CONTENT_SHORTCUT_KEYS } from "../shared/types.js";
+import { RECORDING_STATUS, RECORDING_MODE, DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, DEFAULT_SHORTCUT_KEYS as DEFAULT_CONTENT_SHORTCUT_KEYS } from "../shared/types.js";
 
 (() => {
   // The build bundles shared imports into one classic content script.
@@ -53,15 +49,10 @@ const PLAYER_BUTTON_ROW_TOLERANCE_PX = 24;
 const FLOATING_UI_VIEWPORT_PADDING_PX = 8;
 const MAGNIFIER_POINTER_OFFSET_PX = 18;
 const SCREENSHOT_STACK_OFFSET_PX = 10;
-const CHUNK_INDEX_DIGITS = 6;
+
 const VISIBLE_VIDEO_SCORE_WEIGHT = 4;
 const VIDEO_FRAME_SCORE_WEIGHT = 2;
-const AUDIO_BITS_PER_SECOND = 128_000;
-const STARTUP_FRAME_GAP_MS = 150;
-const MAX_RECORDING_MESSAGE_BLOB_BYTES = 8 * 1024 * 1024;
-const MAX_PENDING_RECORDING_BYTES = 64 * 1024 * 1024;
-const CHECKPOINT_REPLY_TIMEOUT_MS = 15_000;
-const FINALIZE_REPLY_TIMEOUT_MS = 30_000;
+
 const CHZZK_RECORD_BUTTON_ID = "crop-clip-chzzk-record-button";
 const CHZZK_RECORD_TIME_ID = "crop-clip-chzzk-record-time";
 const CHZZK_CANCEL_BUTTON_ID = "crop-clip-chzzk-cancel-button";
@@ -84,7 +75,6 @@ type RegionSelection = import("../shared/types.js").RegionSelection;
 type Settings = import("../shared/types.js").Settings;
 type ShortcutAction = import("../shared/types.js").ShortcutAction;
 type ShortcutKeys = import("../shared/types.js").ShortcutKeys;
-type LocalRecordingState = Pick<RecordingState, "status" | "startedAt" | "mode"> & { recordingElsewhere?: boolean };
 
 type GuideSide = "n" | "s" | "w" | "e";
 type RegionGeometryResponse = MessageResponse<RegionSelection>;
@@ -110,8 +100,6 @@ let shortcutKeys: ShortcutKeys = DEFAULT_CONTENT_SHORTCUT_KEYS;
 let removeSelectionHandlers: (() => void) | null = null;
 let removeBorderHandlers: (() => void) | null = null;
 let currentRecordingState: LocalRecordingState = { status: RECORDING_STATUS.idle };
-let directSession: DirectRecordingSession | null = null;
-let savedFirstScreenRecording = false;
 let preparedRecordingId: string | undefined;
 type RecordingControlCommand = "START_RECORDING" | "START_FULL_RECORDING" | "STOP_RECORDING" | "CANCEL_RECORDING";
 let recordingCommandInFlight: RecordingControlCommand | null = null;
@@ -125,6 +113,20 @@ let seekFeedbackTimerId: number | null = null;
 let regionLayoutObserver: ResizeObserver | null = null;
 let regionLayoutVideo: HTMLVideoElement | null = null;
 let regionLayoutSyncFrame: number | null = null;
+
+const {
+  getDirectRecording, checkDirectRecordingEncoder, prepareDirectRecordingEncoder,
+  startDirectRecording, stopDirectRecording, cancelDirectRecording, stopDirectRecordingForUnload,
+} = createRecordingController({
+  findPrimaryVideoElement, waitForCurrentVideoFrame, computeDirectCropFromSelection, getMultiRegionLimit, buildBaseName,
+  handleDetachedPlayer, sendRuntimeMessage, showPlayerFeedback, syncRecordingCommandButtons, loadState,
+  renderRecordingState(state) {
+    currentRecordingState = state;
+    showSelectionBorders(currentRegions);
+    requestChzzkToolSync();
+    syncChzzkRecordTimer();
+  },
+});
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -140,7 +142,7 @@ function isExtensionContextAvailable(): boolean {
 
 function handleDetachedPlayer(video: HTMLVideoElement): void {
   if (regionLayoutVideo === video) stopRegionLayoutWatch();
-  if (directSession?.video === video) stopDirectRecordingAfterSourceChange(directSession);
+  stopDirectRecordingForUnload(video);
 }
 
 function waitForCurrentVideoFrame(video: HTMLVideoElement): Promise<boolean> {
@@ -414,10 +416,6 @@ function computeDirectCropFromSelection(region: RegionSelection, video: HTMLVide
   return right > x && bottom > y ? { x, y, width: right - x, height: bottom - y } : null;
 }
 
-function getCropLayoutKey(crops: DirectCrop[]): string {
-  return crops.map((crop) => `${crop.x}:${crop.y}:${crop.width}:${crop.height}`).join("|");
-}
-
 function getMultiRegionLimit(settings?: Partial<Settings>): number {
   const value = settings?.multiRegionMaxCount ?? multiRegionMaxCount;
   return clamp(Math.round(Number(value) || DEFAULT_MULTI_REGION_COUNT), MIN_ACTIVE_REGIONS, MAX_ACTIVE_REGIONS);
@@ -425,26 +423,6 @@ function getMultiRegionLimit(settings?: Partial<Settings>): number {
 
 function getActiveRegionLimit(): number {
   return multiRegionEnabled ? getMultiRegionLimit() : 1;
-}
-
-function selectDirectMimeType(settings: Settings): { mimeType: string; extension: "webm" | "mp4" } {
-  const extension = settings.outputFormat === RECORDING_FORMAT.mp4 ? RECORDING_FORMAT.mp4 : RECORDING_FORMAT.webm;
-  const candidates = RECORDING_MIME_CANDIDATES[extension];
-
-  for (const mimeType of candidates) {
-    if (MediaRecorder.isTypeSupported(mimeType)) {
-      return {
-        mimeType,
-        extension,
-      };
-    }
-  }
-
-  if (extension === RECORDING_FORMAT.mp4) {
-    throw new Error("이 브라우저에서는 MP4 녹화가 제대로 동작하지 않습니다. WebM으로 변경하세요.");
-  }
-
-  throw new Error("이 브라우저에서는 WebM 녹화가 제대로 동작하지 않습니다.");
 }
 
 function buildBaseName(): string {
@@ -750,6 +728,12 @@ async function captureFullScreenshot(alertOnError = true): Promise<MessageRespon
   return await captureScreenshot(getPlayerRegionGeometry(), "스크린샷을 찍을 비디오 영역을 찾지 못했습니다.", alertOnError);
 }
 
+function prepareEncoderDuringPlayback(event?: Event): void {
+  if (isChzzkClipEditorPage() || (event && !(event.target instanceof HTMLVideoElement))) return;
+  document.removeEventListener("playing", prepareEncoderDuringPlayback, true);
+  void checkDirectRecordingEncoder().catch(() => {});
+}
+
 async function runRecordingCommand(type: RecordingControlCommand): Promise<void> {
   if (recordingCommandInFlight) {
     const starting = recordingCommandInFlight === "START_RECORDING" || recordingCommandInFlight === "START_FULL_RECORDING";
@@ -777,7 +761,7 @@ async function runRecordingCommand(type: RecordingControlCommand): Promise<void>
       : type === "CANCEL_RECORDING" ? "녹화를 취소 중입니다." : "녹화를 시작 중입니다.");
     const video = type === "START_FULL_RECORDING" ? findPrimaryVideoElement() : null;
     const playback = video ? { src: video.currentSrc, time: video.currentTime } : undefined;
-    const response = type === "STOP_RECORDING" && directSession
+    const response = type === "STOP_RECORDING" && getDirectRecording()
       ? await stopDirectRecording()
       : await sendRuntimeMessage({ type, playback });
     if (!response.ok) throw new Error(response.error);
@@ -831,647 +815,6 @@ function sendRuntimeMessage<T = undefined>(message: Record<string, unknown>): Pr
       reject(new Error("확장 프로그램이 새로고침되었습니다. 페이지를 새로고침한 뒤 다시 시도하세요."));
     }
   });
-}
-
-function readBlobAsDataUrl(blob: Blob, signal: AbortSignal): Promise<string> {
-  if (signal.aborted) return Promise.reject(signal.reason);
-  const reader = new FileReader();
-  const abort = () => reader.abort();
-  return new Promise<string>((resolve, reject) => {
-    reader.onload = () => {
-      if (typeof reader.result === "string") {
-        resolve(reader.result);
-      } else {
-        reject(new Error("녹화 체크포인트를 변환하지 못했습니다."));
-      }
-    };
-    reader.onerror = () => reject(reader.error ?? new Error("녹화 체크포인트를 변환하지 못했습니다."));
-    reader.onabort = () => reject(signal.reason);
-    signal.addEventListener("abort", abort, { once: true });
-    reader.readAsDataURL(blob);
-  }).finally(() => signal.removeEventListener("abort", abort));
-}
-
-function getRecordingChunkSliceRanges(size: number, maxBytes: number): Array<{ start: number; end: number }> {
-  const ranges: Array<{ start: number; end: number }> = [];
-  for (let start = 0; start < size; start += maxBytes) {
-    ranges.push({ start, end: Math.min(size, start + maxBytes) });
-  }
-  return ranges;
-}
-
-function queueDirectChunkCheckpoint(session: DirectRecordingSession, blob: Blob): void {
-  if (session.cancelRequested || session.checkpointError) {
-    return;
-  }
-
-  session.pendingChunks.push({ blob, capturedAt: Date.now() });
-  session.recordedBytes += blob.size;
-  session.pendingBytes += blob.size;
-  if (session.pendingBytes >= MAX_PENDING_RECORDING_BYTES && !session.stopRequested) {
-    session.stopRequested = true;
-    requestDirectPartStop(session);
-    showPlayerFeedback("저장이 지연되어 녹화를 종료했습니다. 녹화한 내용은 계속 저장합니다.", 8_000);
-  }
-  flushDirectCheckpoints(session);
-}
-
-function flushDirectCheckpoints(session: DirectRecordingSession): void {
-  if (!session.originalProbe && !session.checkpointSaving && session.pendingChunks.length) {
-    session.checkpointSaving = true;
-    session.checkpointSaveChain = saveDirectCheckpoints(session);
-  }
-}
-
-function sendCheckpointMessage<T = undefined>(message: Record<string, unknown>, signal: AbortSignal): Promise<MessageResponse<T>> {
-  if (signal.aborted) return Promise.reject(signal.reason);
-  let abort: () => void;
-  return new Promise<MessageResponse<T>>((resolve, reject) => {
-    abort = () => reject(signal.reason);
-    signal.addEventListener("abort", abort, { once: true });
-    void sendRuntimeMessage<T>(message).then(resolve, reject);
-  }).finally(() => signal.removeEventListener("abort", abort));
-}
-
-async function saveDirectCheckpoints(session: DirectRecordingSession): Promise<void> {
-  try {
-    while (session.pendingChunks.length > 0 && !session.cancelRequested) {
-      const { blob, capturedAt } = session.pendingChunks.shift()!;
-      const ranges = getRecordingChunkSliceRanges(blob.size, MAX_RECORDING_MESSAGE_BLOB_BYTES);
-      for (const [rangeIndex, range] of ranges.entries()) {
-        if (session.cancelRequested) {
-          return;
-        }
-
-        const dataUrl = await readBlobAsDataUrl(blob.slice(range.start, range.end, blob.type), session.checkpointAbort.signal);
-        if (session.cancelRequested) {
-          return;
-        }
-        const deadline = AbortSignal.timeout(CHECKPOINT_REPLY_TIMEOUT_MS);
-        const response = await sendCheckpointMessage({
-          type: "STORE_RECORDING_CHUNK",
-          chunk: {
-            id: `${session.recordingId}:chunk:${String(++session.checkpointIndex).padStart(CHUNK_INDEX_DIGITS, "0")}`,
-            recordingId: session.recordingId,
-            index: session.checkpointIndex,
-            mimeType: session.mimeType,
-            extension: session.extension,
-            baseName: session.baseName,
-            createdAt: session.createdAt,
-            capturedAt,
-            completesBlob: rangeIndex === ranges.length - 1,
-            frameRate: session.checkpointIndex === 1 && session.originalStreamStart === undefined
-              ? session.settings.enable60fps ? HIGH_RECORDING_FRAME_RATE : STANDARD_RECORDING_FRAME_RATE
-              : undefined,
-            inspectStartup: session.checkpointIndex === 1 ? session.inspectStartup : undefined,
-            originalStreamStart: session.checkpointIndex === 1 ? session.originalStreamStart : undefined,
-            originalStreamFallback: session.checkpointIndex === 1 ? session.originalStreamFallback : undefined,
-            dataUrl,
-          },
-        }, AbortSignal.any([session.checkpointAbort.signal, deadline])).catch(error => {
-          if (deadline.aborted && error === deadline.reason) throw new Error("녹화 저장 응답이 늦어 받은 구간을 복구합니다.");
-          throw error;
-        });
-        if (!response.ok) {
-          throw new Error(response.error);
-        }
-      }
-      session.pendingBytes = Math.max(0, session.pendingBytes - blob.size);
-    }
-  } catch (error) {
-    if (!session.cancelRequested) {
-      session.checkpointError ??= error instanceof Error ? error : new Error("녹화 체크포인트를 저장하지 못했습니다.");
-      session.stopRequested = true;
-      requestDirectPartStop(session);
-    }
-  } finally {
-    session.pendingChunks.length = 0;
-    session.pendingBytes = 0;
-    session.checkpointSaving = false;
-  }
-}
-
-function cleanupDirectRecordingSession(session: DirectRecordingSession): void {
-  releaseDirectRecordingCapture(session);
-  if (directSession === session) {
-    directSession = null;
-  }
-}
-
-async function finalizeDirectRecording(session: DirectRecordingSession): Promise<void> {
-  const response = await sendCheckpointMessage({
-    type: "FINALIZE_RECORDING",
-    recordingId: session.recordingId,
-    endedAt: session.endedAt ?? Date.now(),
-    startupTrimSeconds: session.startupTrimSeconds,
-    originalStreamEnd: session.originalStreamEnd,
-  }, AbortSignal.any([session.checkpointAbort.signal, AbortSignal.timeout(FINALIZE_REPLY_TIMEOUT_MS)]));
-  if (!response.ok) {
-    // Let finishDirectRecording route this failure through checkpoint recovery too.
-    throw new Error(response.error);
-  }
-  if (session.inspectStartup) savedFirstScreenRecording = true;
-  cleanupDirectRecordingSession(session);
-  session.resolveFinish();
-}
-
-function abortDirectRecordingSession(session: DirectRecordingSession): void {
-  session.cancelRequested = true;
-  session.stopRequested = true;
-  requestDirectPartStop(session);
-  // Cancelled recordings do not need the final data or a delayed stop callback.
-  releaseDirectRecordingRecorder(session);
-  session.pendingChunks.length = 0;
-  session.pendingBytes = 0;
-  session.checkpointAbort.abort();
-  cleanupDirectRecordingSession(session);
-}
-
-function cancelDirectRecordingSession(session: DirectRecordingSession): void {
-  abortDirectRecordingSession(session);
-  session.resolveFinish();
-}
-
-function failDirectRecordingSession(session: DirectRecordingSession, error: Error): void {
-  if (session.cancelRequested) return;
-  abortDirectRecordingSession(session);
-  void sendRuntimeMessage({ type: "RECORDING_ERROR", recordingId: session.recordingId, error: error.message })
-    .then(response => {
-      if (response.ok) session.resolveFinish();
-      else session.rejectFinish(error);
-    }, () => session.rejectFinish(error));
-}
-
-async function finishDirectRecording(session: DirectRecordingSession): Promise<void> {
-  releaseDirectRecordingCapture(session);
-  releaseDirectRecordingRecorder(session);
-  try {
-    if (!session.cancelRequested) {
-      session.originalProbe = undefined;
-      flushDirectCheckpoints(session);
-      await session.checkpointSaveChain;
-    }
-    if (session.cancelRequested) {
-      cancelDirectRecordingSession(session);
-      return;
-    }
-    if (session.checkpointError) throw session.checkpointError;
-    await finalizeDirectRecording(session);
-  } catch (error) {
-    failDirectRecordingSession(session, error instanceof Error ? error : new Error("녹화 결과를 저장하지 못했습니다."));
-  }
-}
-
-function stopDirectRecordingAfterSourceChange(session: DirectRecordingSession): void {
-  if (directSession !== session || session.stopRequested) {
-    return;
-  }
-
-  session.stopRequested = true;
-  requestDirectPartStop(session);
-}
-
-function watchDirectRecordingSource(session: DirectRecordingSession): void {
-  const video = session.video;
-  if (!video) return;
-  const stop = () => stopDirectRecordingAfterSourceChange(session);
-  const sourceTracks = session.sourceStream?.getTracks() ?? [];
-  const events = ["ended", "loadstart", "emptied"];
-  events.forEach(event => video.addEventListener(event, stop));
-  sourceTracks.forEach((track) => track.addEventListener("ended", stop));
-  session.sourceChangeCleanup = () => {
-    events.forEach(event => video.removeEventListener(event, stop));
-    sourceTracks.forEach((track) => track.removeEventListener("ended", stop));
-  };
-}
-
-async function startDirectPart(session: DirectRecordingSession, onStarted?: () => void): Promise<void> {
-  session.closingPart = false;
-
-  if (!session.outputStream) throw new Error("녹화 화면을 준비하지 못했습니다.");
-  const recorder = new MediaRecorder(session.outputStream, {
-    mimeType: session.mimeType,
-    videoBitsPerSecond: session.settings.videoBitsPerSecond,
-    audioBitsPerSecond: AUDIO_BITS_PER_SECOND,
-    ...(session.stabilizeStartup ? { videoKeyFrameIntervalDuration: MILLISECONDS_PER_SECOND } : {}),
-  });
-  session.recorder = recorder;
-  recorder.onstart = () => {
-    recorder.onstart = null;
-    markDirectRecordingStarted(session);
-    if (session.startedAt && !session.stopRequested && !session.cancelRequested) onStarted?.();
-  };
-
-  recorder.ondataavailable = (event) => {
-    if (event.data.size <= 0 || session.cancelRequested) {
-      return;
-    }
-
-    queueDirectChunkCheckpoint(session, event.data);
-  };
-
-  recorder.onerror = () => failDirectRecordingSession(session, new Error("녹화 중 오류가 발생했습니다."));
-  session.finishAfterStop = timedOut => {
-    if (timedOut) showPlayerFeedback("녹화 종료 신호가 늦어 받은 영상까지 저장합니다.", 8_000);
-    void finishDirectRecording(session);
-  };
-  recorder.onstop = () => session.finishAfterStop?.();
-
-  recorder.start(MILLISECONDS_PER_SECOND);
-}
-
-// A handler created inside startDirectRecording retains its canvas/video scope until saving finishes.
-function ignoreRecordingRejection(): void {}
-
-function handleVideoFrameError(recordingId: string, error: Error): void {
-  if (directSession?.recordingId === recordingId) failDirectRecordingSession(directSession, error);
-}
-
-let recordingEncoderCheck: Promise<void> | undefined;
-
-function checkDirectRecordingEncoder(): Promise<void> {
-  return recordingEncoderCheck ??= prepareRecordingEncoder().catch(error => {
-    recordingEncoderCheck = undefined;
-    throw error;
-  });
-}
-
-function prepareEncoderDuringPlayback(event?: Event): void {
-  if (isChzzkClipEditorPage() || (event && !(event.target instanceof HTMLVideoElement))) return;
-  document.removeEventListener("playing", prepareEncoderDuringPlayback, true);
-  void checkDirectRecordingEncoder().catch(ignoreRecordingRejection);
-}
-
-async function prepareDirectRecordingEncoder(settings: Settings): Promise<{ mimeType: string; extension: "webm" | "mp4" }> {
-  const mime = selectDirectMimeType(settings);
-  if (mime.extension === "mp4" || mime.mimeType.includes("avc1")) await checkDirectRecordingEncoder();
-  return mime;
-}
-
-function createRecordingSession(
-  command: Extract<ContentCommand, { type: "START_DIRECT_RECORDING" }>,
-  video: HTMLVideoElement,
-  mimeType: string,
-  extension: "webm" | "mp4",
-): DirectRecordingSession {
-  let resolveFinish!: () => void;
-  let rejectFinish!: (error: Error) => void;
-  const finishPromise = new Promise<void>((resolve, reject) => {
-    resolveFinish = resolve;
-    rejectFinish = reject;
-  });
-  void finishPromise.catch(ignoreRecordingRejection);
-  return {
-    recordingId: command.recordingId,
-    settings: command.settings,
-    video,
-    canvas: null,
-    mimeType,
-    extension,
-    baseName: buildBaseName(),
-    checkpointIndex: 0,
-    checkpointSaveChain: Promise.resolve(),
-    pendingChunks: [],
-    pendingBytes: 0,
-    recordedBytes: 0,
-    checkpointSaving: false,
-    checkpointAbort: new AbortController(),
-    createdAt: Date.now(),
-    stopRequested: false,
-    cancelRequested: false,
-    cleanedUp: false,
-    closingPart: false,
-    finishPromise,
-    resolveFinish,
-    rejectFinish,
-    placements: [],
-  };
-}
-
-function markDirectRecordingStarted(session: DirectRecordingSession): void {
-  if (directSession !== session || session.startedAt || session.stopRequested || session.cancelRequested) return;
-  session.startedAt = session.createdAt = Date.now();
-  syncRecordingCommandButtons();
-  void sendRuntimeMessage({
-    type: "RECORDING_STARTED",
-    recordingId: session.recordingId,
-    startedAt: session.startedAt,
-  }).catch(ignoreRecordingRejection);
-}
-
-async function syncStartedRecording(session: DirectRecordingSession): Promise<void> {
-  const { recordingState } = await loadState();
-  if (directSession !== session) return;
-  currentRecordingState = recordingState;
-  showSelectionBorders(currentRegions);
-  requestChzzkToolSync();
-  syncChzzkRecordTimer();
-}
-
-async function startOriginalRecording(command: Extract<ContentCommand, { type: "START_DIRECT_RECORDING" }>, video: HTMLVideoElement, fallback: DirectRecordingSession, probe: AbortController): Promise<string | undefined> {
-  const src = video.currentSrc;
-  if (video.paused || !src.startsWith("blob:") || (video.duration !== Infinity && !location.pathname.startsWith("/live/"))) {
-    return "지원하는 라이브 재생이 아닙니다.";
-  }
-  if (command.playback && command.playback.src !== src) return "방송 영상이 바뀌었습니다.";
-  const startTime = video.currentTime;
-  if (!Number.isFinite(startTime) || startTime < 0) return "방송의 재생 시각을 읽지 못했습니다.";
-  const session = createRecordingSession(command, video, "video/mp4", "mp4");
-  const timeout = window.setTimeout(() => probe.abort(), 5_000);
-  let source;
-  let offset: number;
-  let start: number;
-  try {
-    const response = await sendCheckpointMessage<OriginalStreamProbe>({ type: "READ_STREAM_OFFSET", src }, probe.signal);
-    if (!response.ok) return response.error;
-    if (!response.data || !Number.isFinite(response.data.offset) || video.currentSrc !== src) return "방송의 재생 시각을 읽지 못했습니다.";
-    offset = response.data.offset;
-    start = startTime - offset;
-    if (start < 0) return "방송의 재생 시각을 원본과 맞추지 못했습니다.";
-    source = await openOriginalStream(getOriginalPlaylist(response.data.playlist), start, probe.signal);
-  } catch (error) {
-    if (probe.signal.aborted) return "원본 응답이 지연되었습니다.";
-    return error instanceof OriginalStreamError ? error.message : "원본 방송 데이터를 받지 못했습니다.";
-  } finally {
-    window.clearTimeout(timeout);
-  }
-
-  if (directSession !== fallback || fallback.stopRequested || fallback.cancelRequested || probe.signal.aborted) return;
-  if (video.currentSrc !== src || video.seeking) return "방송 영상이 바뀌었습니다.";
-  session.startedAt = fallback.startedAt;
-  session.createdAt = fallback.createdAt;
-  session.checkpointAbort = probe;
-  session.originalStreamStart = start;
-  let end: number | undefined;
-  let lastPlaybackTime = video.currentTime;
-  const updatePlaybackTime = () => { if (!video.seeking && video.currentSrc === src) lastPlaybackTime = video.currentTime; };
-  session.stopOriginalStream = () => {
-    const position = video.currentSrc === src && !video.seeking ? Math.max(video.currentTime, lastPlaybackTime) : lastPlaybackTime;
-    end ??= Math.max(start + 1 / STANDARD_RECORDING_FRAME_RATE, position - offset);
-    source.stop();
-  };
-  const stop = () => stopDirectRecordingAfterSourceChange(session);
-  const stopEvents = ["ended", "loadstart", "emptied", "seeking", "resize"];
-  stopEvents.forEach(event => video.addEventListener(event, stop));
-  video.addEventListener("timeupdate", updatePlaybackTime);
-  session.sourceChangeCleanup = () => {
-    stopEvents.forEach(event => video.removeEventListener(event, stop));
-    video.removeEventListener("timeupdate", updatePlaybackTime);
-  };
-  // Neither path has written a checkpoint yet. Commit to the original once its first fragment is ready.
-  fallback.originalProbe = undefined;
-  cancelDirectRecordingSession(fallback);
-  directSession = session;
-  let saved = false;
-  void source.record(async blob => {
-    queueDirectChunkCheckpoint(session, blob);
-    await session.checkpointSaveChain;
-    if (session.checkpointError) throw session.checkpointError;
-    saved = true;
-  }, () => video.currentTime - offset, () => end).then(async last => {
-    if (session.cancelRequested) return;
-    if (!session.stopRequested) {
-      showPlayerFeedback(last >= start + MAX_ORIGINAL_STREAM_SECONDS
-        ? `최대 녹화 시간인 ${MAX_ORIGINAL_STREAM_SECONDS / SECONDS_PER_MINUTE}분에 도달해 저장합니다.`
-        : "원본 저장 용량 한도에 도달해 받은 구간을 저장합니다.", 8_000);
-    }
-    if (end !== undefined && last < end - 1 / STANDARD_RECORDING_FRAME_RATE) {
-      showPlayerFeedback("마지막 방송 조각이 늦어 먼저 받은 구간까지 저장합니다.", 8_000);
-    }
-    session.originalStreamEnd = last;
-    await finishDirectRecording(session);
-  }, async error => {
-    if (session.cancelRequested) return;
-    if (saved && !session.checkpointError) {
-      showPlayerFeedback("원본 연결이 끊겨 받은 구간까지 저장합니다.", 8_000);
-      await finishDirectRecording(session);
-    } else {
-      failDirectRecordingSession(session, error instanceof Error ? error : new Error("원본 방송을 저장하지 못했습니다."));
-    }
-  });
-  await syncStartedRecording(session);
-  return undefined;
-}
-
-function tryOriginalRecording(command: Extract<ContentCommand, { type: "START_DIRECT_RECORDING" }>, video: HTMLVideoElement, session: DirectRecordingSession, probe: AbortController): void {
-  void startOriginalRecording(command, video, session, probe).then(reason => {
-    if (directSession !== session) {
-      if (directSession?.recordingId === session.recordingId) showPlayerFeedback("원본 저장 중");
-      return;
-    }
-    if (!session.stopRequested) {
-      const format = session.extension === "webm" ? "WebM" : "MP4";
-      showPlayerFeedback([`화면 녹화 중 · ${format}`, reason].filter(Boolean).join("\n"), 8_000);
-    }
-  }).catch(ignoreRecordingRejection).finally(() => {
-    if (session.originalProbe !== probe) return;
-    session.originalProbe = undefined;
-    if (directSession === session && !session.cancelRequested) flushDirectCheckpoints(session);
-  });
-}
-
-async function startDirectRecording(command: Extract<ContentCommand, { type: "START_DIRECT_RECORDING" }>): Promise<MessageResponse> {
-  if (directSession) {
-    cancelDirectRecordingSession(directSession);
-  }
-
-  const video = findPrimaryVideoElement();
-  if (!video) {
-    return { ok: false, error: "재생 중인 영상을 찾지 못했습니다." };
-  }
-
-  if (!await waitForCurrentVideoFrame(video)) {
-    return { ok: false, error: "영상 프레임이 아직 준비되지 않았습니다. 잠시 후 다시 시도하세요." };
-  }
-
-  if (!command.settings.allowMutedRecording && (video.muted || video.volume === 0)) {
-    return { ok: false, error: "영상이 음소거되어 녹화할 수 없습니다." };
-  }
-
-  const originalProbe = command.fullPlayer && command.settings.enableOriginalStreamRecording ? new AbortController() : undefined;
-  const mime = await prepareDirectRecordingEncoder(command.settings);
-
-  const sourceRegions = (command.regions?.length ? command.regions : [command.region]).slice(0, command.settings.enableMultiRegion ? getMultiRegionLimit(command.settings) : 1);
-  const crops = sourceRegions
-    .map((region) => computeDirectCropFromSelection(region, video))
-    .filter((crop): crop is DirectCrop => crop !== null);
-  if (crops.length === 0) {
-    return { ok: false, error: "선택 영역이 영상 밖에 있습니다." };
-  }
-
-  const layout = computeDirectLayout(crops);
-  const output = layout.output;
-
-  const canvas = document.createElement("canvas");
-  canvas.width = output.width;
-  canvas.height = output.height;
-
-  let context: CanvasRenderingContext2D | null = null;
-
-  // Feed cropped MP4 through canvas capture to keep Chromium's fallback encoder on a native track.
-  const useFrameCapture = crops.length === 1 && (mime.extension !== RECORDING_FORMAT.mp4 || command.fullPlayer);
-  const frameCapture = useFrameCapture
-    ? createVideoFrameCapture(video, output.width, output.height, handleVideoFrameError.bind(null, command.recordingId), mime.extension !== "mp4")
-    : null;
-  const paintCanvas = (placements: DirectCropPlacement[]) => {
-    context ??= canvas.getContext("2d", { alpha: false, desynchronized: true });
-    if (!context) throw new Error("녹화 화면을 준비하지 못했습니다.");
-    context.fillStyle = "#000";
-    context.fillRect(0, 0, output.width, output.height);
-    for (const placement of placements) {
-      context.drawImage(video, placement.crop.x, placement.crop.y, placement.crop.width, placement.crop.height, placement.dx, placement.dy, placement.dw, placement.dh);
-    }
-  };
-  const paintPlacements = (placements: DirectCropPlacement[]) => {
-    if (frameCapture) {
-      return frameCapture.paint(placements[0], () => { paintCanvas(placements); return canvas; });
-    }
-    paintCanvas(placements);
-    return true;
-  };
-
-  const frameRate = command.settings.enable60fps ? HIGH_RECORDING_FRAME_RATE : STANDARD_RECORDING_FRAME_RATE;
-  const canvasStream = frameCapture?.stream ?? canvas.captureStream(frameRate);
-  const releaseOutput = () => {
-    frameCapture?.close();
-    stopRecordingStream(canvasStream);
-    canvas.width = 0;
-    canvas.height = 0;
-  };
-  try {
-    paintPlacements(layout.placements);
-  } catch {
-    releaseOutput();
-    return { ok: false, error: "녹화 화면을 준비하지 못했습니다." };
-  }
-
-  let sourceStream: MediaStream | null = null;
-  try {
-    sourceStream = getVideoStream(video, handleDetachedPlayer);
-  } catch {
-    releaseOutput();
-    return { ok: false, error: "이 브라우저에서는 현재 영상 녹화를 지원하지 않습니다." };
-  }
-  if (!sourceStream) {
-    releaseOutput();
-    return { ok: false, error: "이 브라우저에서는 현재 영상 녹화를 지원하지 않습니다." };
-  }
-
-  const tracks = [
-    ...canvasStream.getVideoTracks(),
-    ...sourceStream.getAudioTracks(),
-  ];
-  const outputStream = new MediaStream(tracks);
-  let cropLayoutKey = getCropLayoutKey(crops);
-  const layoutDependsOnlyOnVideoSize = sourceRegions.every(region => region.videoRelative);
-  let layoutVideoWidth = video.videoWidth;
-  let layoutVideoHeight = video.videoHeight;
-  let lastPaintedFrame = -1;
-  const stabilizeStartup = command.fullPlayer && mime.mimeType.includes("avc1");
-  let startupStartedAt: number | undefined;
-  let lastStartupFrameAt = 0;
-  let lastStartupMediaTime = video.currentTime;
-
-  const drawFrame = () => {
-    if (startupStartedAt !== undefined && (video.paused || video.seeking)) startupStartedAt = undefined;
-    if (video.paused || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
-    const frame = video.getVideoPlaybackQuality?.().totalVideoFrames;
-    if (frame !== undefined && frame === lastPaintedFrame) return;
-    if (!layoutDependsOnlyOnVideoSize || layoutVideoWidth !== video.videoWidth || layoutVideoHeight !== video.videoHeight) {
-      layoutVideoWidth = video.videoWidth;
-      layoutVideoHeight = video.videoHeight;
-      const nextCrops = sourceRegions
-        .map((region) => computeDirectCropFromSelection(region, video))
-        .filter((crop): crop is DirectCrop => crop !== null);
-      const nextCropLayoutKey = getCropLayoutKey(nextCrops);
-      if (nextCrops.length > 0 && nextCropLayoutKey !== cropLayoutKey) {
-        cropLayoutKey = nextCropLayoutKey;
-        const nextLayout = computeDirectLayout(nextCrops);
-        const scale = Math.min(output.width / nextLayout.output.width, output.height / nextLayout.output.height);
-        const width = nextLayout.output.width * scale;
-        const height = nextLayout.output.height * scale;
-        session.placements = scaleLayout(nextLayout, scale, Math.round((output.width - width) / 2), Math.round((output.height - height) / 2));
-      }
-    }
-    try {
-      if (!paintPlacements(session.placements)) return;
-    } catch (error) {
-      failDirectRecordingSession(session, error instanceof Error ? error : new Error("녹화 프레임을 준비하지 못했습니다."));
-      return;
-    }
-    lastPaintedFrame = frame ?? -1;
-    if (startupStartedAt !== undefined) {
-      const now = performance.now();
-      const elapsedSeconds = (now - startupStartedAt) / MILLISECONDS_PER_SECOND;
-      if (elapsedSeconds <= STARTUP_TRIM_MAX_SECONDS && now - lastStartupFrameAt >= STARTUP_FRAME_GAP_MS && video.currentTime >= lastStartupMediaTime) {
-        session.startupTrimSeconds = Math.max(STARTUP_TRIM_MIN_SECONDS, elapsedSeconds);
-      }
-      if (elapsedSeconds > STARTUP_STALL_WINDOW_SECONDS) {
-        startupStartedAt = undefined;
-      }
-      lastStartupFrameAt = now;
-      lastStartupMediaTime = video.currentTime;
-    }
-  };
-
-  const session: DirectRecordingSession = {
-    ...createRecordingSession(command, video, mime.mimeType, mime.extension),
-    originalStreamFallback: originalProbe ? true : undefined,
-    originalProbe,
-    sourceStream,
-    outputStream,
-    canvas,
-    frameCapture: frameCapture ?? undefined,
-    stabilizeStartup,
-    inspectStartup: stabilizeStartup && !savedFirstScreenRecording ? true : undefined,
-    drawTimerId: window.setInterval(drawFrame, Math.round(MILLISECONDS_PER_SECOND / frameRate)),
-    placements: layout.placements,
-  };
-
-  directSession = session;
-  try {
-    if (stabilizeStartup) startupStartedAt = lastStartupFrameAt = performance.now();
-    await startDirectPart(session, originalProbe ? () => tryOriginalRecording(command, video, session, originalProbe) : undefined);
-    watchDirectRecordingSource(session);
-    await syncStartedRecording(session);
-    return { ok: true };
-  } catch (error) {
-    abortDirectRecordingSession(session);
-    session.rejectFinish(error instanceof Error ? error : new Error("녹화를 시작하지 못했습니다."));
-    throw error;
-  }
-}
-
-async function stopDirectRecording(recordingId?: string): Promise<MessageResponse> {
-  const session = directSession;
-  if (recordingId && session && session.recordingId !== recordingId) {
-    return { ok: true };
-  }
-  if (!session) {
-    return { ok: false, error: "진행 중인 녹화가 없습니다." };
-  }
-
-  session.stopRequested = true;
-  requestDirectPartStop(session);
-  await session.finishPromise;
-  return { ok: true };
-}
-
-async function cancelDirectRecording(recordingId?: string): Promise<MessageResponse> {
-  const session = directSession;
-  if (!session) {
-    return { ok: true };
-  }
-  if (recordingId && session.recordingId !== recordingId) {
-    return { ok: true };
-  }
-
-  cancelDirectRecordingSession(session);
-  return { ok: true };
-}
-
-function stopDirectRecordingForUnload(): void {
-  if (directSession) stopDirectRecordingAfterSourceChange(directSession);
 }
 
 function removeSelectionBorders(): void {
@@ -2136,7 +1479,8 @@ async function loadState(): Promise<{ region: RegionSelection | null; regions: R
 }
 
 function getLocalRecordingId(): string | undefined {
-  if (directSession) return directSession.recordingId;
+  const recording = getDirectRecording();
+  if (recording) return recording.recordingId;
   if (recordingCommandInFlight === "START_RECORDING" || recordingCommandInFlight === "START_FULL_RECORDING") {
     return preparedRecordingId;
   }
@@ -2600,13 +1944,12 @@ function setRecordButtonContent(button: HTMLElement, full = false): void {
 }
 
 function getRecordingTimeText(): string {
+  const recording = getDirectRecording();
   if (recordingCommandInFlight === "CANCEL_RECORDING") return "취소 중";
-  if (recordingCommandInFlight === "STOP_RECORDING" || directSession?.stopRequested) return "저장 중";
-  const startedAt = directSession?.startedAt ?? currentRecordingState.startedAt;
+  if (recordingCommandInFlight === "STOP_RECORDING" || recording?.stopRequested) return "저장 중";
+  const startedAt = recording?.startedAt ?? currentRecordingState.startedAt;
   if (!startedAt) return "시작 중";
-  const elapsed = formatElapsed(Date.now() - startedAt);
-  const bytes = directSession?.recordedBytes;
-  return showRecordingSize && bytes !== undefined ? `${formatRecordingSize(bytes)} · ${elapsed}` : elapsed;
+  return formatRecordingTimer(Date.now() - startedAt, showRecordingSize ? recording?.recordedBytes : undefined);
 }
 
 function syncRecordingCommandButtons(): void {
@@ -3246,12 +2589,13 @@ if (isExtensionContextAvailable()) {
     }
 
     if (message.type === "HAS_DIRECT_RECORDING") {
-      sendResponse({ ok: true, data: directSession?.recordingId === message.recordingId });
+      sendResponse({ ok: true, data: getDirectRecording()?.recordingId === message.recordingId });
       return false;
     }
 
     if (message.type === "GET_RECORDING_SIZE") {
-      sendResponse({ ok: true, data: directSession?.recordingId === message.recordingId ? directSession.recordedBytes : undefined });
+      const recording = getDirectRecording();
+      sendResponse({ ok: true, data: recording?.recordingId === message.recordingId ? recording.recordedBytes : undefined });
       return false;
     }
 
@@ -3390,7 +2734,7 @@ window.addEventListener("pagehide", () => {
 });
 
 window.addEventListener("beforeunload", () => {
-  if (!directSession) {
+  if (!getDirectRecording()) {
     return;
   }
 
@@ -3403,7 +2747,7 @@ window.addEventListener("keydown", (event) => {
     return;
   }
 
-  if (!directSession) {
+  if (!getDirectRecording()) {
     return;
   }
 
