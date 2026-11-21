@@ -438,6 +438,44 @@ test('missing and malformed settings recover in the popup and player', async ({ 
   await expect(popup.locator('#custom-video-bitrate-input')).toHaveValue('6');
 });
 
+test('popup settings persist and only the recording size toggle stays editable during capture', async ({ extension }) => {
+  const { context, worker } = extension;
+  let popup = await context.newPage();
+  const url = `chrome-extension://${new URL(worker.url()).host}/popup/popup.html`;
+  await popup.goto(url);
+  const readSettings = () => worker.evaluate(async () => (await chrome.storage.local.get('settings')).settings);
+  await expect(popup.locator('input[name="shortcut-mode"][value="on"]')).toBeChecked();
+
+  await popup.locator('label:has(input[name="multi-region-mode"][value="on"])').click();
+  await expect(popup.locator('#multi-region-count-row')).toBeVisible();
+  await popup.locator('#multi-region-count-increase-button').click();
+  await expect.poll(async () => (await readSettings()).multiRegionMaxCount).toBe(3);
+  await popup.locator('label:has(input[name="seek-button-mode"][value="on"])').click();
+  const seekSeconds = popup.locator('#seek-seconds-input');
+  await seekSeconds.fill('999');
+  await seekSeconds.press('Tab');
+  await expect(seekSeconds).toHaveValue('60');
+  await popup.locator('#seek-decrease-button').click();
+  await expect.poll(async () => (await readSettings()).seekSeconds).toBe(59);
+
+  await worker.evaluate(() => chrome.storage.local.set({ recordingState: { status: 'recording', mode: 'full' } }));
+  await expect(popup.locator('input[name="output-format"][value="webm"]')).toBeDisabled();
+  await expect(popup.locator('input[name="seek-button-mode"][value="off"]')).toBeDisabled();
+  await expect(popup.locator('#multi-region-count-increase-button')).toBeDisabled();
+  expect(await popup.locator('input[type="radio"]:not([name="recording-size-mode"]):enabled').count()).toBe(0);
+  await popup.locator('label:has(input[name="recording-size-mode"][value="on"])').click();
+  await expect.poll(async () => (await readSettings()).showRecordingSize).toBe(true);
+  await worker.evaluate(() => chrome.storage.local.set({ recordingState: { status: 'idle' } }));
+  await expect(seekSeconds).toBeEnabled();
+
+  await popup.close();
+  popup = await context.newPage();
+  await popup.goto(url);
+  await expect(popup.locator('#seek-seconds-input')).toHaveValue('59');
+  await expect(popup.locator('#multi-region-count-input')).toHaveValue('3');
+  await expect(popup.locator('input[name="recording-size-mode"][value="on"]')).toBeChecked();
+});
+
 test('result delivery reuses its tab after a failed state write', async ({ extension }) => {
   const { context, worker } = extension;
   await worker.evaluate(async () => {

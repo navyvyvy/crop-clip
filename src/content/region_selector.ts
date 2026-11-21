@@ -1,5 +1,6 @@
 import { createRecordingController, type LocalRecordingState } from "./recording_controller.js";
 import type { DirectCrop } from "./crop_layout.js";
+import { canvasToBlob } from "../shared/canvas.js";
 import { formatRecordingTimer, MILLISECONDS_PER_SECOND } from "../shared/time_range.js";
 import { normalizeSettings, normalizeRegion, normalizeRegions } from "../shared/normalize.js";
 import { RECORDING_STATUS, RECORDING_MODE, DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, DEFAULT_SHORTCUT_KEYS as DEFAULT_CONTENT_SHORTCUT_KEYS } from "../shared/types.js";
@@ -110,6 +111,7 @@ let chzzkToolDiscoveryTimerId: number | null = null;
 let chzzkToolSyncFrame: number | null = null;
 let chzzkRecordTimerId: number | null = null;
 let seekFeedbackTimerId: number | null = null;
+let screenshotPreviewRevision = 0;
 let regionLayoutObserver: ResizeObserver | null = null;
 let regionLayoutVideo: HTMLVideoElement | null = null;
 let regionLayoutSyncFrame: number | null = null;
@@ -598,19 +600,6 @@ function updateResizeMagnifier(video: HTMLVideoElement, clientX: number, clientY
   magnifier.style.top = `${clamp(preferredTop, FLOATING_UI_VIEWPORT_PADDING_PX, Math.max(FLOATING_UI_VIEWPORT_PADDING_PX, window.innerHeight - height - FLOATING_UI_VIEWPORT_PADDING_PX))}px`;
 }
 
-function blobFromCanvas(canvas: HTMLCanvasElement): Promise<Blob> {
-  return new Promise((resolve, reject) => {
-    canvas.toBlob((blob) => {
-      if (blob) {
-        resolve(blob);
-        return;
-      }
-
-      reject(new Error("스크린샷 이미지를 만들지 못했습니다."));
-    }, "image/png");
-  });
-}
-
 function positionScreenshotStack(stack: HTMLElement, rect = getVideoSelectionRect()): void {
   const left = rect ? rect.left + SCREENSHOT_STACK_OFFSET_PX : SCREENSHOT_STACK_OFFSET_PX;
   const top = rect ? rect.top + SCREENSHOT_STACK_OFFSET_PX : SCREENSHOT_STACK_OFFSET_PX;
@@ -689,6 +678,10 @@ function screenshotFailure(message: string, alertOnError: boolean): MessageRespo
 }
 
 async function captureScreenshot(region: RegionSelection | null, missingMessage: string, alertOnError = true): Promise<MessageResponse> {
+  if (isChzzkClipEditorPage()) {
+    return { ok: false, error: "클립 편집 화면에서는 스크린샷을 찍을 수 없습니다." };
+  }
+  const previewRevision = screenshotPreviewRevision;
   const video = findPrimaryVideoElement();
   if (!region || !video) {
     return screenshotFailure(missingMessage, alertOnError);
@@ -713,10 +706,17 @@ async function captureScreenshot(region: RegionSelection | null, missingMessage:
 
   try {
     context.drawImage(video, crop.x, crop.y, crop.width, crop.height, 0, 0, crop.width, crop.height);
-    showScreenshotPreview(await blobFromCanvas(canvas));
+    const blob = await canvasToBlob(canvas, "image/png");
+    if (previewRevision !== screenshotPreviewRevision || isChzzkClipEditorPage()) {
+      return { ok: false, error: "화면이 바뀌어 스크린샷을 취소했습니다." };
+    }
+    showScreenshotPreview(blob);
     return { ok: true };
   } catch {
     return screenshotFailure("이 영상은 브라우저 보안 제한으로 스크린샷 저장을 지원하지 않습니다.", alertOnError);
+  } finally {
+    canvas.width = 0;
+    canvas.height = 0;
   }
 }
 
@@ -2007,10 +2007,6 @@ function showPlayerFeedback(message: string, duration = SEEK_FEEDBACK_DURATION_M
   }, duration);
 }
 
-function showSeekFeedback(deltaSeconds: number): void {
-  showPlayerFeedback(`${deltaSeconds > 0 ? "+" : ""}${deltaSeconds}초`);
-}
-
 function handlePlayerScreenshotActivation(event: MouseEvent): void {
   if (event.button !== 0) {
     return;
@@ -2028,11 +2024,13 @@ function seekPrimaryVideo(deltaSeconds: number): void {
     return;
   }
 
-  const nextTime = video.currentTime + deltaSeconds;
-  video.currentTime = Number.isFinite(video.duration)
-    ? clamp(nextTime, 0, video.duration)
-    : Math.max(0, nextTime);
-  showSeekFeedback(deltaSeconds);
+  const previousTime = video.currentTime;
+  const seekable = video.seekable;
+  const start = seekable.length ? seekable.start(0) : 0;
+  const end = seekable.length ? seekable.end(seekable.length - 1) : video.duration;
+  video.currentTime = clamp(previousTime + deltaSeconds, start, Number.isFinite(end) ? end : Infinity);
+  const movedSeconds = Number((video.currentTime - previousTime).toFixed(1));
+  showPlayerFeedback(`${movedSeconds > 0 ? "+" : ""}${movedSeconds}초`);
 }
 
 function handlePlayerToolActivation(event: MouseEvent): void {
@@ -2419,6 +2417,8 @@ function suspendPlayerTools(): void {
   stopRegionLayoutWatch();
   teardownOverlay();
   removeSelectionBorders();
+  screenshotPreviewRevision += 1;
+  document.getElementById(SCREENSHOT_STACK_ID)?.querySelectorAll<HTMLElement>(".screenshot-card").forEach(removeScreenshotCard);
   currentRegion = null;
   currentRegions = [];
   for (const id of [CHZZK_TOOL_BUTTON_ID, CHZZK_RECORD_BUTTON_ID, CHZZK_CANCEL_BUTTON_ID, CHZZK_SCREENSHOT_BUTTON_ID, CHZZK_RECORD_TIME_ID]) {

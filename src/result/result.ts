@@ -1,3 +1,4 @@
+import { canvasToBlob } from "../shared/canvas.js";
 import { MEDIA_SEEK_TOLERANCE_SECONDS, createObjectUrlSource, releaseVideoSource, getPartSource, pickRecorderMimeType, waitForMediaEvent, hydratePart, loadVideoForPart, seekVideo, recordVideoRange, type LoadedPart } from "./media.js";
 import { downloadSource, downloadSourcesSequentially, downloadSourcesAndConfirm } from "./downloads.js";
 import { capMp4PlaybackDuration } from "./mp4_duration.js";
@@ -1017,18 +1018,6 @@ function clearTimelineThumbnails(): void {
   thumbnailUrls = [];
   elements.trimThumbnails.innerHTML = "";
   elements.trimThumbnails.removeAttribute("data-loading");
-}
-
-function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality?: number): Promise<Blob> {
-  return new Promise((resolve, reject) => {
-    canvas.toBlob((blob) => {
-      if (blob) {
-        resolve(blob);
-      } else {
-        reject(new Error("이미지를 만들지 못했습니다."));
-      }
-    }, type, quality);
-  });
 }
 
 function drawThumbnailFrame(context: CanvasRenderingContext2D, video: HTMLVideoElement): void {

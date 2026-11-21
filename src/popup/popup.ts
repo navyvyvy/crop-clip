@@ -1,4 +1,4 @@
-import { DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, DEFAULT_SETTINGS, DEFAULT_SHORTCUT_KEYS, FPS_WARNING_VIDEO_BITS_PER_SECOND, MAX_MULTI_REGION_COUNT, MAX_SEEK_SECONDS, MAX_VIDEO_BITS_PER_SECOND, MIN_MULTI_REGION_COUNT, MIN_SEEK_SECONDS, MIN_VIDEO_BITS_PER_SECOND, RECORDING_FORMAT, RECORDING_MODE, RECORDING_STATUS, type AppState, type RecordingFormat, type Settings, type ShortcutAction } from "../shared/types.js";
+import { DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, DEFAULT_SETTINGS, DEFAULT_SHORTCUT_KEYS, FPS_WARNING_VIDEO_BITS_PER_SECOND, MAX_MULTI_REGION_COUNT, MAX_SEEK_SECONDS, MAX_VIDEO_BITS_PER_SECOND, MIN_MULTI_REGION_COUNT, MIN_SEEK_SECONDS, MIN_VIDEO_BITS_PER_SECOND, RECORDING_MODE, RECORDING_STATUS, type AppState, type Settings, type ShortcutAction } from "../shared/types.js";
 import { loadAppState, saveSettings } from "../shared/storage.js";
 import { normalizeRecordingState, normalizeRegion, normalizeRegions, normalizeSettings } from "../shared/normalize.js";
 import type { ContentCommand, MessageResponse, PopupCommand } from "../shared/messages.js";
@@ -14,27 +14,14 @@ const elements = {
   fullRecordToggleButton: document.getElementById("full-record-toggle-button") as HTMLButtonElement,
   fullScreenshotButton: document.getElementById("full-screenshot-button") as HTMLButtonElement,
   outputFormatInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='output-format']")),
-  originalStreamModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='original-stream-mode']")),
-  recordingSizeModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='recording-size-mode']")),
-  fpsModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='fps-mode']")),
-  mutedRecordingModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='muted-recording-mode']")),
-  multiRegionModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='multi-region-mode']")),
   multiRegionCountRow: document.getElementById("multi-region-count-row") as HTMLDivElement,
   multiRegionCountDecreaseButton: document.getElementById("multi-region-count-decrease-button") as HTMLButtonElement,
   multiRegionCountIncreaseButton: document.getElementById("multi-region-count-increase-button") as HTMLButtonElement,
   multiRegionCountInput: document.getElementById("multi-region-count-input") as HTMLInputElement,
-  fullRecordModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='full-record-mode']")),
-  fullScreenshotModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='full-screenshot-mode']")),
-  seekButtonModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='seek-button-mode']")),
   seekSecondsRow: document.getElementById("seek-seconds-row") as HTMLDivElement,
   seekDecreaseButton: document.getElementById("seek-decrease-button") as HTMLButtonElement,
   seekIncreaseButton: document.getElementById("seek-increase-button") as HTMLButtonElement,
   seekSecondsInput: document.getElementById("seek-seconds-input") as HTMLInputElement,
-  streamerFilenameModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='streamer-filename-mode']")),
-  autoFocusResultModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='auto-focus-result-mode']")),
-  autoDownloadRecordingModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='auto-download-recording-mode']")),
-  autoDownloadSplitModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='auto-download-split-mode']")),
-  shortcutModeInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='shortcut-mode']")),
   bitrateDecreaseButton: document.getElementById("bitrate-decrease-button") as HTMLButtonElement,
   bitrateIncreaseButton: document.getElementById("bitrate-increase-button") as HTMLButtonElement,
   customVideoBitrateInput: document.getElementById("custom-video-bitrate-input") as HTMLInputElement,
@@ -46,6 +33,63 @@ const elements = {
   shortcutResetButton: document.getElementById("shortcut-reset-button") as HTMLButtonElement,
   shortcutCloseButton: document.getElementById("shortcut-close-button") as HTMLButtonElement,
 };
+
+type ToggleSetting = { [Key in keyof Settings]: Settings[Key] extends boolean ? Key : never }[keyof Settings];
+
+const toggleInputNames = {
+  enableOriginalStreamRecording: "original-stream-mode",
+  showRecordingSize: "recording-size-mode",
+  enable60fps: "fps-mode",
+  allowMutedRecording: "muted-recording-mode",
+  enableMultiRegion: "multi-region-mode",
+  enableFullRecordButton: "full-record-mode",
+  enableFullScreenshotButton: "full-screenshot-mode",
+  enableSeek: "seek-button-mode",
+  enableStreamerFilename: "streamer-filename-mode",
+  autoFocusResult: "auto-focus-result-mode",
+  enableAutoDownloadRecording: "auto-download-recording-mode",
+  enableAutoDownloadSplit: "auto-download-split-mode",
+  enableShortcuts: "shortcut-mode",
+} satisfies Record<ToggleSetting, string>;
+
+const toggleControls = (Object.keys(toggleInputNames) as ToggleSetting[]).map(setting => ({
+  setting,
+  inputs: Array.from(document.querySelectorAll<HTMLInputElement>(`input[name="${toggleInputNames[setting]}"]`)),
+}));
+
+const integerControls = [
+  {
+    setting: "multiRegionMaxCount",
+    enabledBy: "enableMultiRegion",
+    row: elements.multiRegionCountRow,
+    input: elements.multiRegionCountInput,
+    decrease: elements.multiRegionCountDecreaseButton,
+    increase: elements.multiRegionCountIncreaseButton,
+    min: MIN_MULTI_REGION_COUNT,
+    max: MAX_MULTI_REGION_COUNT,
+    fallback: DEFAULT_MULTI_REGION_COUNT,
+  },
+  {
+    setting: "seekSeconds",
+    enabledBy: "enableSeek",
+    row: elements.seekSecondsRow,
+    input: elements.seekSecondsInput,
+    decrease: elements.seekDecreaseButton,
+    increase: elements.seekIncreaseButton,
+    min: MIN_SEEK_SECONDS,
+    max: MAX_SEEK_SECONDS,
+    fallback: DEFAULT_SEEK_SECONDS,
+  },
+] as const;
+
+const controlsLockedDuringRecording = [
+  ...elements.outputFormatInputs,
+  ...toggleControls.filter(({ setting }) => setting !== "showRecordingSize").flatMap(({ inputs }) => inputs),
+  ...integerControls.flatMap(({ input, decrease, increase }) => [input, decrease, increase]),
+  elements.bitrateDecreaseButton,
+  elements.bitrateIncreaseButton,
+  elements.customVideoBitrateInput,
+];
 
 const BITS_PER_MEGABIT = 1_000_000;
 const BITRATE_STEP_MEGABITS_PER_SECOND = 0.5;
@@ -153,52 +197,17 @@ function formatBitrateMbps(value: number): string {
 }
 
 function syncPresetUi(settings: Settings): void {
-  const outputFormat = settings.outputFormat === RECORDING_FORMAT.mp4 ? RECORDING_FORMAT.mp4 : RECORDING_FORMAT.webm;
   for (const input of elements.outputFormatInputs) {
-    input.checked = input.value === outputFormat;
+    input.checked = input.value === settings.outputFormat;
   }
-  for (const input of elements.originalStreamModeInputs) {
-    input.checked = input.value === (settings.enableOriginalStreamRecording ? "on" : "off");
+  for (const { setting, inputs } of toggleControls) {
+    for (const input of inputs) {
+      input.checked = input.value === (settings[setting] ? "on" : "off");
+    }
   }
-  for (const input of elements.recordingSizeModeInputs) {
-    input.checked = input.value === (settings.showRecordingSize ? "on" : "off");
-  }
-  for (const input of elements.fpsModeInputs) {
-    input.checked = input.value === (settings.enable60fps ? "on" : "off");
-  }
-  for (const input of elements.mutedRecordingModeInputs) {
-    input.checked = input.value === (settings.allowMutedRecording ? "on" : "off");
-  }
-  for (const input of elements.multiRegionModeInputs) {
-    input.checked = input.value === (settings.enableMultiRegion ? "on" : "off");
-  }
-  elements.multiRegionCountRow.hidden = !settings.enableMultiRegion;
-  elements.multiRegionCountInput.value = String(settings.multiRegionMaxCount);
-  for (const input of elements.fullRecordModeInputs) {
-    input.checked = input.value === (settings.enableFullRecordButton ? "on" : "off");
-  }
-  for (const input of elements.fullScreenshotModeInputs) {
-    input.checked = input.value === (settings.enableFullScreenshotButton ? "on" : "off");
-  }
-  for (const input of elements.seekButtonModeInputs) {
-    input.checked = input.value === (settings.enableSeek ? "on" : "off");
-  }
-  elements.seekSecondsRow.hidden = !settings.enableSeek;
-  elements.seekSecondsInput.value = String(settings.seekSeconds);
-  for (const input of elements.streamerFilenameModeInputs) {
-    input.checked = input.value === (settings.enableStreamerFilename ? "on" : "off");
-  }
-  for (const input of elements.autoFocusResultModeInputs) {
-    input.checked = input.value === (settings.autoFocusResult ? "on" : "off");
-  }
-  for (const input of elements.autoDownloadRecordingModeInputs) {
-    input.checked = input.value === (settings.enableAutoDownloadRecording ? "on" : "off");
-  }
-  for (const input of elements.autoDownloadSplitModeInputs) {
-    input.checked = input.value === (settings.enableAutoDownloadSplit ? "on" : "off");
-  }
-  for (const input of elements.shortcutModeInputs) {
-    input.checked = input.value === (settings.enableShortcuts ? "on" : "off");
+  for (const { setting, enabledBy, row, input } of integerControls) {
+    row.hidden = !settings[enabledBy];
+    input.value = String(settings[setting]);
   }
   elements.customVideoBitrateInput.value = formatBitrateMbps(settings.videoBitsPerSecond / BITS_PER_MEGABIT);
   renderShortcutList();
@@ -225,34 +234,8 @@ function renderState(): void {
   elements.shortcutSettingsButton.disabled = isRecording || sendingCommand;
   elements.resetSettingsButton.disabled = isRecording || sendingCommand;
 
-  const lockControls = isRecording;
-  const controls = [
-    ...elements.outputFormatInputs,
-    ...elements.originalStreamModeInputs,
-    ...elements.fpsModeInputs,
-    ...elements.mutedRecordingModeInputs,
-    ...elements.multiRegionModeInputs,
-    elements.multiRegionCountDecreaseButton,
-    elements.multiRegionCountIncreaseButton,
-    elements.multiRegionCountInput,
-    ...elements.fullRecordModeInputs,
-    ...elements.fullScreenshotModeInputs,
-    ...elements.seekButtonModeInputs,
-    elements.seekDecreaseButton,
-    elements.seekIncreaseButton,
-    elements.seekSecondsInput,
-    ...elements.streamerFilenameModeInputs,
-    ...elements.autoFocusResultModeInputs,
-    ...elements.autoDownloadRecordingModeInputs,
-    ...elements.autoDownloadSplitModeInputs,
-    ...elements.shortcutModeInputs,
-    elements.bitrateDecreaseButton,
-    elements.bitrateIncreaseButton,
-    elements.customVideoBitrateInput,
-  ];
-
-  for (const control of controls) {
-    control.disabled = lockControls;
+  for (const control of controlsLockedDuringRecording) {
+    control.disabled = isRecording;
   }
 }
 
@@ -271,18 +254,10 @@ async function stepBitrate(direction: -1 | 1): Promise<void> {
   await persistUiSettings();
 }
 
-async function stepSeekSeconds(direction: -1 | 1): Promise<void> {
-  const current = Number(elements.seekSecondsInput.value || DEFAULT_SEEK_SECONDS);
-  const next = Math.min(MAX_SEEK_SECONDS, Math.max(MIN_SEEK_SECONDS, (Number.isFinite(current) ? current : DEFAULT_SEEK_SECONDS) + direction));
-  elements.seekSecondsInput.value = String(next);
-  await persistUiSettings();
-}
-
-async function stepMultiRegionCount(direction: -1 | 1): Promise<void> {
-  const current = Number(elements.multiRegionCountInput.value || DEFAULT_MULTI_REGION_COUNT);
-  const next = Math.min(MAX_MULTI_REGION_COUNT, Math.max(MIN_MULTI_REGION_COUNT, (Number.isFinite(current) ? current : DEFAULT_MULTI_REGION_COUNT) + direction));
-  elements.multiRegionCountInput.value = String(next);
-  await persistUiSettings();
+function readIntegerControl({ input, min, max, fallback }: typeof integerControls[number], direction = 0): number {
+  const value = Number(input.value || fallback);
+  const next = (Number.isFinite(value) ? value : fallback) + direction;
+  return Math.min(max, Math.max(min, Math.round(next)));
 }
 
 async function sendCommand<T = undefined>(message: PopupCommand): Promise<MessageResponse<T>> {
@@ -307,43 +282,20 @@ async function refreshAppState(): Promise<void> {
 }
 
 function readSettingsFromUi(): Settings {
-  const outputFormat = (elements.outputFormatInputs.find((input) => input.checked)?.value ?? DEFAULT_SETTINGS.outputFormat) as RecordingFormat;
-  const enable60fps = elements.fpsModeInputs.find((input) => input.checked)?.value === "on";
-  const allowMutedRecording = elements.mutedRecordingModeInputs.find((input) => input.checked)?.value === "on";
-  const enableMultiRegion = elements.multiRegionModeInputs.find((input) => input.checked)?.value === "on";
-  const multiRegionMaxCount = Number(elements.multiRegionCountInput.value || DEFAULT_MULTI_REGION_COUNT);
-  const enableFullRecordButton = elements.fullRecordModeInputs.find((input) => input.checked)?.value !== "off";
-  const enableFullScreenshotButton = elements.fullScreenshotModeInputs.find((input) => input.checked)?.value !== "off";
-  const enableSeek = elements.seekButtonModeInputs.find((input) => input.checked)?.value !== "off";
-  const seekSeconds = Number(elements.seekSecondsInput.value || DEFAULT_SEEK_SECONDS);
-  const enableStreamerFilename = elements.streamerFilenameModeInputs.find((input) => input.checked)?.value !== "off";
-  const autoFocusResult = elements.autoFocusResultModeInputs.find((input) => input.checked)?.value !== "off";
-  const enableAutoDownloadRecording = elements.autoDownloadRecordingModeInputs.find((input) => input.checked)?.value !== "off";
-  const enableAutoDownloadSplit = elements.autoDownloadSplitModeInputs.find((input) => input.checked)?.value !== "off";
-  const enableShortcuts = elements.shortcutModeInputs.find((input) => input.checked)?.value !== "off";
-  const fallbackBitrateMbps = (appState.settings.videoBitsPerSecond ?? DEFAULT_SETTINGS.videoBitsPerSecond) / BITS_PER_MEGABIT;
-  const videoBitsPerSecond = Math.round(Number(elements.customVideoBitrateInput.value || fallbackBitrateMbps) * BITS_PER_MEGABIT);
-
-  return normalizeSettings({
-    outputFormat,
-    enableOriginalStreamRecording: elements.originalStreamModeInputs.some(input => input.checked && input.value === "on"),
-    showRecordingSize: elements.recordingSizeModeInputs.some(input => input.checked && input.value === "on"),
-    videoBitsPerSecond,
-    enable60fps,
-    allowMutedRecording,
-    enableMultiRegion,
-    multiRegionMaxCount,
-    enableFullRecordButton,
-    enableFullScreenshotButton,
-    enableSeek,
-    seekSeconds,
-    enableStreamerFilename,
-    autoFocusResult,
-    enableAutoDownloadRecording,
-    enableAutoDownloadSplit,
-    enableShortcuts,
-    shortcutKeys: appState.settings.shortcutKeys,
-  });
+  const fallbackBitrateMbps = appState.settings.videoBitsPerSecond / BITS_PER_MEGABIT;
+  const settings = {
+    ...appState.settings,
+    outputFormat: elements.outputFormatInputs.find(input => input.checked)?.value ?? appState.settings.outputFormat,
+    videoBitsPerSecond: Math.round(Number(elements.customVideoBitrateInput.value || fallbackBitrateMbps) * BITS_PER_MEGABIT),
+  };
+  for (const { setting, inputs } of toggleControls) {
+    const selected = inputs.find(input => input.checked);
+    if (selected) settings[setting] = selected.value === "on";
+  }
+  for (const control of integerControls) {
+    settings[control.setting] = readIntegerControl(control);
+  }
+  return normalizeSettings(settings);
 }
 
 function renderShortcutList(): void {
@@ -403,9 +355,6 @@ function sanitizeBitrateInput(): void {
 
 async function persistUiSettings(): Promise<void> {
   sanitizeBitrateInput();
-  elements.multiRegionCountInput.value = String(Math.min(MAX_MULTI_REGION_COUNT, Math.max(MIN_MULTI_REGION_COUNT, Math.round(Number(elements.multiRegionCountInput.value || DEFAULT_MULTI_REGION_COUNT)))));
-  const rawSeekSeconds = Number(elements.seekSecondsInput.value || DEFAULT_SEEK_SECONDS);
-  elements.seekSecondsInput.value = String(Math.min(MAX_SEEK_SECONDS, Math.max(MIN_SEEK_SECONDS, Math.round(Number.isFinite(rawSeekSeconds) ? rawSeekSeconds : DEFAULT_SEEK_SECONDS))));
   if (!elements.customVideoBitrateInput.value) {
     syncPresetUi(appState.settings);
     return;
@@ -514,8 +463,13 @@ elements.fullScreenshotButton.addEventListener("click", () => {
   });
 });
 
-for (const element of [...elements.outputFormatInputs, ...elements.originalStreamModeInputs, ...elements.recordingSizeModeInputs, ...elements.fpsModeInputs, ...elements.mutedRecordingModeInputs, ...elements.multiRegionModeInputs, ...elements.fullRecordModeInputs, ...elements.fullScreenshotModeInputs, ...elements.seekButtonModeInputs, ...elements.streamerFilenameModeInputs, ...elements.autoFocusResultModeInputs, ...elements.autoDownloadRecordingModeInputs, ...elements.autoDownloadSplitModeInputs, ...elements.shortcutModeInputs]) {
-  element.addEventListener("change", () => {
+for (const input of [
+  ...elements.outputFormatInputs,
+  ...toggleControls.flatMap(({ inputs }) => inputs),
+  ...integerControls.map(({ input }) => input),
+  elements.customVideoBitrateInput,
+]) {
+  input.addEventListener("change", () => {
     void persistUiSettings();
   });
 }
@@ -524,17 +478,16 @@ elements.customVideoBitrateInput.addEventListener("input", () => {
   void persistBitrateInput();
 });
 
-elements.customVideoBitrateInput.addEventListener("change", () => {
-  void persistUiSettings();
-});
-
-elements.seekSecondsInput.addEventListener("change", () => {
-  void persistUiSettings();
-});
-
-elements.multiRegionCountInput.addEventListener("change", () => {
-  void persistUiSettings();
-});
+for (const control of integerControls) {
+  control.decrease.addEventListener("click", () => {
+    control.input.value = String(readIntegerControl(control, -1));
+    void persistUiSettings();
+  });
+  control.increase.addEventListener("click", () => {
+    control.input.value = String(readIntegerControl(control, 1));
+    void persistUiSettings();
+  });
+}
 
 elements.bitrateDecreaseButton.addEventListener("click", () => {
   void stepBitrate(-1);
@@ -542,22 +495,6 @@ elements.bitrateDecreaseButton.addEventListener("click", () => {
 
 elements.bitrateIncreaseButton.addEventListener("click", () => {
   void stepBitrate(1);
-});
-
-elements.seekDecreaseButton.addEventListener("click", () => {
-  void stepSeekSeconds(-1);
-});
-
-elements.seekIncreaseButton.addEventListener("click", () => {
-  void stepSeekSeconds(1);
-});
-
-elements.multiRegionCountDecreaseButton.addEventListener("click", () => {
-  void stepMultiRegionCount(-1);
-});
-
-elements.multiRegionCountIncreaseButton.addEventListener("click", () => {
-  void stepMultiRegionCount(1);
 });
 
 elements.shortcutSettingsButton.addEventListener("click", () => {
