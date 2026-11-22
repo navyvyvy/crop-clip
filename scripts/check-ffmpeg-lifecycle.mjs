@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import ts from "typescript";
+import { MediaEventTimeoutError } from "../dist/result/media.js";
 import { attachDiskOutput } from "../src/result/ffmpeg_disk_output.js";
 
 for (const quotaError of [false, true]) {
@@ -48,7 +49,7 @@ for (const block of cleanupBlocks) {
 const jobSource = file.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'runResultJob');
 assert.ok(jobSource, 'result operations must share their job lifecycle');
 const jobState = { busy: false, releases: 0, hidden: 0, alerts: [], statuses: [] };
-const runJob = new Function('state', `
+const runJob = new Function('state', 'MediaEventTimeoutError', `
   const resultLifetime = new AbortController();
   let workBusy = false;
   const setSplitBusy = busy => { workBusy = busy; state.busy = busy; };
@@ -58,7 +59,7 @@ const runJob = new Function('state', `
   const window = { alert: message => state.alerts.push(message) };
   ${compile(jobSource.getText(file))}
   return runResultJob;
-`)(jobState);
+`)(jobState, MediaEventTimeoutError);
 await runJob(async () => { assert.equal(jobState.busy, true); }, 'fallback');
 assert.equal(jobState.busy, false);
 assert.equal(jobState.releases, 1);
@@ -69,15 +70,19 @@ for (const failure of [new Error('conversion failed'), null]) {
   assert.equal(jobState.alerts.at(-1), failure?.message ?? 'fallback');
   assert.equal(jobState.statuses.at(-1), jobState.alerts.at(-1));
 }
+const previousAlerts = jobState.alerts.length;
+await runJob(async () => { throw new MediaEventTimeoutError('metadata timed out'); }, '분할을 완료하지 못했습니다.');
+assert.equal(jobState.alerts.length, previousAlerts, 'a media timeout should stay in the result status');
+assert.equal(jobState.statuses.at(-1), '분할을 완료하지 못했습니다.');
 let completeJob, overlappingCalls = 0;
 const runningJob = runJob(() => new Promise(resolve => { completeJob = resolve; }), 'fallback');
 await runJob(async () => { overlappingCalls++; }, 'fallback');
 assert.equal(overlappingCalls, 0, 'an active job must not admit a second conversion');
-assert.equal(jobState.releases, 3, 'a blocked job must not release the active engine');
+assert.equal(jobState.releases, 4, 'a blocked job must not release the active engine');
 completeJob();
 await runningJob;
-assert.equal(jobState.releases, 4);
-assert.equal(jobState.hidden, 4);
+assert.equal(jobState.releases, 5);
+assert.equal(jobState.hidden, 5);
 assert.equal(jobState.busy, false);
 console.log('shared result job success, failure and overlap checks passed');
 

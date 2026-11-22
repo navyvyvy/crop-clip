@@ -1,12 +1,13 @@
-import { DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, DEFAULT_SETTINGS, DEFAULT_SHORTCUT_KEYS, FPS_WARNING_VIDEO_BITS_PER_SECOND, MAX_MULTI_REGION_COUNT, MAX_SEEK_SECONDS, MAX_VIDEO_BITS_PER_SECOND, MIN_MULTI_REGION_COUNT, MIN_SEEK_SECONDS, MIN_VIDEO_BITS_PER_SECOND, RECORDING_MODE, RECORDING_STATUS, type AppState, type Settings, type ShortcutAction } from "../shared/types.js";
-import { loadAppState, saveSettings } from "../shared/storage.js";
-import { normalizeRecordingState, normalizeRegion, normalizeRegions, normalizeSettings } from "../shared/normalize.js";
-import type { ContentCommand, MessageResponse, PopupCommand } from "../shared/messages.js";
+import { DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, DEFAULT_SETTINGS, DEFAULT_SHORTCUT_KEYS, FPS_WARNING_VIDEO_BITS_PER_SECOND, MAX_MULTI_REGION_COUNT, MAX_SEEK_SECONDS, MAX_VIDEO_BITS_PER_SECOND, MIN_MULTI_REGION_COUNT, MIN_SEEK_SECONDS, MIN_VIDEO_BITS_PER_SECOND, RECORDING_FORMAT, RECORDING_MODE, RECORDING_STATUS, type AppState, type AutoSplitMode, type Settings, type ShortcutAction } from "../shared/types.js";
+import { loadAppState, updateStoredSettings } from "../shared/storage.js";
+import { normalizeAutoSplitMode, normalizeRecordingState, normalizeRegion, normalizeRegions, normalizeSettings } from "../shared/normalize.js";
+import { UNSUPPORTED_RUNTIME_MESSAGE, type ContentCommand, type MessageResponse, type PopupCommand, type RuntimeMessage, type SettingsPatch } from "../shared/messages.js";
 import { formatRecordingTimer, MILLISECONDS_PER_SECOND } from "../shared/time_range.js";
 
 const elements = {
   versionBadge: document.getElementById("version-badge") as HTMLSpanElement,
   recordingTime: document.getElementById("recording-time") as HTMLParagraphElement,
+  popupError: document.getElementById("popup-error") as HTMLParagraphElement,
   selectRegionButton: document.getElementById("select-region-button") as HTMLButtonElement,
   clearRegionButton: document.getElementById("clear-region-button") as HTMLButtonElement,
   recordToggleButton: document.getElementById("record-toggle-button") as HTMLButtonElement,
@@ -14,11 +15,28 @@ const elements = {
   fullRecordToggleButton: document.getElementById("full-record-toggle-button") as HTMLButtonElement,
   fullScreenshotButton: document.getElementById("full-screenshot-button") as HTMLButtonElement,
   outputFormatInputs: Array.from(document.querySelectorAll<HTMLInputElement>("input[name='output-format']")),
-  multiRegionCountRow: document.getElementById("multi-region-count-row") as HTMLDivElement,
+  recordingCodecInputs: Array.from(document.querySelectorAll<HTMLInputElement>('input[name="recording-codec"]')),
+  hevcCodecLabel: document.getElementById("recording-codec-hevc") as HTMLLabelElement,
   multiRegionCountDecreaseButton: document.getElementById("multi-region-count-decrease-button") as HTMLButtonElement,
   multiRegionCountIncreaseButton: document.getElementById("multi-region-count-increase-button") as HTMLButtonElement,
   multiRegionCountInput: document.getElementById("multi-region-count-input") as HTMLInputElement,
-  seekSecondsRow: document.getElementById("seek-seconds-row") as HTMLDivElement,
+  autoSplitKinds: Array.from(document.querySelectorAll<HTMLInputElement>('input[name="auto-split-kind"]')),
+  autoSplitTimeMode: document.getElementById("auto-split-time-mode") as HTMLSelectElement,
+  autoSplitTimePrevious: document.getElementById("auto-split-time-previous") as HTMLButtonElement,
+  autoSplitTimeNext: document.getElementById("auto-split-time-next") as HTMLButtonElement,
+  autoSplitTimeOptions: document.getElementById("auto-split-time-options") as HTMLDivElement,
+  autoSplitSizeOptions: document.getElementById("auto-split-size-options") as HTMLDivElement,
+  autoSplitFormats: Array.from(document.querySelectorAll<HTMLInputElement>('input[name="auto-split-format"]')),
+  autoSplitThreshold: document.getElementById("auto-split-threshold") as HTMLInputElement,
+  autoSplitThresholdDecrease: document.getElementById("auto-split-threshold-decrease") as HTMLButtonElement,
+  autoSplitThresholdIncrease: document.getElementById("auto-split-threshold-increase") as HTMLButtonElement,
+  autoSplitIntervalRow: document.getElementById("auto-split-interval-row") as HTMLDivElement,
+  autoSplitInterval: document.getElementById("auto-split-interval") as HTMLInputElement,
+  autoSplitIntervalDecrease: document.getElementById("auto-split-interval-decrease") as HTMLButtonElement,
+  autoSplitIntervalIncrease: document.getElementById("auto-split-interval-increase") as HTMLButtonElement,
+  autoSplitMaxMegabytes: document.getElementById("auto-split-max-megabytes") as HTMLInputElement,
+  autoSplitSizeDecrease: document.getElementById("auto-split-size-decrease") as HTMLButtonElement,
+  autoSplitSizeIncrease: document.getElementById("auto-split-size-increase") as HTMLButtonElement,
   seekDecreaseButton: document.getElementById("seek-decrease-button") as HTMLButtonElement,
   seekIncreaseButton: document.getElementById("seek-increase-button") as HTMLButtonElement,
   seekSecondsInput: document.getElementById("seek-seconds-input") as HTMLInputElement,
@@ -26,13 +44,50 @@ const elements = {
   bitrateIncreaseButton: document.getElementById("bitrate-increase-button") as HTMLButtonElement,
   customVideoBitrateInput: document.getElementById("custom-video-bitrate-input") as HTMLInputElement,
   fpsWarning: document.getElementById("fps-warning") as HTMLParagraphElement,
-  shortcutSettingsButton: document.getElementById("shortcut-settings-button") as HTMLButtonElement,
   resetSettingsButton: document.getElementById("reset-settings-button") as HTMLButtonElement,
-  shortcutDialog: document.getElementById("shortcut-dialog") as HTMLDialogElement,
+  shortcutPanel: document.getElementById("shortcut-settings") as HTMLElement,
   shortcutList: document.getElementById("shortcut-list") as HTMLDivElement,
   shortcutResetButton: document.getElementById("shortcut-reset-button") as HTMLButtonElement,
-  shortcutCloseButton: document.getElementById("shortcut-close-button") as HTMLButtonElement,
+  settingsResetDialog: document.getElementById("settings-reset-dialog") as HTMLDialogElement,
+  settingsResetTitle: document.getElementById("settings-reset-title") as HTMLHeadingElement,
+  settingsResetDescription: document.getElementById("settings-reset-description") as HTMLParagraphElement,
 };
+
+const settingsTabs = Array.from(document.querySelectorAll<HTMLButtonElement>(".settings-tabs [role=tab]"), tab => ({
+  tab,
+  panel: document.getElementById(tab.getAttribute("aria-controls") ?? ""),
+}));
+
+function selectSettingsTab(index: number): void {
+  if (waitingShortcutAction && settingsTabs[index].panel !== elements.shortcutPanel) {
+    waitingShortcutAction = null;
+    renderShortcutList();
+  }
+  settingsTabs.forEach(({ tab, panel }, position) => {
+    const selected = position === index;
+    tab.setAttribute("aria-selected", String(selected));
+    tab.tabIndex = selected ? 0 : -1;
+    if (panel) panel.hidden = !selected;
+  });
+  settingsTabs[index].tab.focus();
+}
+
+settingsTabs.forEach(({ tab }, index) => {
+  tab.addEventListener("click", () => selectSettingsTab(index));
+  tab.addEventListener("keydown", event => {
+    const last = settingsTabs.length - 1;
+    const positions: Record<string, number> = {
+      ArrowUp: index === 0 ? last : index - 1,
+      ArrowDown: index === last ? 0 : index + 1,
+      Home: 0,
+      End: last,
+    };
+    const next = positions[event.key];
+    if (next === undefined) return;
+    event.preventDefault();
+    selectSettingsTab(next);
+  });
+});
 
 type ToggleSetting = { [Key in keyof Settings]: Settings[Key] extends boolean ? Key : never }[keyof Settings];
 
@@ -48,6 +103,7 @@ const toggleInputNames = {
   enableStreamerFilename: "streamer-filename-mode",
   autoFocusResult: "auto-focus-result-mode",
   enableAutoDownloadRecording: "auto-download-recording-mode",
+  enableAutoSplitRecording: "auto-split",
   enableAutoDownloadSplit: "auto-download-split-mode",
   enableShortcuts: "shortcut-mode",
 } satisfies Record<ToggleSetting, string>;
@@ -60,8 +116,7 @@ const toggleControls = (Object.keys(toggleInputNames) as ToggleSetting[]).map(se
 const integerControls = [
   {
     setting: "multiRegionMaxCount",
-    enabledBy: "enableMultiRegion",
-    row: elements.multiRegionCountRow,
+    isEnabled: (settings: Settings) => settings.enableMultiRegion,
     input: elements.multiRegionCountInput,
     decrease: elements.multiRegionCountDecreaseButton,
     increase: elements.multiRegionCountIncreaseButton,
@@ -71,8 +126,7 @@ const integerControls = [
   },
   {
     setting: "seekSeconds",
-    enabledBy: "enableSeek",
-    row: elements.seekSecondsRow,
+    isEnabled: (settings: Settings) => settings.enableSeek,
     input: elements.seekSecondsInput,
     decrease: elements.seekDecreaseButton,
     increase: elements.seekIncreaseButton,
@@ -80,12 +134,41 @@ const integerControls = [
     max: MAX_SEEK_SECONDS,
     fallback: DEFAULT_SEEK_SECONDS,
   },
+  {
+    setting: "autoSplitAfterSeconds",
+    isEnabled: (settings: Settings) => settings.enableAutoSplitRecording,
+    input: elements.autoSplitThreshold,
+    decrease: elements.autoSplitThresholdDecrease,
+    increase: elements.autoSplitThresholdIncrease,
+    min: 1,
+    max: Infinity,
+    fallback: undefined,
+  },
+  {
+    setting: "autoSplitIntervalSeconds",
+    isEnabled: (settings: Settings) => settings.enableAutoSplitRecording,
+    input: elements.autoSplitInterval,
+    decrease: elements.autoSplitIntervalDecrease,
+    increase: elements.autoSplitIntervalIncrease,
+    min: 1,
+    max: Infinity,
+    fallback: undefined,
+  },
+  {
+    setting: "autoSplitMaxMegabytes",
+    isEnabled: (settings: Settings) => settings.enableAutoSplitRecording,
+    input: elements.autoSplitMaxMegabytes,
+    decrease: elements.autoSplitSizeDecrease,
+    increase: elements.autoSplitSizeIncrease,
+    min: 1,
+    max: Infinity,
+    fallback: undefined,
+  },
 ] as const;
 
 const controlsLockedDuringRecording = [
   ...elements.outputFormatInputs,
   ...toggleControls.filter(({ setting }) => setting !== "showRecordingSize").flatMap(({ inputs }) => inputs),
-  ...integerControls.flatMap(({ input, decrease, increase }) => [input, decrease, increase]),
   elements.bitrateDecreaseButton,
   elements.bitrateIncreaseButton,
   elements.customVideoBitrateInput,
@@ -122,6 +205,8 @@ let sendingCommand = false;
 let recordingTimerId: number | null = null;
 let recordingSize: { recordingId: string; bytes?: number; pending: boolean } | undefined;
 let waitingShortcutAction: ShortcutAction | null = null;
+let storageRevision = 0;
+let resetScope: "shortcuts" | "all" = "all";
 
 function updateRecordingTimer(): void {
   const { status, startedAt, recordingId, tabId } = appState.recordingState;
@@ -174,9 +259,7 @@ function syncRecordingTimer(): void {
 }
 
 function showError(message = ""): void {
-  if (message) {
-    window.alert(message);
-  }
+  elements.popupError.textContent = message;
 }
 
 function showFpsWarning(settings: Settings): void {
@@ -196,20 +279,49 @@ function formatBitrateMbps(value: number): string {
   return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(1)));
 }
 
-function syncPresetUi(settings: Settings): void {
+type IntegerSetting = typeof integerControls[number]["setting"];
+type NumericSetting = IntegerSetting | "videoBitsPerSecond";
+type OptimisticSetting = NumericSetting | "autoSplitMode";
+
+const pendingSettings = new Map<OptimisticSetting, { value: Settings[OptimisticSetting] }>();
+let lastAutoSplitTimeMode: Exclude<AutoSplitMode, "size"> = "half";
+
+function getVisibleSetting<Key extends OptimisticSetting>(settings: Settings, key: Key, fallback?: Settings[Key]): Settings[Key] {
+  return (pendingSettings.get(key)?.value as Settings[Key] | undefined) ?? fallback ?? settings[key];
+}
+
+function renderBitrateInput(settings: Settings, editingField: Element | null): void {
+  if (elements.customVideoBitrateInput === editingField) return;
+  const value = getVisibleSetting(settings, "videoBitsPerSecond");
+  elements.customVideoBitrateInput.value = formatBitrateMbps(value / BITS_PER_MEGABIT);
+}
+
+function renderAutoSplitMode(): void {
+  const mode = getVisibleSetting(appState.settings, "autoSplitMode");
+  if (mode !== "size") lastAutoSplitTimeMode = mode;
+  for (const input of elements.autoSplitKinds) input.checked = input.value === (mode === "size" ? "size" : "duration");
+  elements.autoSplitTimeMode.value = lastAutoSplitTimeMode;
+  elements.autoSplitTimeOptions.hidden = mode === "size";
+  elements.autoSplitSizeOptions.hidden = mode !== "size";
+  elements.autoSplitIntervalRow.hidden = mode !== "duration";
+}
+
+function syncPresetUi(settings: Settings, editingField: Element | null = null): void {
   for (const input of elements.outputFormatInputs) {
     input.checked = input.value === settings.outputFormat;
   }
+  for (const input of elements.recordingCodecInputs) input.checked = input.value === settings.recordingCodec;
   for (const { setting, inputs } of toggleControls) {
     for (const input of inputs) {
       input.checked = input.value === (settings[setting] ? "on" : "off");
     }
   }
-  for (const { setting, enabledBy, row, input } of integerControls) {
-    row.hidden = !settings[enabledBy];
-    input.value = String(settings[setting]);
+  renderAutoSplitMode();
+  for (const input of elements.autoSplitFormats) input.checked = input.value === settings.autoSplitFormat;
+  for (const { setting, input } of integerControls) {
+    if (input !== editingField) input.value = String(getVisibleSetting(settings, setting));
   }
-  elements.customVideoBitrateInput.value = formatBitrateMbps(settings.videoBitsPerSecond / BITS_PER_MEGABIT);
+  renderBitrateInput(settings, editingField);
   renderShortcutList();
   showFpsWarning(settings);
 }
@@ -225,23 +337,44 @@ function renderState(): void {
   elements.recordToggleButton.classList.toggle("primary", false);
   elements.recordToggleButton.classList.toggle("secondary", true);
   elements.recordToggleButton.classList.toggle("recording", isRegionRecording);
-  elements.fullRecordToggleButton.hidden = !appState.settings.enableFullRecordButton;
+  const showFullRecordButton = appState.settings.enableFullRecordButton || isFullRecording;
+  elements.fullRecordToggleButton.hidden = !showFullRecordButton;
   elements.fullScreenshotButton.hidden = !appState.settings.enableFullScreenshotButton;
-  elements.fullActionRow.hidden = !appState.settings.enableFullRecordButton && !appState.settings.enableFullScreenshotButton;
+  elements.fullActionRow.hidden = !showFullRecordButton && !appState.settings.enableFullScreenshotButton;
   elements.fullRecordToggleButton.disabled = sendingCommand || (isRecording && !isFullRecording);
   elements.fullScreenshotButton.disabled = sendingCommand;
   elements.fullRecordToggleButton.textContent = isFullRecording ? "전체 정지" : "전체 녹화";
-  elements.shortcutSettingsButton.disabled = isRecording || sendingCommand;
+  const shortcutsLocked = isRecording || sendingCommand;
+  if (shortcutsLocked && waitingShortcutAction) {
+    waitingShortcutAction = null;
+    renderShortcutList();
+  }
+  elements.shortcutResetButton.disabled = shortcutsLocked;
+  for (const button of elements.shortcutList.querySelectorAll("button")) {
+    button.disabled = shortcutsLocked;
+  }
   elements.resetSettingsButton.disabled = isRecording || sendingCommand;
 
   for (const control of controlsLockedDuringRecording) {
     control.disabled = isRecording;
   }
+  const hevcFormatAvailable = appState.settings.outputFormat === RECORDING_FORMAT.mp4;
+  elements.hevcCodecLabel.title = hevcFormatAvailable ? "" : "저장 형식을 MP4로 선택하세요.";
+  for (const input of elements.recordingCodecInputs) {
+    input.disabled = isRecording || (input.value === "hevc" && !hevcFormatAvailable);
+  }
+  for (const { isEnabled, input, decrease, increase } of integerControls) {
+    input.disabled = decrease.disabled = increase.disabled = isRecording || !isEnabled(appState.settings);
+  }
+  for (const control of [...elements.autoSplitKinds, ...elements.autoSplitFormats,
+    elements.autoSplitTimeMode, elements.autoSplitTimePrevious, elements.autoSplitTimeNext]) {
+    control.disabled = isRecording || !appState.settings.enableAutoSplitRecording;
+  }
 }
 
 async function stepBitrate(direction: -1 | 1): Promise<void> {
-  const current = Number(elements.customVideoBitrateInput.value);
-  const fallback = appState.settings.videoBitsPerSecond / BITS_PER_MEGABIT;
+  const current = Number(elements.customVideoBitrateInput.value || Number.NaN);
+  const fallback = getVisibleSetting(appState.settings, "videoBitsPerSecond") / BITS_PER_MEGABIT;
   const next = Math.min(
     MAX_VIDEO_MEGABITS_PER_SECOND,
     Math.max(
@@ -251,12 +384,13 @@ async function stepBitrate(direction: -1 | 1): Promise<void> {
   );
 
   elements.customVideoBitrateInput.value = formatBitrateMbps(next);
-  await persistUiSettings();
+  await saveVideoBitrate(Math.round(next * BITS_PER_MEGABIT));
 }
 
-function readIntegerControl({ input, min, max, fallback }: typeof integerControls[number], direction = 0): number {
-  const value = Number(input.value || fallback);
-  const next = (Number.isFinite(value) ? value : fallback) + direction;
+function readIntegerControl({ setting, input, min, max, fallback }: typeof integerControls[number], direction = 0): number {
+  const savedValue = getVisibleSetting(appState.settings, setting, fallback);
+  const value = Number(input.value || savedValue);
+  const next = (Number.isFinite(value) ? value : savedValue) + direction;
   return Math.min(max, Math.max(min, Math.round(next)));
 }
 
@@ -275,30 +409,67 @@ async function sendCommand<T = undefined>(message: PopupCommand): Promise<Messag
 }
 
 async function refreshAppState(): Promise<void> {
-  appState = await loadAppState();
-  syncPresetUi(appState.settings);
+  let revision: number;
+  let state: AppState;
+  do {
+    revision = storageRevision;
+    state = await loadAppState();
+  } while (revision !== storageRevision);
+  appState = state;
+  syncPresetUi(appState.settings, document.activeElement);
   syncRecordingTimer();
   renderState();
 }
 
-function readSettingsFromUi(): Settings {
-  const fallbackBitrateMbps = appState.settings.videoBitsPerSecond / BITS_PER_MEGABIT;
-  const settings = {
-    ...appState.settings,
-    outputFormat: elements.outputFormatInputs.find(input => input.checked)?.value ?? appState.settings.outputFormat,
-    videoBitsPerSecond: Math.round(Number(elements.customVideoBitrateInput.value || fallbackBitrateMbps) * BITS_PER_MEGABIT),
-  };
-  for (const { setting, inputs } of toggleControls) {
-    const selected = inputs.find(input => input.checked);
-    if (selected) settings[setting] = selected.value === "on";
+async function updatePopupSettings(patch: SettingsPatch): Promise<boolean> {
+  showError();
+  try {
+    let response = await chrome.runtime.sendMessage({ type: "UPDATE_SETTINGS", patch } satisfies RuntimeMessage) as MessageResponse;
+    if (!response.ok && response.error === UNSUPPORTED_RUNTIME_MESSAGE) response = await updateStoredSettings(patch);
+    if (!response.ok) throw new Error(response.error);
+    return true;
+  } catch (error) {
+    syncPresetUi(appState.settings, document.activeElement);
+    renderState();
+    showError(error instanceof Error ? error.message : "설정을 저장하지 못했습니다.");
+    return false;
   }
-  for (const control of integerControls) {
-    settings[control.setting] = readIntegerControl(control);
-  }
-  return normalizeSettings(settings);
 }
 
-function renderShortcutList(): void {
+async function saveOptimisticSetting<Key extends OptimisticSetting>(key: Key, value: Settings[Key], render: (saved: boolean) => void): Promise<void> {
+  if (value === getVisibleSetting(appState.settings, key)) return;
+  const edit = { value };
+  pendingSettings.set(key, edit);
+  render(true);
+  const saved = await updatePopupSettings({ [key]: value });
+  if (pendingSettings.get(key) === edit && saved && appState.settings[key] !== value) {
+    await refreshAppState().catch(() => {});
+  }
+  if (pendingSettings.get(key) !== edit) return;
+  pendingSettings.delete(key);
+  render(saved);
+}
+
+function saveNumericSetting(key: NumericSetting, value: number, input: HTMLInputElement, format: (value: number) => string = String): Promise<void> {
+  const submitted = input.value;
+  return saveOptimisticSetting(key, value, saved => {
+    if (input !== document.activeElement || (!saved && input.value === submitted)) {
+      input.value = format(getVisibleSetting(appState.settings, key));
+    }
+  });
+}
+
+function saveVideoBitrate(value: number): Promise<void> {
+  return saveNumericSetting("videoBitsPerSecond", value, elements.customVideoBitrateInput,
+    bits => formatBitrateMbps(bits / BITS_PER_MEGABIT));
+}
+
+function renderShortcutList(focusAction?: string): void {
+  const focused = document.activeElement;
+  if (focused instanceof HTMLButtonElement && elements.shortcutList.contains(focused)) {
+    focusAction ??= focused.dataset.action;
+  }
+  let focusButton: HTMLButtonElement | undefined;
   elements.shortcutList.innerHTML = "";
   for (const action of Object.keys(SHORTCUT_LABELS) as ShortcutAction[]) {
     const isWaiting = waitingShortcutAction === action;
@@ -315,11 +486,12 @@ function renderShortcutList(): void {
     button.dataset.waiting = isWaiting ? "true" : "false";
     button.textContent = isWaiting ? "입력" : appState.settings.shortcutKeys[action].toUpperCase();
     button.title = `${SHORTCUT_LABELS[action]} 단축키 변경`;
+    button.setAttribute("aria-label", `${button.title}, ${button.textContent}`);
     button.addEventListener("click", () => {
       waitingShortcutAction = action;
-      renderShortcutList();
-      elements.shortcutDialog.focus();
+      renderShortcutList(action);
     });
+    if (action === focusAction) focusButton = button;
     controls.appendChild(button);
     if (isWaiting) {
       const cancelButton = document.createElement("button");
@@ -329,14 +501,14 @@ function renderShortcutList(): void {
       cancelButton.title = "단축키 입력 취소";
       cancelButton.addEventListener("click", () => {
         waitingShortcutAction = null;
-        renderShortcutList();
-        elements.shortcutDialog.focus();
+        renderShortcutList(action);
       });
       controls.appendChild(cancelButton);
     }
     row.append(label, controls);
     elements.shortcutList.appendChild(row);
   }
+  focusButton?.focus({ preventScroll: true });
 }
 
 function sanitizeBitrateInput(): void {
@@ -353,42 +525,22 @@ function sanitizeBitrateInput(): void {
     : sanitized;
 }
 
-async function persistUiSettings(): Promise<void> {
-  sanitizeBitrateInput();
-  if (!elements.customVideoBitrateInput.value) {
-    syncPresetUi(appState.settings);
-    return;
-  }
-
-  const value = Number(elements.customVideoBitrateInput.value);
-  if (!Number.isFinite(value) || value < MIN_VIDEO_MEGABITS_PER_SECOND || value > MAX_VIDEO_MEGABITS_PER_SECOND) {
-    syncPresetUi(appState.settings);
-    showBitrateRangeWarning();
-    return;
-  }
-
-  const settings = readSettingsFromUi();
-  appState.settings = settings;
-  await saveSettings(settings);
-  syncPresetUi(settings);
-  renderState();
-}
-
-async function persistBitrateInput(): Promise<void> {
+function persistBitrateInput(commit: boolean): void {
   sanitizeBitrateInput();
   const value = Number(elements.customVideoBitrateInput.value);
-  if (!Number.isFinite(value) || value < MIN_VIDEO_MEGABITS_PER_SECOND || value > MAX_VIDEO_MEGABITS_PER_SECOND) {
+  if (!Number.isFinite(value) || value < MIN_VIDEO_MEGABITS_PER_SECOND) {
+    if (commit) {
+      renderBitrateInput(appState.settings, null);
+      showBitrateRangeWarning();
+    }
     return;
   }
-
-  const settings = readSettingsFromUi();
-  appState.settings = settings;
-  await saveSettings(settings);
-  showFpsWarning(settings);
-  renderState();
+  if (commit) elements.customVideoBitrateInput.value = formatBitrateMbps(value);
+  void saveVideoBitrate(Math.round(value * BITS_PER_MEGABIT));
 }
 
 async function withCommandInFlight<T>(command: () => Promise<T>): Promise<T | undefined> {
+  showError();
   sendingCommand = true;
   renderState();
   try {
@@ -463,30 +615,73 @@ elements.fullScreenshotButton.addEventListener("click", () => {
   });
 });
 
-for (const input of [
-  ...elements.outputFormatInputs,
-  ...toggleControls.flatMap(({ inputs }) => inputs),
-  ...integerControls.map(({ input }) => input),
-  elements.customVideoBitrateInput,
-]) {
+for (const { setting, inputs } of toggleControls) {
+  for (const input of inputs) {
+    input.addEventListener("change", () => {
+      if (input.checked) void updatePopupSettings({ [setting]: input.value === "on" });
+    });
+  }
+}
+
+for (const input of elements.outputFormatInputs) {
   input.addEventListener("change", () => {
-    void persistUiSettings();
+    const value = input.value;
+    if (input.checked && (value === "webm" || value === "mp4")) void updatePopupSettings({ outputFormat: value });
   });
 }
 
-elements.customVideoBitrateInput.addEventListener("input", () => {
-  void persistBitrateInput();
+for (const input of elements.recordingCodecInputs) {
+  input.addEventListener("change", () => {
+    if (input.checked) void updatePopupSettings({ recordingCodec: input.value === "hevc" ? "hevc" : "auto" });
+  });
+}
+
+function chooseAutoSplitMode(value: AutoSplitMode): Promise<void> {
+  return saveOptimisticSetting("autoSplitMode", value, renderAutoSplitMode);
+}
+
+for (const input of elements.autoSplitKinds) {
+  input.addEventListener("change", () => {
+    if (input.checked) void chooseAutoSplitMode(input.value === "size" ? "size" : lastAutoSplitTimeMode);
+  });
+}
+
+elements.autoSplitTimeMode.addEventListener("change", () => {
+  void chooseAutoSplitMode(normalizeAutoSplitMode(elements.autoSplitTimeMode.value));
 });
 
+function stepAutoSplitTimeMode(direction: -1 | 1): void {
+  const select = elements.autoSplitTimeMode;
+  const next = (select.selectedIndex + direction + select.length) % select.length;
+  void chooseAutoSplitMode(normalizeAutoSplitMode(select.options[next].value));
+}
+
+elements.autoSplitTimePrevious.addEventListener("click", () => stepAutoSplitTimeMode(-1));
+elements.autoSplitTimeNext.addEventListener("click", () => stepAutoSplitTimeMode(1));
+
+for (const input of elements.autoSplitFormats) {
+  input.addEventListener("change", () => {
+    if (input.checked) void updatePopupSettings({ autoSplitFormat: input.value === "webm" ? "webm" : "mp4" });
+  });
+}
+
+elements.customVideoBitrateInput.addEventListener("input", () => persistBitrateInput(false));
+elements.customVideoBitrateInput.addEventListener("change", () => persistBitrateInput(true));
+
 for (const control of integerControls) {
-  control.decrease.addEventListener("click", () => {
-    control.input.value = String(readIntegerControl(control, -1));
-    void persistUiSettings();
+  const save = (direction = 0) => {
+    const value = readIntegerControl(control, direction);
+    control.input.value = String(value);
+    void saveNumericSetting(control.setting, value, control.input);
+  };
+  control.input.addEventListener("change", () => save());
+  control.input.addEventListener("keydown", event => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    control.input.blur();
   });
-  control.increase.addEventListener("click", () => {
-    control.input.value = String(readIntegerControl(control, 1));
-    void persistUiSettings();
-  });
+  control.decrease.addEventListener("click", () => save(-1));
+  control.increase.addEventListener("click", () => save(1));
 }
 
 elements.bitrateDecreaseButton.addEventListener("click", () => {
@@ -497,29 +692,16 @@ elements.bitrateIncreaseButton.addEventListener("click", () => {
   void stepBitrate(1);
 });
 
-elements.shortcutSettingsButton.addEventListener("click", () => {
-  waitingShortcutAction = null;
-  renderShortcutList();
-  elements.shortcutDialog.showModal();
-  elements.shortcutDialog.focus();
-});
-
-elements.shortcutCloseButton.addEventListener("click", () => {
-  waitingShortcutAction = null;
-  elements.shortcutDialog.close();
-});
-
-elements.shortcutDialog.addEventListener("cancel", (event) => {
-  if (!waitingShortcutAction) return;
-  event.preventDefault();
-  waitingShortcutAction = null;
-  renderShortcutList();
-  elements.shortcutDialog.focus();
-});
-
-elements.shortcutDialog.addEventListener("keydown", (event) => {
+elements.shortcutPanel.addEventListener("keydown", (event) => {
+  const action = waitingShortcutAction;
+  if (!action || event.key === "Tab") return;
   event.stopPropagation();
-  if (!waitingShortcutAction || event.key === "Escape" || event.key === "Tab") return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    waitingShortcutAction = null;
+    renderShortcutList(action);
+    return;
+  }
   if ((event.key === "Enter" || event.key === " ") && event.target instanceof HTMLButtonElement) return;
 
   const key = event.key.toLowerCase();
@@ -528,47 +710,37 @@ elements.shortcutDialog.addEventListener("keydown", (event) => {
     return;
   }
 
-  const used = Object.entries(appState.settings.shortcutKeys).find(([action, value]) => action !== waitingShortcutAction && value === key);
+  const used = Object.entries(appState.settings.shortcutKeys).some(([other, value]) => other !== action && value === key);
   if (used) {
-    window.alert("이미 사용 중인 단축키입니다.");
+    showError("이미 사용 중인 단축키입니다.");
     event.preventDefault();
     return;
   }
 
-  void (async () => {
-    appState.settings = normalizeSettings({
-      ...appState.settings,
-      shortcutKeys: { ...appState.settings.shortcutKeys, [waitingShortcutAction]: key },
-    });
-    waitingShortcutAction = null;
-    await saveSettings(appState.settings);
-    syncPresetUi(appState.settings);
-    renderState();
-  })();
+  waitingShortcutAction = null;
+  renderShortcutList(action);
+  void updatePopupSettings({ shortcutKeys: { [action]: key } });
   event.preventDefault();
 });
 
-elements.shortcutResetButton.addEventListener("click", () => {
-  void (async () => {
-    waitingShortcutAction = null;
-    appState.settings = normalizeSettings({ ...appState.settings, shortcutKeys: DEFAULT_SHORTCUT_KEYS });
-    await saveSettings(appState.settings);
-    syncPresetUi(appState.settings);
-    renderState();
-  })();
-});
+function confirmSettingsReset(scope: typeof resetScope): void {
+  resetScope = scope;
+  elements.settingsResetTitle.textContent = scope === "all" ? "전체 설정 초기화" : "단축키 초기화";
+  elements.settingsResetDescription.textContent = scope === "all"
+    ? "CropClip 설정을 모두 기본값으로 되돌릴까요?"
+    : "설정한 단축키를 모두 기본값으로 되돌릴까요?";
+  elements.settingsResetDialog.returnValue = "";
+  elements.settingsResetDialog.showModal();
+}
 
-elements.resetSettingsButton.addEventListener("click", () => {
-  void (async () => {
-    if (!window.confirm("CropClip 설정을 전체 초기화할까요?")) {
-      return;
-    }
-    waitingShortcutAction = null;
-    appState.settings = normalizeSettings(DEFAULT_SETTINGS);
-    await saveSettings(appState.settings);
-    syncPresetUi(appState.settings);
-    renderState();
-  })();
+elements.shortcutResetButton.addEventListener("click", () => confirmSettingsReset("shortcuts"));
+elements.resetSettingsButton.addEventListener("click", () => confirmSettingsReset("all"));
+
+elements.settingsResetDialog.addEventListener("close", () => {
+  if (elements.settingsResetDialog.returnValue !== "reset" || elements.resetSettingsButton.disabled) return;
+  waitingShortcutAction = null;
+  renderShortcutList();
+  void updatePopupSettings(resetScope === "all" ? DEFAULT_SETTINGS : { shortcutKeys: DEFAULT_SHORTCUT_KEYS });
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -576,13 +748,10 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     return;
   }
 
+  if (changes.settings || changes.region || changes.regions || changes.recordingState) storageRevision++;
   if (changes.settings) {
     appState.settings = normalizeSettings(changes.settings.newValue);
-    if (document.activeElement !== elements.customVideoBitrateInput) {
-      syncPresetUi(appState.settings);
-    } else {
-      showFpsWarning(appState.settings);
-    }
+    syncPresetUi(appState.settings, document.activeElement);
   }
 
   if (changes.region) {
@@ -594,7 +763,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 
   if (changes.recordingState) {
-    appState.recordingState = normalizeRecordingState(changes.recordingState.newValue as Partial<AppState["recordingState"]> | undefined);
+    appState.recordingState = normalizeRecordingState(changes.recordingState.newValue);
     syncRecordingTimer();
   } else if (changes.settings) {
     updateRecordingTimer();
@@ -603,4 +772,4 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   renderState();
 });
 
-void refreshAppState();
+void refreshAppState().catch(() => showError("설정을 불러오지 못했습니다."));

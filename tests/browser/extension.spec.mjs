@@ -1,4 +1,7 @@
 import { test, expect, prepareVideo, interceptDownloads, decodeDownloads, expectResultResourcesReleased } from './fixtures.mjs';
+import { chromium } from '@playwright/test';
+import { mkdir } from 'node:fs/promises';
+import path from 'node:path';
 
 for (const format of ['webm', 'mp4']) {
   test(`${format} stop releases capture immediately while messages and storage are delayed`, async ({ extension }) => {
@@ -226,13 +229,30 @@ test('recording timers wait for capture and keep size visible after original fal
       return post.call(this, message, ...args);
     };
   });
-  await prepareVideo(page);
+  await prepareVideo(page, 1920, 1080, 5200);
   await page.evaluate(() => history.pushState({}, '', '/live/timing-fixture'));
   const popup = await context.newPage();
   await popup.goto(`chrome-extension://${new URL(worker.url()).host}/popup/popup.html`);
   await worker.evaluate(async () => {
     await chrome.storage.local.set({ settings: {
       enableShortcuts: true, enableFullRecordButton: true, enableOriginalStreamRecording: true, showRecordingSize: true,
+      customVideoBitsPerSecond: 2_000_000, videoBitsPerSecond: 8_500_000,
+    } });
+    const [tab] = await chrome.tabs.query({ url: 'https://chzzk.naver.com/live/timing-fixture' });
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => {
+      const Recorder = MediaRecorder;
+      window.MediaRecorder = class extends Recorder {
+        constructor(stream, options) {
+          super(stream, options);
+          document.documentElement.dataset.fallbackVideoBitrate = `${options.videoBitsPerSecond}/${this.videoBitsPerSecond}`;
+          const dataset = document.documentElement.dataset;
+          dataset.screenRecorders = String(Number(dataset.screenRecorders ?? '0') + 1);
+        }
+        start(...args) {
+          document.documentElement.dataset.timingRecorderReady = '';
+          document.addEventListener('cropclip-test-start', () => super.start(...args), { once: true });
+        }
+      };
     } });
     const execute = chrome.scripting.executeScript.bind(chrome.scripting);
     chrome.scripting.executeScript = options => {
@@ -265,14 +285,23 @@ test('recording timers wait for capture and keep size visible after original fal
   } finally {
     await worker.evaluate(() => { globalThis.releaseCaptureStart(); });
   }
+  await expect(page.locator('html')).toHaveAttribute('data-timing-recorder-ready', '');
+  await expect(page.locator('html')).toHaveAttribute('data-fallback-video-bitrate', '8500000/8500000');
+  await page.waitForTimeout(1_100);
+  await expect(popupTime).toHaveText('시작 중');
+  await expect(playerTime).toHaveText('시작 중');
+  await page.evaluate(() => document.dispatchEvent(new Event('cropclip-test-start')));
   const runningWithSize = /^약 (?!0\.0 MB)[\d.]+ MB · (?!00:00)\d+:\d+$/;
   await expect(playerTime).toHaveText(runningWithSize);
   await expect(popupTime).toHaveText(runningWithSize);
   expect(await worker.evaluate(() => Boolean(globalThis.failOriginalProbe))).toBe(true);
+  await expect(page.locator('html')).toHaveAttribute('data-screen-recorders', '1');
   const startedAt = await worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState.startedAt);
   await worker.evaluate(() => { globalThis.failOriginalProbe(); });
   const feedback = page.locator('#crop-clip-seek-feedback');
-  await expect(feedback).toHaveText(/화면 녹화 중 · (WebM|MP4)\s+Injected original lookup failure/);
+  await expect(feedback).toHaveText(/화면 녹화 중 · WebM\s+Injected original lookup failure/);
+  await expect(page.locator('html')).toHaveAttribute('data-screen-recorders', '1');
+  await expect(page.locator('html')).toHaveAttribute('data-fallback-video-bitrate', '8500000/8500000');
   expect((await feedback.textContent()).split('\n')).toHaveLength(2);
   await expect(feedback).toHaveCSS('white-space', 'pre-line');
   expect(await worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState.startedAt)).toBe(startedAt);
@@ -287,6 +316,14 @@ test('recording timers wait for capture and keep size visible after original fal
     await expect(playerTime).toHaveText(expected);
     await expect(popupTime).toHaveText(expected);
   }
+  for (const timer of [playerTime, popupTime]) {
+    await expect.poll(() => timer.evaluate((element, start) => {
+      const match = /(\d+):(\d+)$/.exec(element.textContent);
+      if (!match) return Infinity;
+      const displayed = Number(match[1]) * 60 + Number(match[2]);
+      return Math.abs(displayed - Math.floor((Date.now() - start) / 1_000));
+    }, startedAt)).toBeLessThanOrEqual(1);
+  }
   const opened = context.waitForEvent('page');
   await page.keyboard.press('e');
   const result = await opened;
@@ -296,13 +333,24 @@ test('recording timers wait for capture and keep size visible after original fal
       const id = new URL(location.href).searchParams.get('id');
       const [part] = await getPartsByRecordingId(id);
       const recording = await getRecording(id);
-      return { createdAt: recording.createdAt, captureMethod: part.captureMethod };
+      const date = new Date(recording.createdAt);
+      const pad = value => String(value).padStart(2, '0');
+      const timestamp = `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}_${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+      return { createdAt: recording.createdAt, captureMethod: part.captureMethod, extension: part.extension, size: part.blob.size,
+        videoBitsPerSecond: part.videoBitsPerSecond, filename: part.filename, timestamp };
     });
-    expect(saved).toEqual({ createdAt: startedAt, captureMethod: 'screen' });
+    expect(saved).toMatchObject({ createdAt: startedAt, captureMethod: 'screen', extension: 'webm', videoBitsPerSecond: 8_500_000 });
+    expect(saved.size).toBeGreaterThan(0);
+    expect(saved.filename).toBe(`cropClip_${saved.timestamp}.webm`);
   } finally {
     await result.evaluate(() => window.resumeResultPreparation());
   }
   await expect(result.locator('#result-loading')).toBeHidden({ timeout: 30_000 });
+  await expect(result.locator('#preview-video')).toBeVisible();
+  await expect.poll(() => result.locator('#preview-video').evaluate(video => [video.videoWidth, video.videoHeight])).toEqual([1920, 1080]);
+  const saving = result.waitForEvent('download');
+  await result.locator('#download-current-button').click();
+  expect((await saving).suggestedFilename()).toMatch(/\.webm$/);
   await expect(playerTime).toHaveCount(0);
   await expect(popupTime).toBeEmpty();
 });
@@ -328,7 +376,7 @@ test('MP4 recording, splitting, speed, GIF and frame exports work', async ({ ext
   await interceptDownloads(result);
   for (const format of ['mp4', 'webm']) {
     await result.locator('#split-format-select').selectOption(format);
-    await result.locator('[data-split-ratio="0.5"]').click();
+    await result.locator('[data-split-count="2"]').click();
     await result.locator('#split-button').click();
     await expect(result.locator('#split-result-summary')).toHaveText('나눈 파일 (2개)', { timeout: 30_000 });
     await expect(result.locator('#split-button')).toBeEnabled();
@@ -397,25 +445,130 @@ test('MP4 recording, splitting, speed, GIF and frame exports work', async ({ ext
   await expectResultResourcesReleased(result, retainedUrls);
 });
 
-test('shortcut dialog supports keyboard navigation and cancelling key entry', async ({ extension }) => {
+test('the browser action popup opens at full height', async () => {
+  const directory = path.resolve(process.env.CROPCLIP_TEST_EXTENSION_DIR || 'dist');
+  const context = await chromium.launchPersistentContext('', {
+    channel: process.env.CROPCLIP_TEST_BROWSER || 'chromium',
+    headless: true,
+    viewport: null,
+    args: [`--load-extension=${directory}`, `--disable-extensions-except=${directory}`, '--window-size=1280,900'],
+  });
+  try {
+    const worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker');
+    const host = context.pages()[0] ?? await context.newPage();
+    const cdp = await context.newCDPSession(host);
+    await worker.evaluate(() => chrome.action.openPopup());
+    const popupUrl = new URL('../popup/popup.html', worker.url()).href;
+    const findPopup = async () => (await cdp.send('Target.getTargets')).targetInfos.find(target => target.url === popupUrl);
+    await expect.poll(findPopup).toBeDefined();
+    const { targetId } = await findPopup();
+    const { sessionId } = await cdp.send('Target.attachToTarget', { targetId });
+    let requestId = 0;
+    const readSize = () => new Promise((resolve, reject) => {
+      const id = ++requestId;
+      const finish = () => {
+        clearTimeout(timeout);
+        cdp.off('Target.receivedMessageFromTarget', onMessage);
+      };
+      const onMessage = ({ sessionId: sender, message }) => {
+        if (sender !== sessionId) return;
+        const response = JSON.parse(message);
+        if (response.id !== id) return;
+        finish();
+        resolve(response.result?.result?.value);
+      };
+      const timeout = setTimeout(() => {
+        finish();
+        reject(new Error('The browser action popup did not report its dimensions.'));
+      }, 5_000);
+      cdp.on('Target.receivedMessageFromTarget', onMessage);
+      void cdp.send('Target.sendMessageToTarget', {
+        sessionId,
+        message: JSON.stringify({
+          id,
+          method: 'Runtime.evaluate',
+          params: {
+            expression: `(() => {
+              const root = document.documentElement.getBoundingClientRect();
+              const body = document.body?.getBoundingClientRect();
+              const panel = document.querySelector('.panel')?.getBoundingClientRect();
+              return {
+                requestedWidth: root.width,
+                requestedHeight: root.height,
+                bodyFits: body?.width === Math.min(640, innerWidth) && body?.height === Math.min(560, innerHeight),
+                settingsVisible: !!panel && panel.height > 350 && panel.right <= innerWidth && panel.bottom <= innerHeight,
+              };
+            })()`,
+            returnByValue: true,
+          },
+        }),
+      }).catch(error => {
+        finish();
+        reject(error);
+      });
+    });
+    await expect.poll(readSize).toEqual({ requestedWidth: 640, requestedHeight: 560, bodyFits: true, settingsVisible: true });
+  } finally {
+    await context.close();
+  }
+});
+
+test('shortcut tab supports navigation, changing keys and cancelling key entry', async ({ extension }) => {
   const { context, worker } = extension;
   const popup = await context.newPage();
   await popup.goto(`chrome-extension://${new URL(worker.url()).host}/popup/popup.html`);
   await expect(popup.locator('input[name="shortcut-mode"][value="on"]')).toBeChecked();
-  await popup.locator('#shortcut-settings-button').click();
-  const dialog = popup.locator('#shortcut-dialog');
-  const key = dialog.locator('[data-action="regionRecord"]');
+  const shortcutTab = popup.getByRole('tab', { name: '단축키', exact: true });
+  await shortcutTab.click();
+  const panel = popup.getByRole('tabpanel', { name: '단축키' });
+  const key = panel.locator('[data-action="regionRecord"]');
+  const columns = await panel.locator('#shortcut-list').evaluate(list => getComputedStyle(list).gridTemplateColumns.split(' '));
+  expect(columns).toHaveLength(2);
+  expect(await panel.evaluate(tab => tab.scrollHeight - tab.clientHeight)).toBe(0);
   await key.focus();
   await popup.keyboard.press('Tab');
-  await expect(dialog.locator('[data-action="cancelRecording"]')).toBeFocused();
+  await expect(panel.locator('[data-action="cancelRecording"]')).toBeFocused();
   await key.focus();
   await popup.keyboard.press('Enter');
   await expect(key).toHaveText('입력');
+  await popup.keyboard.press('Tab');
+  await expect(panel.getByRole('button', { name: '취소', exact: true })).toBeFocused();
   await popup.keyboard.press('Escape');
-  await expect(dialog).toBeVisible();
+  await expect(panel).toBeVisible();
+  await expect(key).toBeFocused();
   await expect(key).toHaveText('R');
-  await popup.keyboard.press('Escape');
-  await expect(dialog).not.toBeVisible();
+  await key.press('Enter');
+  await key.press('q');
+  await expect(key).toHaveText('Q');
+  await expect(key).toBeFocused();
+  await key.press('Enter');
+  await popup.getByRole('tab', { name: '녹화', exact: true }).click();
+  await shortcutTab.click();
+  await expect(key).toHaveText('Q');
+  const reset = panel.getByRole('button', { name: '단축키 초기화' });
+  const resetBox = await reset.boundingBox();
+  const toggleBox = await panel.getByRole('radiogroup', { name: '단축키 사용' }).boundingBox();
+  expect(resetBox.x + resetBox.width).toBeLessThan(toggleBox.x);
+  expect(Math.abs(resetBox.y + resetBox.height / 2 - toggleBox.y - toggleBox.height / 2)).toBeLessThan(1);
+  const background = await reset.evaluate(button => getComputedStyle(button).backgroundColor);
+  await reset.hover();
+  await expect.poll(() => reset.evaluate(button => getComputedStyle(button).backgroundColor)).not.toBe(background);
+  expect((await reset.boundingBox()).y).toBe(resetBox.y);
+  const confirmReset = popup.getByRole('dialog', { name: '단축키 초기화' });
+  await reset.click();
+  await expect(confirmReset).toBeVisible();
+  await expect(confirmReset.getByRole('button', { name: '취소' })).toBeFocused();
+  await confirmReset.getByRole('button', { name: '취소' }).click();
+  await expect(confirmReset).toBeHidden();
+  await expect(key).toHaveText('Q');
+  await reset.click();
+  await confirmReset.getByRole('button', { name: '초기화', exact: true }).click();
+  await expect(key).toHaveText('R');
+  await key.press('Enter');
+  await worker.evaluate(() => chrome.storage.local.set({ recordingState: { status: 'recording', mode: 'full' } }));
+  await expect(key).toBeDisabled();
+  await expect(key).toHaveText('R');
+  await expect(panel.getByRole('button', { name: '단축키 초기화' })).toBeDisabled();
 });
 
 test('missing and malformed settings recover in the popup and player', async ({ extension }) => {
@@ -433,9 +586,161 @@ test('missing and malformed settings recover in the popup and player', async ({ 
   await expect(popup.locator('input[name="fps-mode"][value="off"]')).toBeChecked();
   await expect(popup.locator('#seek-seconds-input')).toHaveValue('60');
   await expect(page.locator('#crop-clip-chzzk-record-button')).toBeVisible();
+  await worker.evaluate(() => chrome.storage.local.set({ region: { x: 100, y: 100, width: 400, height: 200 } }));
+  await expect(page.locator('.crop-clip-border')).toBeVisible();
   await page.reload(); // Initial state and storage updates use the same normalization.
   await expect(page.locator('#crop-clip-chzzk-record-button')).toBeVisible();
+  await expect.poll(() => worker.evaluate(() => chrome.storage.local.get(['region', 'regions'])))
+    .toEqual({ region: null, regions: [] });
   await expect(popup.locator('#custom-video-bitrate-input')).toHaveValue('6');
+});
+
+test('settings updates preserve an unfinished bitrate edit and other preferences', async ({ extension }) => {
+  const { context, worker, page } = extension;
+  const popup = await context.newPage();
+  await popup.goto(`chrome-extension://${new URL(worker.url()).host}/popup/popup.html`);
+  const bitrate = popup.locator('#custom-video-bitrate-input');
+  await expect(bitrate).toHaveValue('6');
+  await bitrate.fill('0.');
+  const screenshotToggle = popup.locator('input[name="full-screenshot-mode"][value="on"]');
+  await worker.evaluate(async () => {
+    const { settings } = await chrome.storage.local.get('settings');
+    await chrome.storage.local.set({ settings: { ...settings, enableFullScreenshotButton: true } });
+  });
+  await expect(page.locator('#crop-clip-chzzk-screenshot-button')).toBeVisible();
+  await expect(screenshotToggle).toBeChecked();
+  await expect(bitrate).toHaveValue('0.');
+  await popup.getByRole('tab', { name: '플레이어' }).click();
+  await popup.locator('label:has(input[name="seek-button-mode"][value="on"])').click();
+  await expect.poll(() => worker.evaluate(async () => {
+    const { settings } = await chrome.storage.local.get('settings');
+    return { seek: settings.enableSeek, screenshot: settings.enableFullScreenshotButton, bitrate: settings.videoBitsPerSecond };
+  })).toEqual({ seek: true, screenshot: true, bitrate: 6_000_000 });
+
+  const secondPopup = await context.newPage();
+  await secondPopup.goto(popup.url());
+  const replies = await Promise.all([
+    popup.evaluate(() => chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', patch: { enable60fps: true } })),
+    secondPopup.evaluate(() => chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', patch: { autoSplitAfterSeconds: 52 } })),
+  ]);
+  expect(replies).toEqual([{ ok: true }, { ok: true }]);
+  await expect(popup.locator('input[name="fps-mode"][value="on"]')).toBeChecked();
+  await expect(secondPopup.locator('#auto-split-threshold')).toHaveValue('52');
+  await expect(secondPopup.locator('input[name="full-screenshot-mode"][value="on"]')).toBeChecked();
+
+  const reset = secondPopup.getByRole('button', { name: '전체 초기화' });
+  await reset.click();
+  const confirmReset = secondPopup.getByRole('dialog', { name: '전체 설정 초기화' });
+  await confirmReset.getByRole('button', { name: '취소' }).click();
+  await expect(secondPopup.locator('#auto-split-threshold')).toHaveValue('52');
+  await reset.click();
+  await confirmReset.getByRole('button', { name: '초기화', exact: true }).click();
+  await expect(secondPopup.locator('#auto-split-threshold')).toHaveValue('35');
+  await expect(popup.locator('input[name="fps-mode"][value="off"]')).toBeChecked();
+  await expect(page.locator('#crop-clip-chzzk-screenshot-button')).toHaveCount(0);
+});
+
+test('rapid bitrate increases keep the latest value while storage catches up', async ({ extension }) => {
+  const { context, worker } = extension;
+  const popup = await context.newPage();
+  await popup.goto(`chrome-extension://${new URL(worker.url()).host}/popup/popup.html`);
+  const bitrate = popup.locator('#custom-video-bitrate-input');
+  const increase = popup.getByRole('button', { name: '비트레이트 증가' });
+  await expect(bitrate).toHaveValue('6');
+  await worker.evaluate(() => {
+    const set = chrome.storage.local.set.bind(chrome.storage.local);
+    chrome.storage.local.set = async items => {
+      if (items.settings?.videoBitsPerSecond === 7_000_000) {
+        chrome.storage.local.set = set;
+        await new Promise(resolve => { globalThis.releaseBitrateStep = resolve; });
+      }
+      return set(items);
+    };
+  });
+  await increase.evaluate(button => { button.click(); button.click(); });
+  await expect.poll(() => worker.evaluate(() => Boolean(globalThis.releaseBitrateStep))).toBe(true);
+  try {
+    await expect(bitrate).toHaveValue('7');
+    await increase.click();
+    await expect(bitrate).toHaveValue('7.5');
+  } finally {
+    await worker.evaluate(() => globalThis.releaseBitrateStep());
+  }
+  await expect.poll(() => worker.evaluate(async () => (await chrome.storage.local.get('settings')).settings.videoBitsPerSecond)).toBe(7_500_000);
+  await popup.reload();
+  await expect(bitrate).toHaveValue('7.5');
+});
+
+test('failed bitrate saves restore the value shown in the focused input', async ({ extension }) => {
+  const { context, worker } = extension;
+  const popup = await context.newPage();
+  await popup.goto(`chrome-extension://${new URL(worker.url()).host}/popup/popup.html`);
+  await worker.evaluate(() => {
+    const set = chrome.storage.local.set.bind(chrome.storage.local);
+    chrome.storage.local.set = items => {
+      if (items.settings?.videoBitsPerSecond === 16_000_000) return Promise.reject(new Error('Injected bitrate write failure'));
+      return set(items);
+    };
+  });
+  const bitrate = popup.locator('#custom-video-bitrate-input');
+  await expect(bitrate).toHaveValue('6');
+  await bitrate.fill('16');
+  await expect(popup.locator('#popup-error')).toContainText('Injected bitrate write failure');
+  await expect(bitrate).toBeFocused();
+  await expect(bitrate).toHaveValue('6');
+});
+
+test('rapid automatic split threshold steps keep the latest value', async ({ extension }) => {
+  const { context, worker } = extension;
+  await worker.evaluate(async () => {
+    const { settings } = await chrome.storage.local.get('settings');
+    await chrome.storage.local.set({ settings: { ...settings, enableAutoSplitRecording: true } });
+    const set = chrome.storage.local.set.bind(chrome.storage.local);
+    chrome.storage.local.set = async items => {
+      if (items.settings?.autoSplitAfterSeconds === 37) {
+        chrome.storage.local.set = set;
+        await new Promise(resolve => { globalThis.releaseThresholdWrite = resolve; });
+      }
+      return set(items);
+    };
+  });
+  const popup = await context.newPage();
+  await popup.goto(`chrome-extension://${new URL(worker.url()).host}/popup/popup.html`);
+  await popup.getByRole('tab', { name: '저장·분할' }).click();
+  const threshold = popup.locator('#auto-split-threshold');
+  const increase = popup.locator('#auto-split-threshold-increase');
+  await expect(threshold).toHaveValue('35');
+  await increase.evaluate(button => { button.click(); button.click(); });
+  await expect.poll(() => worker.evaluate(() => Boolean(globalThis.releaseThresholdWrite))).toBe(true);
+  try {
+    await expect(threshold).toHaveValue('37');
+    await increase.click();
+    await expect(threshold).toHaveValue('38');
+  } finally {
+    await worker.evaluate(() => globalThis.releaseThresholdWrite());
+  }
+  await expect.poll(() => worker.evaluate(async () => (await chrome.storage.local.get('settings')).settings.autoSplitAfterSeconds)).toBe(38);
+});
+
+test('popup settings work with an older background that cannot update settings', async ({ extension }) => {
+  const { context, worker } = extension;
+  const popup = await context.newPage();
+  await popup.goto(`chrome-extension://${new URL(worker.url()).host}/popup/popup.html`);
+  await popup.evaluate(() => {
+    const send = chrome.runtime.sendMessage.bind(chrome.runtime);
+    chrome.runtime.sendMessage = (message, ...args) => message?.type === 'UPDATE_SETTINGS'
+      ? Promise.resolve({ ok: false, error: '지원하지 않는 메시지입니다.' }) : send(message, ...args);
+  });
+  await popup.getByRole('tab', { name: '저장·분할' }).click();
+  await popup.locator('label:has(input[name="auto-split"][value="on"])').click();
+  const size = popup.locator('label:has(input[name="auto-split-kind"][value="size"])');
+  await expect(size.locator('input')).toBeEnabled();
+  await size.click();
+  await expect(popup.getByRole('spinbutton', { name: '파일당 최대 용량' })).toBeVisible();
+  await popup.getByRole('button', { name: '파일당 최대 용량 늘리기' }).click();
+  await expect.poll(() => worker.evaluate(async () => (await chrome.storage.local.get('settings')).settings))
+    .toMatchObject({ enableAutoSplitRecording: true, autoSplitMode: 'size', autoSplitMaxMegabytes: 41, enableShortcuts: true });
+  await expect(popup.locator('#popup-error')).toBeEmpty();
 });
 
 test('popup settings persist and only the recording size toggle stays editable during capture', async ({ extension }) => {
@@ -446,23 +751,186 @@ test('popup settings persist and only the recording size toggle stays editable d
   const readSettings = () => worker.evaluate(async () => (await chrome.storage.local.get('settings')).settings);
   await expect(popup.locator('input[name="shortcut-mode"][value="on"]')).toBeChecked();
 
+  const regionCount = popup.locator('#multi-region-count-input');
+  await expect(regionCount).toBeVisible();
+  await expect(regionCount).toBeDisabled();
   await popup.locator('label:has(input[name="multi-region-mode"][value="on"])').click();
   await expect(popup.locator('#multi-region-count-row')).toBeVisible();
+  await expect(popup.locator('#recording-settings > :last-child')).toHaveAttribute('id', 'multi-region-count-row');
   await popup.locator('#multi-region-count-increase-button').click();
   await expect.poll(async () => (await readSettings()).multiRegionMaxCount).toBe(3);
-  await popup.locator('label:has(input[name="seek-button-mode"][value="on"])').click();
+  const choose = (name, value) => popup.locator(`label:has(input[name="${name}"][value="${value}"])`).click();
+  await choose('output-format', 'mp4');
+  for (const name of ['original-stream-mode', 'fps-mode', 'muted-recording-mode', 'streamer-filename-mode']) await choose(name, 'on');
+  const bitrate = popup.locator('#custom-video-bitrate-input');
+  await bitrate.fill('8.5');
+  await bitrate.press('Tab');
+  const recordingTab = popup.getByRole('tab', { name: '녹화', exact: true });
+  const playerTab = popup.getByRole('tab', { name: '플레이어' });
+  const savingTab = popup.getByRole('tab', { name: '저장·분할' });
+  await recordingTab.press('ArrowDown');
+  await expect(playerTab).toBeFocused();
+  await expect(playerTab).toHaveAttribute('aria-selected', 'true');
+  await choose('full-record-mode', 'off');
+  await choose('full-screenshot-mode', 'on');
   const seekSeconds = popup.locator('#seek-seconds-input');
+  await expect(seekSeconds).toBeVisible();
+  await expect(seekSeconds).toBeDisabled();
+  await popup.locator('label:has(input[name="seek-button-mode"][value="on"])').click();
   await seekSeconds.fill('999');
   await seekSeconds.press('Tab');
   await expect(seekSeconds).toHaveValue('60');
   await popup.locator('#seek-decrease-button').click();
   await expect.poll(async () => (await readSettings()).seekSeconds).toBe(59);
+  await savingTab.click();
+  const splitMode = popup.locator('#auto-split-mode-row');
+  const timeSplit = popup.getByRole('combobox', { name: '시간 나누기' });
+  const splitLayout = () => splitMode.evaluate(group => {
+    const panel = group.closest('.settings-group');
+    return {
+      popupHeight: document.body.clientHeight, panelHeight: panel.clientHeight,
+      horizontalOverflow: panel.scrollWidth - panel.clientWidth,
+    };
+  });
+  await expect(splitMode).toBeVisible();
+  await expect(timeSplit).toBeDisabled();
+  const initialSplitLayout = await splitLayout();
+  await choose('auto-download-recording-mode', 'on');
+  await expect.poll(async () => (await readSettings()).enableAutoDownloadRecording).toBe(true);
+  await popup.locator('label:has(input[name="auto-split"][value="on"])').click();
+  const splitFormat = popup.getByRole('radiogroup', { name: '분할 저장 형식' });
+  await expect(timeSplit).toHaveValue('half');
+  await expect(timeSplit).toBeEnabled();
+  await expect(splitMode.locator('input[name="auto-split-kind"][value="duration"]')).toBeChecked();
+  await expect(timeSplit.getByRole('option')).toHaveText(['절반', '3분할', '4분할', '직접 입력']);
+  await expect(popup.locator('#auto-split-interval-row')).toBeHidden();
+  await expect(splitFormat.getByRole('radio', { name: 'MP4' })).toBeChecked();
+  expect(await splitLayout()).toEqual(initialSplitLayout);
+  const formatPosition = () => splitFormat.evaluate(select => {
+    const bounds = select.getBoundingClientRect();
+    return { x: bounds.x, width: bounds.width, height: bounds.height, offset: select.offsetTop };
+  });
+  const initialFormatPosition = await formatPosition();
+  const timeBounds = await popup.locator('.split-time-picker').boundingBox();
+  expect(timeBounds).toMatchObject({ x: initialFormatPosition.x, width: initialFormatPosition.width });
+  expect((await splitFormat.boundingBox()).y).toBeLessThan(timeBounds.y);
+  await expect(timeSplit).toHaveCSS('text-align-last', 'center');
+  await expect(timeSplit).toHaveCSS('appearance', 'none');
+  const previousTimeMode = popup.getByRole('button', { name: '이전 시간 나누기 방식' });
+  const nextTimeMode = popup.getByRole('button', { name: '다음 시간 나누기 방식' });
+  await previousTimeMode.click();
+  await expect(timeSplit).toHaveValue('duration');
+  await expect.poll(async () => (await readSettings()).autoSplitMode).toBe('duration');
+  await nextTimeMode.click();
+  await expect(timeSplit).toHaveValue('half');
+  await expect.poll(async () => (await readSettings()).autoSplitMode).toBe('half');
+  const threshold = popup.getByRole('spinbutton', { name: '이 시간 초과 시 분할' });
+  const increaseThreshold = popup.getByRole('button', { name: '자동 분할 기준 시간 늘리기' });
+  const decreaseThreshold = popup.getByRole('button', { name: '자동 분할 기준 시간 줄이기' });
+  await expect(threshold).toHaveValue('35');
+  await increaseThreshold.click();
+  await expect.poll(async () => (await readSettings()).autoSplitAfterSeconds).toBe(36);
+  await decreaseThreshold.click();
+  await expect.poll(async () => (await readSettings()).autoSplitAfterSeconds).toBe(35);
+  await threshold.fill('75');
+  await threshold.press('Enter');
+  await expect.poll(async () => (await readSettings()).autoSplitAfterSeconds).toBe(75);
+  await timeSplit.selectOption('quarters');
+  await expect.poll(async () => (await readSettings()).autoSplitMode).toBe('quarters');
+  await timeSplit.selectOption('duration');
+  await expect.poll(async () => (await readSettings()).autoSplitMode).toBe('duration');
+  await worker.evaluate(() => {
+    const set = chrome.storage.local.set.bind(chrome.storage.local);
+    chrome.storage.local.set = async items => {
+      if (items.settings?.autoSplitMode !== 'size') return set(items);
+      chrome.storage.local.set = set;
+      await new Promise(resolve => { globalThis.finishSizeSetting = resolve; });
+      return set(items);
+    };
+  });
+  await choose('auto-split-kind', 'size');
+  await expect(popup.locator('#auto-split-max-megabytes')).toBeVisible();
+  await expect(threshold).toBeHidden();
+  await expect(timeSplit).toBeHidden();
+  expect(await formatPosition()).toEqual(initialFormatPosition);
+  await expect.poll(() => worker.evaluate(() => Boolean(globalThis.finishSizeSetting))).toBe(true);
+  await choose('auto-split-kind', 'duration');
+  await expect(popup.locator('#auto-split-interval')).toBeVisible();
+  await expect(threshold).toHaveValue('75');
+  await worker.evaluate(() => globalThis.finishSizeSetting());
+  await expect.poll(async () => (await readSettings()).autoSplitMode).toBe('duration');
+  await expect(timeSplit).toHaveValue('duration');
+  expect(await splitLayout()).toEqual(initialSplitLayout);
+
+  await choose('auto-split-kind', 'size');
+  const maxMegabytes = popup.getByRole('spinbutton', { name: '파일당 최대 용량' });
+  await expect(maxMegabytes).toHaveValue('40');
+  await expect(threshold).toBeHidden();
+  expect(await splitLayout()).toEqual(initialSplitLayout);
+  await popup.getByRole('button', { name: '파일당 최대 용량 줄이기' }).click();
+  await expect.poll(async () => (await readSettings()).autoSplitMaxMegabytes).toBe(39);
+  await choose('auto-split-format', 'webm');
+  await expect.poll(async () => (await readSettings()).autoSplitFormat).toBe('webm');
+  await choose('auto-split-kind', 'duration');
+  await expect(maxMegabytes).toBeHidden();
+  const interval = popup.getByRole('spinbutton', { name: '파일당 시간' });
+  const increaseInterval = popup.getByRole('button', { name: '파일당 시간 늘리기' });
+  await expect(interval).toHaveValue('30');
+  expect(await splitLayout()).toEqual(initialSplitLayout);
+  await interval.fill('44');
+  await interval.press('Tab');
+  await expect.poll(async () => (await readSettings()).autoSplitIntervalSeconds).toBe(44);
+  await increaseInterval.click();
+  await choose('auto-split', 'off');
+  await expect(interval).toBeDisabled();
+  await expect(interval).toBeVisible();
+  expect(await splitLayout()).toEqual(initialSplitLayout);
+  await choose('auto-split', 'on');
+  await expect(interval).toBeEnabled();
+  await choose('auto-focus-result-mode', 'off');
+  await choose('auto-download-split-mode', 'on');
+  await expect.poll(readSettings).toMatchObject({
+    outputFormat: 'mp4', videoBitsPerSecond: 8_500_000, enable60fps: true,
+    allowMutedRecording: true, enableOriginalStreamRecording: true, enableStreamerFilename: true,
+    enableFullRecordButton: false, enableFullScreenshotButton: true, autoFocusResult: false,
+    enableAutoDownloadRecording: true, enableAutoDownloadSplit: true,
+    autoSplitMode: 'duration', autoSplitAfterSeconds: 75, autoSplitIntervalSeconds: 45, autoSplitFormat: 'webm', autoSplitMaxMegabytes: 39,
+  });
+  await popup.setViewportSize({ width: 640, height: 600 });
+  const frameGeometry = () => popup.evaluate(() => {
+    const sidebar = document.querySelector('.settings-tabs').getBoundingClientRect();
+    const footer = document.querySelector('.footer-links').getBoundingClientRect();
+    const body = document.body;
+    return { height: body.clientHeight, sidebarBottom: sidebar.bottom, footerBottom: footer.bottom, bodyScroll: body.scrollTop };
+  });
+  const savingLayout = await frameGeometry();
+  expect(savingLayout.height).toBe(560);
+  expect(savingLayout.sidebarBottom).toBe(savingLayout.footerBottom);
+  await playerTab.click();
+  expect(await frameGeometry()).toEqual(savingLayout);
+  await savingTab.click();
+  await popup.setViewportSize({ width: 640, height: 320 });
+  const smallLayout = await frameGeometry();
+  expect(smallLayout.height).toBe(320);
+  const savingPanel = popup.getByRole('tabpanel', { name: '저장·분할' });
+  await savingPanel.hover();
+  await popup.mouse.wheel(0, 600);
+  await expect.poll(() => savingPanel.evaluate(panel => panel.scrollTop)).toBeGreaterThan(0);
+  expect(await frameGeometry()).toEqual(smallLayout);
+  await popup.setViewportSize({ width: 640, height: 600 });
 
   await worker.evaluate(() => chrome.storage.local.set({ recordingState: { status: 'recording', mode: 'full' } }));
   await expect(popup.locator('input[name="output-format"][value="webm"]')).toBeDisabled();
   await expect(popup.locator('input[name="seek-button-mode"][value="off"]')).toBeDisabled();
   await expect(popup.locator('#multi-region-count-increase-button')).toBeDisabled();
+  await expect(increaseThreshold).toBeDisabled();
+  await expect(increaseInterval).toBeDisabled();
+  await expect(timeSplit).toBeDisabled();
+  await expect(previousTimeMode).toBeDisabled();
+  await expect(nextTimeMode).toBeDisabled();
+  await expect(splitFormat.getByRole('radio', { name: 'WebM' })).toBeDisabled();
   expect(await popup.locator('input[type="radio"]:not([name="recording-size-mode"]):enabled').count()).toBe(0);
+  await playerTab.click();
   await popup.locator('label:has(input[name="recording-size-mode"][value="on"])').click();
   await expect.poll(async () => (await readSettings()).showRecordingSize).toBe(true);
   await worker.evaluate(() => chrome.storage.local.set({ recordingState: { status: 'idle' } }));
@@ -474,6 +942,13 @@ test('popup settings persist and only the recording size toggle stays editable d
   await expect(popup.locator('#seek-seconds-input')).toHaveValue('59');
   await expect(popup.locator('#multi-region-count-input')).toHaveValue('3');
   await expect(popup.locator('input[name="recording-size-mode"][value="on"]')).toBeChecked();
+  await expect(popup.locator('input[name="auto-focus-result-mode"][value="off"]')).toBeChecked();
+  await expect(popup.locator('#auto-split-threshold')).toHaveValue('75');
+  await expect(popup.locator('#auto-split-interval')).toHaveValue('45');
+  await popup.getByRole('tab', { name: '저장·분할' }).click();
+  await expect(popup.getByRole('combobox', { name: '시간 나누기' })).toHaveValue('duration');
+  await expect(popup.getByRole('radiogroup', { name: '분할 저장 형식' }).getByRole('radio', { name: 'WebM' })).toBeChecked();
+  await expect(popup.locator('#auto-split-max-megabytes')).toHaveValue('39');
 });
 
 test('result delivery reuses its tab after a failed state write', async ({ extension }) => {
@@ -509,7 +984,7 @@ test('automatic download with missing data shows the error and unlocks recording
   const opened = context.waitForEvent('page');
   await worker.evaluate(async () => {
     await chrome.storage.local.set({
-      settings: { enableAutoDownloadRecording: true },
+      settings: { enableAutoDownloadRecording: true, autoFocusResult: false },
       recordingState: { status: 'completed', recordingId: 'missing-download' },
     });
     await chrome.alarms.create('open-recording-result', { when: Date.now() });
@@ -537,7 +1012,8 @@ test('failed automatic download keeps the recorded video available in the result
       extension: 'webm', size: blob.size, blob, createdAt });
     await putRecording({ id, createdAt, endedAt: createdAt + 3000, totalSize: blob.size, actualExtension: 'webm' });
     await chrome.storage.local.set({
-      settings: { enableAutoDownloadRecording: true }, recordingState: { status: 'completed', recordingId: id },
+      settings: { enableAutoDownloadRecording: true, autoFocusResult: false },
+      recordingState: { status: 'completed', recordingId: id },
     });
   }, bytes);
   await seed.close();
@@ -556,17 +1032,104 @@ test('failed automatic download keeps the recorded video available in the result
   const opened = context.waitForEvent('page');
   await worker.evaluate(() => chrome.alarms.create('open-recording-result', { when: Date.now() }));
   const result = await opened;
-  await expect(result.locator('#empty-message')).toHaveText('테스트 다운로드 실패');
+  await expect(result.locator('#split-status')).toHaveText('테스트 다운로드 실패');
+  await expect(result.locator('#preview-recovery')).toBeHidden();
   await expect.poll(() => result.locator('#preview-video').evaluate(video => video.videoWidth)).toBeGreaterThan(0);
   await expect(result.locator('#download-current-button')).toBeEnabled();
+  await expect.poll(() => result.evaluate(async () => (await chrome.tabs.getCurrent())?.active)).toBe(true);
   expect(await result.evaluate(() => window.testConversionWorkers ?? 0)).toBe(0);
+});
+
+test('automatic download respects the result tab preference and does not repeat on reload', async ({ extension }, testInfo) => {
+  test.setTimeout(120_000);
+  const { context, worker, page } = extension;
+  await prepareVideo(page);
+  const downloadPath = testInfo.outputPath('automatic');
+  await mkdir(downloadPath, { recursive: true });
+  const session = await context.newCDPSession(page);
+  await session.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath });
+  const readState = () => worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState);
+  const downloads = () => worker.evaluate(() => chrome.downloads.search({ state: 'complete' }));
+  await context.addInitScript(() => {
+    if (location.protocol !== 'chrome-extension:' || location.pathname !== '/result/result.html'
+      || new URLSearchParams(location.search).get('testLegacyResult') !== '1') return;
+    const save = chrome.downloads.download.bind(chrome.downloads);
+    chrome.downloads.download = async options => {
+      await new Promise(resolve => { window.releaseAutomaticDownload = resolve; });
+      return save(options);
+    };
+  });
+
+  const scenarios = [
+    { autoFocusResult: false, enableDuringDownload: false },
+    { autoFocusResult: true, enableDuringDownload: false },
+    { autoFocusResult: false, enableDuringDownload: true },
+  ];
+  for (const [index, scenario] of scenarios.entries()) {
+    const keepOpen = scenario.autoFocusResult || scenario.enableDuringDownload;
+    await worker.evaluate(async ({ autoFocusResult, enableDuringDownload }) => {
+      const { settings } = await chrome.storage.local.get('settings');
+      await chrome.storage.local.set({ settings: { ...settings, enableAutoDownloadRecording: true, autoFocusResult } });
+      if (autoFocusResult || enableDuringDownload) {
+        const create = chrome.tabs.create.bind(chrome.tabs);
+        chrome.tabs.create = options => {
+          if (!options.url?.includes('/result/result.html')) return create(options);
+          chrome.tabs.create = create;
+          const url = new URL(options.url);
+          url.searchParams.delete('keepOpen');
+          url.searchParams.set('testLegacyResult', '1');
+          return create({ ...options, url: url.href });
+        };
+      }
+    }, scenario);
+    await page.bringToFront();
+    await page.keyboard.press('e');
+    await expect.poll(async () => (await readState())?.startedAt ?? 0).toBeGreaterThan(0);
+    await page.waitForTimeout(3_100);
+    const opened = context.waitForEvent('page');
+    await page.keyboard.press('e');
+    const result = await opened;
+    if (keepOpen) {
+      expect(new URL(result.url()).searchParams.has('keepOpen')).toBe(false);
+      await expect.poll(() => result.evaluate(() => Boolean(window.releaseAutomaticDownload))).toBe(true);
+      if (scenario.autoFocusResult) await expect(result.locator('#preview-video')).toBeVisible();
+      await expect(result.locator('#result-loading-message')).toHaveText('녹화 파일을 다운로드하는 중입니다.');
+      await expect(result.locator('#split-button')).toBeDisabled();
+      expect(await downloads()).toHaveLength(index);
+      if (scenario.enableDuringDownload) {
+        await worker.evaluate(async () => {
+          const { settings } = await chrome.storage.local.get('settings');
+          await chrome.storage.local.set({ settings: { ...settings, autoFocusResult: true } });
+        });
+      }
+      await result.evaluate(() => window.releaseAutomaticDownload());
+    }
+    await expect.poll(async () => (await readState()).status, { timeout: 35_000 }).toBe('idle');
+    const expectedCount = index + 1;
+    expect(await downloads()).toHaveLength(expectedCount);
+    if (!keepOpen) {
+      await expect.poll(() => result.isClosed()).toBe(true);
+      continue;
+    }
+
+    await expect(result.locator('#result-loading')).toBeHidden();
+    await expect(result.locator('#split-button')).toBeEnabled();
+    await expect.poll(() => result.locator('#preview-video').evaluate(video => video.readyState >= 2 && video.videoWidth > 0)).toBe(true);
+    expect(new URL(result.url()).searchParams.has('autoDownload')).toBe(false);
+    expect(await result.evaluate(async () => (await chrome.tabs.getCurrent())?.active)).toBe(true);
+
+    await result.reload();
+    await expect(result.locator('#split-button')).toBeEnabled();
+    expect(await downloads()).toHaveLength(expectedCount);
+    await result.close();
+  }
 });
 
 for (const stallMetadata of [false, true]) test(
   `a download requested during preparation uses the same file as the result${stallMetadata ? ' if preview metadata is delayed' : ''}`,
   async ({ extension }) => {
   const { context, worker, page } = extension;
-  await prepareVideo(page);
+  await prepareVideo(page, stallMetadata ? 320 : 640, stallMetadata ? 568 : 360);
   await context.addInitScript(stallMetadata => {
     if (location.protocol !== 'chrome-extension:' || location.pathname !== '/result/result.html') return;
     if (stallMetadata) {
@@ -592,8 +1155,37 @@ for (const stallMetadata of [false, true]) test(
   await page.keyboard.press('e');
   const result = await opened;
   await expect.poll(() => result.evaluate(() => Boolean(window.releaseEditPreparation))).toBe(true);
+  await expect(result.locator('#title')).toHaveText('녹화 결과');
+  const preview = result.locator('.preview-frame');
+  const loading = preview.locator('#result-loading');
+  await expect(preview.getByRole('status')).toHaveText('미리보기를 준비하는 중입니다.');
+  await expect(result.locator('#preview-video')).toBeHidden();
+  expect(await result.locator('#title').evaluate(title => {
+    const bounds = title.getBoundingClientRect();
+    return title.contains(document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2));
+  })).toBe(true);
   await expect(result.locator('#split-button')).toBeDisabled();
-  await expect(result.locator('#download-current-button')).toBeDisabled();
+  const download = result.locator('#download-current-button');
+  await expect(download).toBeEnabled();
+  if (stallMetadata) await result.setViewportSize({ width: 380, height: 780 });
+  const previewBounds = await preview.boundingBox();
+  const loadingBounds = await loading.boundingBox();
+  const editorTop = (await result.locator('.trim-editor').boundingBox()).y;
+  expect(previewBounds.width / previewBounds.height).toBeCloseTo(16 / 9, 2);
+  expect(previewBounds.height).toBeLessThanOrEqual(Math.min(result.viewportSize().height / 2, 460));
+  expect(loadingBounds.height).toBeCloseTo(previewBounds.height - 2, 0);
+  expect(loadingBounds.width).toBeCloseTo(previewBounds.width - 2, 0);
+  const downloadBounds = await download.boundingBox();
+  const closeBounds = await result.locator('#close-button').boundingBox();
+  expect(downloadBounds.y + downloadBounds.height / 2).toBeCloseTo(closeBounds.y + closeBounds.height / 2, 0);
+  expect(downloadBounds.x + downloadBounds.width).toBeLessThanOrEqual(closeBounds.x);
+  expect(downloadBounds.height).toBeGreaterThanOrEqual(40);
+  expect((await result.locator('#download-current-label').boundingBox()).width).toBeGreaterThan(40);
+  if (stallMetadata) {
+    const durationBounds = await result.locator('.trim-duration').boundingBox();
+    expect(durationBounds.x + durationBounds.width).toBeLessThan(380);
+  }
+  await expect(result.locator('#result-loading button')).toHaveCount(0);
   await result.evaluate(() => {
     window.downloadedFiles = [];
     HTMLAnchorElement.prototype.click = function () {
@@ -603,18 +1195,75 @@ for (const stallMetadata of [false, true]) test(
       })));
     };
   });
-  const queued = result.getByRole('button', { name: '준비되면 다운로드' });
-  await queued.click();
-  await expect(result.getByRole('button', { name: '다운로드 예약됨' })).toBeDisabled();
+  await download.click();
+  await expect(download).toHaveText('다운로드 예약됨');
+  await expect(download).toBeDisabled();
   await expect(result.locator('#result-loading')).toBeVisible();
   expect(await result.evaluate(() => window.downloadedFiles.length)).toBe(0);
   await result.evaluate(() => window.releaseEditPreparation());
   await expect(result.locator('#result-loading')).toBeHidden({ timeout: 30_000 });
+  await expect(result.locator('#preview-waiting')).toBeHidden();
+  await expect(result.locator('#preview-video')).toBeVisible();
+  expect(await preview.boundingBox()).toEqual(previewBounds);
+  expect((await result.locator('.trim-editor').boundingBox()).y).toBeCloseTo(editorTop, 0);
+  const videoBounds = await result.locator('#preview-video').boundingBox();
+  expect(videoBounds.x + videoBounds.width / 2).toBeCloseTo(previewBounds.x + previewBounds.width / 2, 0);
+  if (stallMetadata) expect(videoBounds.width).toBeLessThan(previewBounds.width / 2);
+  else expect(Math.abs(videoBounds.width - (previewBounds.width - 2))).toBeLessThan(2);
   await expect.poll(() => result.evaluate(() => window.downloadedFiles.length)).toBe(1);
-  await result.locator('#download-current-button').click();
+  await download.click();
   const files = await result.evaluate(() => Promise.all(window.downloadedFiles));
   expect(files).toHaveLength(2);
   expect(files[0]).toEqual(files[1]);
+});
+
+test('full screen recording waits for a pending bitrate change and keeps native resolution', async ({ extension }) => {
+  const { context, worker, page } = extension;
+  await prepareVideo(page, 1280, 720);
+  await worker.evaluate(async () => {
+    const { settings } = await chrome.storage.local.get('settings');
+    await chrome.storage.local.set({ settings: { ...settings, videoBitsPerSecond: 2_000_000 } });
+    const [tab] = await chrome.tabs.query({ url: 'https://chzzk.naver.com/extension-test' });
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => {
+      const Recorder = MediaRecorder;
+      window.MediaRecorder = class extends Recorder {
+        constructor(stream, options) {
+          super(stream, options);
+          document.documentElement.dataset.screenVideoBitrate = `${options.videoBitsPerSecond}/${this.videoBitsPerSecond}`;
+        }
+      };
+    } });
+    const set = chrome.storage.local.set.bind(chrome.storage.local);
+    chrome.storage.local.set = async items => {
+      if (items.settings?.videoBitsPerSecond === 8_500_000) {
+        chrome.storage.local.set = set;
+        await new Promise(resolve => { globalThis.releaseBitrateWrite = resolve; });
+      }
+      return set(items);
+    };
+  });
+  const popup = await context.newPage();
+  await popup.goto(`chrome-extension://${new URL(worker.url()).host}/popup/popup.html`);
+  await popup.locator('#custom-video-bitrate-input').fill('8.5');
+  await popup.locator('#custom-video-bitrate-input').press('Tab');
+  await expect.poll(() => worker.evaluate(() => Boolean(globalThis.releaseBitrateWrite))).toBe(true);
+  await page.bringToFront();
+  await page.keyboard.press('e');
+  const record = page.locator('#crop-clip-chzzk-record-button');
+  try {
+    await expect(record).toHaveAttribute('aria-busy', 'true');
+    await expect(page.locator('html')).not.toHaveAttribute('data-screen-video-bitrate');
+  } finally {
+    await worker.evaluate(() => globalThis.releaseBitrateWrite());
+  }
+  await expect(page.locator('html')).toHaveAttribute('data-screen-video-bitrate', '8500000/8500000');
+  await expect(record).toHaveAttribute('data-recording', '');
+  await page.waitForTimeout(2600);
+  const opened = context.waitForEvent('page');
+  await page.keyboard.press('e');
+  const result = await opened;
+  await expect(result.locator('#result-loading')).toBeHidden({ timeout: 30_000 });
+  await expect.poll(() => result.locator('#preview-video').evaluate(video => [video.videoWidth, video.videoHeight])).toEqual([1280, 720]);
 });
 
 test('delayed starts preserve stop/cancel intent and respond immediately', async ({ extension }) => {
@@ -774,7 +1423,7 @@ test('real recordings survive mini-player moves, split and recover a failed chec
     }
     for (const count of [2, 3, 4]) {
       await result.locator('#split-format-select').selectOption('webm');
-      await result.locator(count === 2 ? '[data-split-ratio="0.5"]' : `[data-split-count="${count}"]`).click();
+      await result.locator(`[data-split-count="${count}"]`).click();
       await result.locator('#split-button').click();
       await expect(result.locator('#split-result-summary')).toHaveText(`나눈 파일 (${count}개)`, { timeout: 30_000 });
       await expect(result.locator('#split-button')).toBeEnabled();

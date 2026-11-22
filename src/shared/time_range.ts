@@ -97,6 +97,12 @@ export function getExpectedSplitCount(duration: number, segmentSeconds: number):
   return Math.max(1, Math.ceil((duration - tailTolerance) / segmentSeconds - SPLIT_COUNT_EPSILON));
 }
 
+export function getSplitIntervalForCount(duration: number, count: number): number {
+  const steps = Number((duration / count / TIME_STEP_SECONDS).toFixed(FLOATING_POINT_PRECISION_DIGITS));
+  const rounded = Math.ceil(steps) / (1 / TIME_STEP_SECONDS);
+  return getExpectedSplitCount(duration, rounded) === count ? rounded : Math.max(TIME_STEP_SECONDS, duration / count);
+}
+
 export function parseSegmentTimeList(value: string): TimeRange[] {
   return value.trim().split(/\r?\n/).flatMap((line) => {
     const columns = line.split(",");

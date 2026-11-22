@@ -15,8 +15,12 @@ const settingsText = fs.readFileSync(new URL("../src/shared/types.ts", import.me
 const messagesText = fs.readFileSync(new URL("../src/shared/messages.ts", import.meta.url), "utf8");
 const idbText = fs.readFileSync(new URL("../src/shared/idb.ts", import.meta.url), "utf8");
 const manifest = JSON.parse(fs.readFileSync(new URL("../manifest.json", import.meta.url), "utf8"));
-assert.equal(manifest.content_scripts[0].exclude_matches, undefined);
-assert.deepEqual(manifest.content_scripts[0].css, ["content/region_selector.css"]);
+const playerScript = manifest.content_scripts.find(script => script.js.includes("content/region_selector.js"));
+assert.equal(playerScript.exclude_matches, undefined);
+assert.deepEqual(playerScript.css, ["content/region_selector.css"]);
+const codecScript = manifest.content_scripts.find(script => script.js.includes("content/playback_codec.js"));
+assert.equal(codecScript.run_at, "document_start");
+assert.equal(codecScript.world, "MAIN");
 assert.match(contentStyleText, /#crop-clip-overlay/);
 assert.match(contentStyleText, /\.crop-clip-border/);
 assert.match(contentStyleText, /outline: var\(--crop-clip-border-width\)/);
@@ -28,6 +32,7 @@ assert.match(sourceText, /document\.getElementById\("crop-clip-style"\)\?\.remov
 assert.match(sourceText, /function suspendPlayerTools\(\)/);
 assert.match(sourceText, /currententrychange/);
 assert.match(sourceText, /chzzkToolObserver\.observe\(controlsRoot, \{ childList: true, subtree: true \}\)/);
+assert.match(sourceText, /chzzkToolObserver\.observe\(ancestor, \{ childList: true \}\)/);
 assert.doesNotMatch(sourceText, /chzzkToolObserver\.observe\(observerRoot/);
 assert.match(sourceText, /button\.dataset\.cropClipContent === contentKey/);
 assert.doesNotMatch(sourceText, /mutationTouchesChzzkPlayer/);
@@ -35,21 +40,17 @@ assert.doesNotMatch(sourceText, /setInterval\(updateRecordButton/);
 assert.doesNotMatch(sourceText, /setInterval\(\(\) => requestChzzkToolSync/);
 assert.doesNotMatch(sourceText, /chzzkToolObserver\.observe\(document\.body/);
 assert.match(sourceText, /CHZZK_TOOL_DISCOVERY_INTERVAL_MS/);
-assert.match(sourceText, /const buttons = getPzpButtons\(host\);\s*const reference = buttons\.find\(isVisibleElement\) \?\? buttons\[0\]/);
-assert.match(sourceText, /if \(!host\) \{\s*startChzzkToolDiscovery\(\);\s*return;\s*\}/);
-assert.match(sourceText, /const toolHost = findChzzkButtonHost\(\);\s*syncChzzkToolButton\(toolHost\)/);
-assert.match(sourceText, /function mutationAddsChzzkButtonHost\(records: MutationRecord\[\]\)/);
 assert.doesNotMatch(sourceText, /regionLayoutTimerId/);
 assert.match(sourceText, /new ResizeObserver\(requestRegionLayoutSync\)/);
-assert.match(sourceText, /if \(!toolHost\.isConnected \|\| missingExpectedButton\) \{\s*syncPlayerToolsForLocation\(\);\s*\} else if \(mutationAddsChzzkButtonHost\(records\) && findChzzkButtonHost\(\) !== toolHost\)/);
 assert.doesNotMatch(sourceText, /function ensureStyle\(/);
 assert.match(serviceWorkerText, /chrome\.scripting\.insertCSS\([\s\S]*?content\/region_selector\.css/);
 assert.match(sourceText, /applyBorderGeometry\(border, region, renderedRect\)/);
 assert.match(sourceText, /const bounds = selectionBounds;/);
 assert.match(controllerText, /getContext\("2d", \{ alpha: false, desynchronized: true \}\)/);
-const capturePosition = controllerText.indexOf("const canvasStream = frameCapture?.stream ?? canvas.captureStream(frameRate);");
+const capturePosition = controllerText.indexOf("const canvasStream = frameCapture?.stream ?? canvas.captureStream(manualCanvasCapture ? 0 : frameRate);");
 const firstPaintPosition = controllerText.indexOf("paintPlacements(layout.placements);");
 assert.ok(capturePosition >= 0 && firstPaintPosition > capturePosition, 'create the capture before painting its first frame');
+assert.match(controllerText, /canvasTrack\?\.requestFrame\(\);\s+paintCanvas\(placements\);/);
 assert.doesNotMatch(controllerText, /document\.documentElement\.appendChild\(canvas\)/);
 assert.doesNotMatch(sourceText, /overlayObserver\.observe\(document\.documentElement, \{ childList: true, subtree: true \}\)/);
 assert.match(sourceText, /window\.addEventListener\("scroll", requestRegionLayoutSync, \{ capture: true, passive: true \}\)/);
@@ -87,19 +88,20 @@ assert.match(settingsText, /enableAutoDownloadRecording: false/);
 assert.match(settingsText, /enableAutoDownloadSplit: false/);
 assert.match(settingsText, /const DEFAULT_VIDEO_BITS_PER_SECOND = 6_000_000/);
 assert.match(serviceWorkerText, /autoDownload=1/);
-assert.match(serviceWorkerText, /active: settings\.autoFocusResult && !settings\.enableAutoDownloadRecording/);
+assert.match(serviceWorkerText, /active: settings\.autoFocusResult/);
 assert.match(messagesText, /AUTO_DOWNLOAD_HANDLED/);
 assert.ok(manifest.permissions.includes("downloads"));
 assert.match(resultText, /function waitForDownloadCompletion\(/);
-assert.match(resultText, /await downloadSourcesAndConfirm\([\s\S]*?await markAutoDownloadHandled\(\);\s*allowRecordingDeletion = true;\s*window\.close\(\)/);
-assert.match(resultText, /let restoreSourceTabOnClose = !autoDownloadRecording/);
+assert.match(resultText, /await downloadSourcesAndConfirm\([\s\S]*?await markAutoDownloadHandled\(\);\s*allowRecordingDeletion = true;\s*if \(!showResult\) \{[\s\S]*?if \(latestSettings\?\.autoFocusResult === false\) \{\s*window\.close\(\)/);
+assert.match(resultText, /let restoreSourceTabOnClose = showResult/);
 assert.match(resultText, /function restoreSourceTab\(\): void \{\s*if \(!restoreSourceTabOnClose \|\| !resultTab\?\.active\) \{\s*return;/);
 assert.match(resultText, /if \(autoDownloadRecording && parts\.length === 0\) \{\s*throw new Error/);
 assert.match(resultText, /async function revealAutoDownloadFailure\(\): Promise<void>/);
 assert.match(resultText, /restoreSourceTabOnClose = true/);
 assert.match(resultText, /await markAutoDownloadHandled\(\);\s*allowRecordingDeletion = true;\s*startDeletionKeepalive\(\)/);
 assert.match(resultText, /if \(allowRecordingDeletion\) \{\s*void scheduleRecordingDeletion\(\)/);
-assert.match(resultText, /if \(autoDownloadSplit\) \{\s*setWorkStatus\([^;]+;\s*await downloadSourcesAndConfirm/);
+assert.match(resultText, /if \(enableAutoDownloadSplit\) await downloadSplitFiles\(\)/);
+assert.match(resultText, /if \(autoDownloadRecording \|\| settings\.enableAutoDownloadSplit\) \{[^}]*await downloadSplitFiles\(\)/);
 assert.doesNotMatch(messagesText, /CANCEL_RECORDING_DELETION/);
 const idbFile = ts.createSourceFile("idb.ts", idbText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 const deletionCursor = idbFile.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "deleteRecordsByRecordingId");
@@ -137,7 +139,7 @@ const presetCode = resultFile.statements
 const timeRangeCode = ts.transpileModule(fs.readFileSync(new URL("../src/shared/time_range.ts", import.meta.url), "utf8"), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
 }).outputText;
-const { getExpectedSplitCount } = await import(`data:text/javascript;base64,${Buffer.from(timeRangeCode).toString("base64")}`);
+const { getExpectedSplitCount, getSplitIntervalForCount } = await import(`data:text/javascript;base64,${Buffer.from(timeRangeCode).toString("base64")}`);
 const presetRuntime = ts.transpileModule(presetCode, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
 }).outputText;
@@ -147,12 +149,12 @@ const presetButtons = [3, 4].map((count) => ({
 }));
 const presetElements = { splitModeSelect: { value: "duration" }, splitValueInput: { value: "", max: "" }, splitPresetButtons: presetButtons, splitEstimate: { textContent: "", hidden: true } };
 let presetRange = { start: 0, end: 0 };
-const presetFunctions = new Function("elements", "getSelectedTimeRange", "getExpectedSplitCount", `
+const presetFunctions = new Function("elements", "getSelectedTimeRange", "getExpectedSplitCount", "getSplitIntervalForCount", `
   const TIME_STEP_SECONDS = 0.1, TIME_DECIMAL_PLACES = 1, parts = [{}], workBusy = false;
   const SECONDS_PER_MINUTE = 60, TIME_STEPS_PER_MINUTE = 600, TIME_STEPS_PER_HOUR = 36000;
   ${presetRuntime}
   return { getSplitPresetValue, updateSplitPresetButtons };
-`)(presetElements, () => presetRange, getExpectedSplitCount);
+`)(presetElements, () => presetRange, getExpectedSplitCount, getSplitIntervalForCount);
 for (const [start, end, expectedValues] of [[0, 120, [40, 30]], [10, 20, [3.4, 2.5]], [10, 18.7, [2.9, 2.2]], [4.2, 5.4, [0.4, 0.3]]]) {
   presetRange = { start, end };
   presetElements.splitValueInput.max = String(end - start);
@@ -171,8 +173,11 @@ presetElements.splitValueInput.max = "0.9";
 presetElements.splitValueInput.value = "0.3";
 presetFunctions.updateSplitPresetButtons();
 assert.equal(presetButtons[0].disabled, false);
-assert.equal(presetButtons[1].disabled, true);
+assert.equal(presetButtons[1].disabled, false);
 assert.equal(presetButtons[1]["aria-pressed"], "false");
+presetElements.splitValueInput.value = String(presetFunctions.getSplitPresetValue(presetButtons[1]));
+presetFunctions.updateSplitPresetButtons();
+assert.equal(presetButtons[1]["aria-pressed"], "true");
 assert.equal(presetFunctions.getSplitPresetValue({ dataset: { splitValue: "40" } }), 40);
 
 presetRange = { start: 10, end: 20 };
@@ -207,7 +212,6 @@ const functionNames = new Set([
   "decodeRecordingDataUrl",
   "getRecordingChunkSliceRanges",
   "runRecordingTerminalOperation",
-  "normalizeRecordingState",
   "regionEdges",
   "clamp",
   "applyBorderGeometry",
@@ -310,10 +314,10 @@ assert.equal(border.style.display, '', 'reattaching the player must restore the 
 displayedVideo = { getBoundingClientRect: () => new TestRect(300, 100, 200, 200) };
 applyBorder(border, { x: 200, y: 100, width: 400, height: 200, videoRelative: { x: 0, y: 0, width: 1, height: 1 } }, new TestRect(200, 100, 400, 200));
 assert.deepEqual(['left', 'top', 'width', 'height'].map(key => parseFloat(border.style[key])), [300, 100, 200, 200], 'cover overflow must not draw a selection outside the player');
-const runtime = ts.transpileModule(`const recordingTerminalOperations = new Map();\nconst RECORDING_STATUS = { idle: "idle", recording: "recording", completed: "completed", error: "error" };\nconst RECORDING_MODE = { region: "region", full: "full" };\nconst MILLISECONDS_PER_SECOND = 1_000;\nconst SECONDS_PER_MINUTE = 60;\nconst SECONDS_PER_HOUR = 3_600;\n${statements}\nreturn { computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, getRecordingFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, getRecordingChunkSliceRanges, runRecordingTerminalOperation, normalizeRecordingState };`, {
+const runtime = ts.transpileModule(`const recordingTerminalOperations = new Map();\nconst RECORDING_STATUS = { idle: "idle", recording: "recording", completed: "completed", error: "error" };\nconst MILLISECONDS_PER_SECOND = 1_000;\nconst SECONDS_PER_MINUTE = 60;\nconst SECONDS_PER_HOUR = 3_600;\n${statements}\nreturn { computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, getRecordingFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, getRecordingChunkSliceRanges, runRecordingTerminalOperation };`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
 }).outputText;
-const { computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, getRecordingFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, getRecordingChunkSliceRanges, runRecordingTerminalOperation, normalizeRecordingState } = new Function(runtime)();
+const { computeResizedEdges, getResizeFocusPoint, getStreamerNameFromTitle, getRecordingFilename, getFinalRecordingEndedAt, decodeRecordingDataUrl, getRecordingChunkSliceRanges, runRecordingTerminalOperation } = new Function(runtime)();
 
 assert.equal(getStreamerNameFromTitle("치지직 게임 - CHZZK"), "치지직 게임");
 assert.equal(getStreamerNameFromTitle("치지직 스포츠 - CHZZK"), "치지직 스포츠");
@@ -358,8 +362,6 @@ assert.deepEqual(terminalOrder, ["first-start"]);
 releaseFirstTerminalOperation();
 assert.deepEqual(await Promise.all([firstTerminalOperation, secondTerminalOperation]), [1, 2]);
 assert.deepEqual(terminalOrder, ["first-start", "first-end", "second"]);
-assert.deepEqual(normalizeRecordingState({ status: "recording", recordingId: "recording-tab", startedAt: 1_000, mode: "full" }, "other-tab"), { status: "idle", recordingElsewhere: true, mode: "full" });
-assert.deepEqual(normalizeRecordingState({ status: "recording", recordingId: "recording-tab", startedAt: 1_000, mode: "full" }, "recording-tab"), { status: "recording", startedAt: 1_000, mode: "full" });
 const minimalRegion = { x: 10, y: 20, width: 300, height: 200 };
 assert.deepEqual(normalizeRegion(minimalRegion), minimalRegion);
 assert.deepEqual(normalizeRegion({ ...minimalRegion, viewportWidth: 1920, viewportHeight: 1080, devicePixelRatio: 2, selectedAt: 1_000 }), minimalRegion);

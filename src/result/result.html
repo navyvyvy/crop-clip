@@ -9,23 +9,18 @@
   <body>
     <main class="page">
       <section class="result-card">
-        <div id="result-loading" class="result-loading">
-          <div class="result-loading-content">
-            <strong>녹화 결과를 불러오는 중입니다.</strong>
-            <span id="result-loading-message" role="status">녹화 파일을 확인하고 있습니다.</span>
-            <div class="result-loading-track" aria-hidden="true"><span></span></div>
-            <button id="download-while-preparing" class="button primary" type="button" hidden>준비되면 다운로드</button>
-          </div>
-        </div>
-        <button id="close-button" class="button close-button" type="button" aria-label="결과 창 닫기" title="닫기">
-          <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
-            <path d="M5.5 5.5 14.5 14.5M14.5 5.5 5.5 14.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-          </svg>
-        </button>
         <header class="result-head">
           <div class="title-row">
             <h1 id="title">녹화 결과</h1>
-            <div class="meta-chip" id="format-chip">WEBM · - · -</div>
+            <div class="meta-chip" id="format-chip" hidden>
+              <span id="format-summary"></span>
+              <span id="capture-fallback" class="help-tooltip capture-fallback" hidden>
+                <button class="help-button" type="button" aria-label="화면 녹화 저장 안내" aria-describedby="capture-fallback-message">
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><path d="M10 9v4m0-6h.01"/></svg>
+                </button>
+                <span id="capture-fallback-message" class="help-popover" role="tooltip"></span>
+              </span>
+            </div>
           </div>
           <div class="header-actions">
             <button id="download-original-button" class="button tertiary" type="button" title="편집 전 파일 다운로드" hidden>
@@ -42,11 +37,28 @@
               </svg>
               <span id="download-current-label">다운로드</span>
             </button>
+            <button id="close-button" class="button close-button" type="button" aria-label="결과 창 닫기" title="닫기">
+              <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+                <path d="M5.5 5.5 14.5 14.5M14.5 5.5 5.5 14.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+              </svg>
+            </button>
           </div>
         </header>
 
         <div class="preview-frame">
           <video id="preview-video" class="preview-video" controls playsinline muted preload="auto"></video>
+          <div id="preview-waiting" class="preview-waiting" role="status">미리보기 대기 중</div>
+          <div id="result-loading" class="result-loading">
+            <span id="result-loading-message" role="status">녹화 파일을 확인하고 있습니다.</span>
+            <div class="result-loading-track" aria-hidden="true"><span></span></div>
+          </div>
+          <div id="preview-recovery" class="preview-recovery" hidden>
+            <p id="empty-message" role="status"></p>
+            <div class="preview-recovery-actions">
+              <button id="retry-original-save" class="button primary" type="button" hidden>MP4 저장 다시 시도</button>
+              <button id="download-original-fragments" class="button tertiary" type="button" hidden>방송 조각 백업 (.fmp4)</button>
+            </div>
+          </div>
           <div id="frame-preview-card" class="frame-preview-card" hidden>
             <img id="frame-preview-image" alt="현재 장면 미리보기" title="이미지를 우클릭해 복사">
             <div class="frame-preview-actions">
@@ -194,7 +206,7 @@
               <span>나누기</span>
             </button>
             <div class="split-presets" aria-label="나누기 빠른 선택">
-              <button type="button" data-split-mode="duration" data-split-ratio="0.5" title="선택 구간을 두 파일로 나누기">절반</button>
+              <button type="button" data-split-mode="duration" data-split-count="2" title="선택 구간을 두 파일로 나누기">절반</button>
               <button type="button" data-split-mode="duration" data-split-count="3" title="선택 구간을 세 파일로 나누기">3분할</button>
               <button type="button" data-split-mode="duration" data-split-count="4" title="선택 구간을 네 파일로 나누기">4분할</button>
               <button type="button" data-split-mode="size" data-split-value="40" title="파일별 최대 용량을 40MB로 설정">40MB</button>
@@ -244,9 +256,6 @@
           <div id="split-files-list" class="split-files-list"></div>
         </section>
 
-        <p id="empty-message" class="empty-message" role="status"></p>
-        <button id="retry-original-save" class="button primary" type="button" hidden>MP4 저장 다시 시도</button>
-        <button id="download-original-fragments" class="button tertiary" type="button" hidden>방송 조각 백업 (.fmp4)</button>
       </section>
     </main>
     <script src="../shared/recording_encoder.js"></script>

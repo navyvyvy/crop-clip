@@ -75,7 +75,7 @@ for (const outputFormat of ['webm', 'mp4']) for (const prepared of [true, false]
 console.log('recording startup preparation checks passed');
 
 const openSource = file.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "openCompletedRecordingResult");
-for (const autoFocusResult of [true, false]) {
+for (const [autoFocusResult, enableAutoSplitRecording] of [[true, true], [true, false], [false, true], [false, false]]) {
   for (const enableAutoDownloadRecording of [true, false]) {
     let state = { status: "completed", recordingId: "saved", tabId: 7 };
     const created = [];
@@ -88,11 +88,14 @@ for (const autoFocusResult of [true, false]) {
       return openCompletedRecordingResult;
     `)({ runtime: { getURL: path => path, ContextType: { TAB: 'TAB' }, getContexts: async () => [] }, alarms: { clear: async () => {}, create: async () => {} },
       tabs: { create: async options => { created.push(options); if (created.length === 1) throw new Error("retry"); return { id: 9 }; } },
-    }, async () => ({ recordingState: state, settings: { autoFocusResult, enableAutoDownloadRecording } }), async () => state, async value => { state = value; });
+    }, async () => ({ recordingState: state, settings: { autoFocusResult, enableAutoDownloadRecording, enableAutoSplitRecording } }), async () => state, async value => { state = value; });
     assert.equal(await open(), true);
     assert.equal(created.length, 2);
-    assert.ok(created.every(tab => tab.active === (autoFocusResult && !enableAutoDownloadRecording)), "focus preference and automatic download must also apply to retries");
-    assert.equal(created[1].url.includes("autoDownload=1"), enableAutoDownloadRecording);
+    assert.ok(created.every(tab => tab.active === autoFocusResult), "focus preference and automatic download must also apply to retries");
+    const params = new URLSearchParams(created[1].url.split("?")[1]);
+    assert.equal(params.has("autoDownload"), enableAutoDownloadRecording);
+    assert.equal(params.has("keepOpen"), enableAutoDownloadRecording && autoFocusResult);
+    assert.equal(params.has("autoSplit"), enableAutoSplitRecording);
     assert.equal(state.status, enableAutoDownloadRecording ? "completed" : "idle", "background results must not block the next recording");
   }
 }

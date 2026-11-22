@@ -28,13 +28,23 @@ test('33-second recording data expires after result close and retries failed del
   const { page, worker, context } = extension;
   await prepareVideo(page);
   await page.keyboard.press('e');
-  await expect.poll(() => worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState.status)).toBe('recording');
-  await page.waitForTimeout(33000);
+  const readStartedAt = () => worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState?.startedAt ?? 0);
+  await expect.poll(readStartedAt).toBeGreaterThan(0);
+  const startedAt = await readStartedAt();
+  await page.waitForTimeout(Math.max(0, startedAt + 33_000 - Date.now()));
   const opened = context.waitForEvent('page');
   await page.keyboard.press('e');
   const result = await opened;
   await expect(result.locator('#split-button')).toBeEnabled({ timeout: 30000 });
-  await expect.poll(() => result.locator('#preview-video').evaluate(video => video.duration)).toBeGreaterThan(32);
+  const preview = result.locator('#preview-video');
+  await expect.poll(() => preview.evaluate(video => video.duration)).toBeGreaterThan(32);
+  const duration = await preview.evaluate(video => video.duration);
+  expect(duration).toBeLessThan(34);
+  await result.evaluate(() => {
+    HTMLAnchorElement.prototype.click = function () { document.body.dataset.downloadFilename = this.download; };
+  });
+  await result.locator('#download-current-button').click();
+  await expect(result.locator('body')).toHaveAttribute('data-download-filename', new RegExp(`_${Math.round(duration)}s\\.webm$`));
   const id = new URL(result.url()).searchParams.get('id');
   const counts = id => inDatabase(worker, async (db, id, request) => {
     const tx = db.transaction(['recordings', 'parts', 'chunks']);

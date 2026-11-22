@@ -26,7 +26,7 @@ export interface DirectRecordingSession {
   originalStreamFallback?: true;
   stopOriginalStream?: () => void;
   extension: "webm" | "mp4";
-  baseName: string;
+  baseName?: string;
   checkpointIndex: number;
   checkpointSaveChain: Promise<void>;
   pendingChunks: Array<{ blob: Blob; capturedAt: number }>;
@@ -37,6 +37,7 @@ export interface DirectRecordingSession {
   createdAt: number;
   endedAt?: number;
   drawTimerId?: number;
+  drawFrameCallbackId?: number;
   stopRequested: boolean;
   cancelRequested: boolean;
   cleanedUp: boolean;
@@ -64,6 +65,11 @@ export function releaseDirectRecordingCapture(session: DirectRecordingSession): 
   session.cleanedUp = true;
   session.originalProbe?.abort();
   window.clearInterval(session.drawTimerId);
+  session.drawTimerId = undefined;
+  if (session.drawFrameCallbackId !== undefined) {
+    session.video?.cancelVideoFrameCallback(session.drawFrameCallbackId);
+    session.drawFrameCallbackId = undefined;
+  }
   session.sourceChangeCleanup?.();
   session.sourceChangeCleanup = undefined;
   session.frameCapture?.close();

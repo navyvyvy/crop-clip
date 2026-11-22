@@ -6,6 +6,8 @@ export type LoadedPart = RecordingPartRecord & ({ blob: Blob } | { objectUrl: st
 
 const MEDIA_EVENT_TIMEOUT_MS = 15_000;
 
+export class MediaEventTimeoutError extends Error {}
+
 export const MEDIA_SEEK_TOLERANCE_SECONDS = TIME_STEP_SECONDS / 2;
 
 const DURATION_PROBE_DELAY_MS = 500;
@@ -56,7 +58,7 @@ export function waitForMediaEvent(video: HTMLVideoElement, eventName: string, si
     signal?.throwIfAborted();
     const timeoutId = window.setTimeout(() => {
       cleanup();
-      reject(new Error("영상 파일 응답을 기다리는 시간이 초과되었습니다."));
+      reject(new MediaEventTimeoutError("영상 파일 응답을 기다리는 시간이 초과되었습니다."));
     }, MEDIA_EVENT_TIMEOUT_MS);
     const cleanup = () => {
       window.clearTimeout(timeoutId);

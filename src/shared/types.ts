@@ -1,4 +1,7 @@
 export type RecordingFormat = "webm" | "mp4";
+export type RecordingCodec = "auto" | "hevc";
+export const SPLIT_COUNTS = { half: 2, thirds: 3, quarters: 4 } as const;
+export type AutoSplitMode = keyof typeof SPLIT_COUNTS | "duration" | "size";
 type RecordingStatus = "idle" | "recording" | "completed" | "error";
 type RecordingMode = "region" | "full";
 export type ShortcutAction = "selectRegion" | "clearRegion" | "clearAllRegions" | "regionRecord" | "cancelRecording" | "regionScreenshot" | "fullRecord" | "fullScreenshot";
@@ -14,6 +17,14 @@ export const RECORDING_MIME_CANDIDATES: Record<RecordingFormat, readonly string[
   webm: ["video/webm;codecs=avc1", "video/webm;codecs=vp8,opus", "video/webm;codecs=vp9,opus", "video/webm"],
 };
 
+export const HEVC_MP4_MIME_TYPES = [
+  "video/mp4;codecs=hvc1.1.6.L153.B0,mp4a.40.2",
+  "video/mp4;codecs=hvc1.1.6.L123.B0,mp4a.40.2",
+  "video/mp4;codecs=hev1.1.6.L153.B0,mp4a.40.2",
+  "video/mp4;codecs=hev1.1.6.L123.B0,mp4a.40.2",
+  "video/mp4;codecs=hvc1,mp4a.40.2",
+] as const;
+
 export const RECORDING_STATUS = {
   idle: "idle",
   recording: "recording",
@@ -28,6 +39,7 @@ export const RECORDING_MODE = {
 
 export interface Settings {
   outputFormat: RecordingFormat;
+  recordingCodec: RecordingCodec;
   videoBitsPerSecond: number;
   enable60fps: boolean;
   allowMutedRecording: boolean;
@@ -42,6 +54,12 @@ export interface Settings {
   enableStreamerFilename: boolean;
   autoFocusResult: boolean;
   enableAutoDownloadRecording: boolean;
+  enableAutoSplitRecording: boolean;
+  autoSplitMode: AutoSplitMode;
+  autoSplitAfterSeconds: number;
+  autoSplitIntervalSeconds: number;
+  autoSplitMaxMegabytes: number;
+  autoSplitFormat: RecordingFormat;
   enableAutoDownloadSplit: boolean;
   enableShortcuts: boolean;
   shortcutKeys: ShortcutKeys;
@@ -90,6 +108,7 @@ export interface RecordingPartRecord {
   objectUrl?: string;
   seekMetadataVersion?: number;
   frameRate?: number;
+  videoBitsPerSecond?: number;
   startupTrimSeconds?: number;
   inspectStartup?: true;
   originalStreamStart?: number;
@@ -109,6 +128,7 @@ export interface RecordingChunkRecord {
   capturedAt: number;
   completesBlob?: boolean;
   frameRate?: number;
+  videoBitsPerSecond?: number;
   inspectStartup?: true;
   originalStreamStart?: number;
   originalStreamFallback?: true;
@@ -123,7 +143,7 @@ export interface AppState {
 }
 
 export const MIN_VIDEO_BITS_PER_SECOND = 100_000;
-export const MAX_VIDEO_BITS_PER_SECOND = 12_000_000;
+export const MAX_VIDEO_BITS_PER_SECOND = 16_000_000;
 const DEFAULT_VIDEO_BITS_PER_SECOND = 6_000_000;
 export const FPS_WARNING_VIDEO_BITS_PER_SECOND = DEFAULT_VIDEO_BITS_PER_SECOND;
 export const STANDARD_RECORDING_FRAME_RATE = 30;
@@ -137,6 +157,9 @@ export const DEFAULT_MULTI_REGION_COUNT = 2;
 export const MIN_SEEK_SECONDS = 1;
 export const MAX_SEEK_SECONDS = 60;
 export const DEFAULT_SEEK_SECONDS = 5;
+export const DEFAULT_AUTO_SPLIT_AFTER_SECONDS = 35;
+export const DEFAULT_AUTO_SPLIT_INTERVAL_SECONDS = 30;
+export const DEFAULT_AUTO_SPLIT_MAX_MEGABYTES = 40;
 export const DEFAULT_SHORTCUT_KEYS: ShortcutKeys = {
   selectRegion: "a",
   clearRegion: "x",
@@ -150,6 +173,7 @@ export const DEFAULT_SHORTCUT_KEYS: ShortcutKeys = {
 
 export const DEFAULT_SETTINGS: Settings = {
   outputFormat: RECORDING_FORMAT.webm,
+  recordingCodec: "auto",
   videoBitsPerSecond: DEFAULT_VIDEO_BITS_PER_SECOND,
   enable60fps: false,
   allowMutedRecording: false,
@@ -164,6 +188,12 @@ export const DEFAULT_SETTINGS: Settings = {
   enableStreamerFilename: false,
   autoFocusResult: true,
   enableAutoDownloadRecording: false,
+  enableAutoSplitRecording: false,
+  autoSplitMode: "half",
+  autoSplitAfterSeconds: DEFAULT_AUTO_SPLIT_AFTER_SECONDS,
+  autoSplitIntervalSeconds: DEFAULT_AUTO_SPLIT_INTERVAL_SECONDS,
+  autoSplitMaxMegabytes: DEFAULT_AUTO_SPLIT_MAX_MEGABYTES,
+  autoSplitFormat: RECORDING_FORMAT.mp4,
   enableAutoDownloadSplit: false,
   enableShortcuts: false,
   shortcutKeys: DEFAULT_SHORTCUT_KEYS,

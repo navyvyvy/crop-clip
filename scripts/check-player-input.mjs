@@ -1,4 +1,5 @@
-import { normalizeSettings } from "../dist/shared/normalize.js";
+import { loadAppState } from "../dist/shared/storage.js";
+import { getPlayerRecordingState } from "../dist/content/player_state.js";
 import { formatRecordingTimer } from "../dist/shared/time_range.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -94,25 +95,24 @@ const staleStop = new Function(`
 `)();
 assert.deepEqual(await staleStop('older'), { ok: true }, 'a delayed popup must not stop a replacement recording');
 const reads = [];
-const stateReader = new Function('chrome', 'normalizeSettings', `
+globalThis.chrome = { storage: { local: { get: () => new Promise(resolve => reads.push(resolve)) } } };
+const stateReader = new Function('loadAppState', 'getPlayerRecordingState', `
   let storedStateRevision = 0;
   const RECORDING_STATUS = { idle: 'idle' };
   const isExtensionContextAvailable = () => true, getLocalRecordingId = () => 'current';
-  const normalizeRegion = value => value, normalizeRegions = value => value ?? [];
-  const normalizeRecordingState = value => value, getMultiRegionLimit = () => 2, normalizeShortcutKeys = value => value;
-  const DEFAULT_SEEK_SECONDS = 5, DEFAULT_MULTI_REGION_COUNT = 2, DEFAULT_CONTENT_SHORTCUT_KEYS = {};
   ${compile('loadState')}
   return { load: loadState, changed() { storedStateRevision++; } };
-`)({ storage: { local: { get: () => new Promise(resolve => reads.push(resolve)) } } }, normalizeSettings);
+`)(loadAppState, getPlayerRecordingState);
 const loading = stateReader.load();
 stateReader.changed();
 reads.shift()({ settings: { enableShortcuts: true }, recordingState: { status: 'idle' } });
 await new Promise(resolve => setImmediate(resolve));
 assert.equal(reads.length, 1, 'a changed snapshot must be read again before it can overwrite current settings');
-reads.shift()({ settings: { enableShortcuts: false }, recordingState: { status: 'recording' } });
+reads.shift()({ settings: { enableShortcuts: false }, recordingState: { status: 'recording', recordingId: 'current' } });
 const freshState = await loading;
 assert.equal(freshState.settings.enableShortcuts, false);
 assert.equal(freshState.recordingState.status, 'recording');
+delete globalThis.chrome;
 
 const actions = [];
 const makeShortcutHandler = new Function("actions", "multiRegionEnabled = false", "recordKey = 'r'", `
@@ -233,20 +233,18 @@ for (const mode of ['region', 'full']) for (const outcome of ['stop', 'cancel', 
   await assert.rejects(api.toggle(), /녹화 중에는/);
   assert.equal(commands.length, sent, 'the other recording mode must not start or stop the active recording');
 }
-const bind = new Function("captureFullScreenshot", "Date", `
-  const POINTER_CLICK_DEDUP_MS = 500;
-  let lastScreenshotPointerActivationAt = 0;
+const bind = new Function("captureFullScreenshot", `
+  const boundPlayerButtons = new WeakSet();
   ${compile('bindDirectPlayerActivation', 'handlePlayerScreenshotActivation')}
   return button => bindDirectPlayerActivation(button, handlePlayerScreenshotActivation);
-`)(() => captures++, { now: () => now });
-const button = Object.assign(new EventTarget(), { dataset: {} });
+`)(() => captures++);
+const button = new EventTarget();
 bind(button);
 bind(button);
 const dispatch = (type, detail) => button.dispatchEvent(Object.assign(new Event(type, { cancelable: true }), { button: 0, detail }));
 dispatch('pointerdown', 0);
-now += 1000; // The click reaches us late under load (or after a long press).
 dispatch('click', 1);
-assert.equal(captures, 1, 'one pointer gesture must trigger exactly once even after 500 ms');
+assert.equal(captures, 1, 'one pointer gesture must trigger exactly once');
 dispatch('click', 0);
 assert.equal(captures, 2, 'keyboard/assistive activation must still work immediately afterwards');
 console.log('player shortcut and delayed click checks passed');

@@ -64,6 +64,160 @@ async function prepareSplitSource(result, base, sizeMode = false, large = false)
   return source;
 }
 
+test('automatic splitting shares the result settings and downloads only the requested files', async ({ extension }, testInfo) => {
+  test.setTimeout(180_000);
+  const { context, worker, page } = extension;
+  const base = `chrome-extension://${new URL(worker.url()).host}/result/result.html`;
+  const seed = await context.newPage();
+  const { id, bytes } = await prepareSplitSource(seed, base, true);
+  expect(bytes).toBeGreaterThan(1_000_000);
+  await seed.close();
+  const downloadPath = testInfo.outputPath('automatic-split');
+  await mkdir(downloadPath, { recursive: true });
+  const session = await context.newCDPSession(page);
+  await session.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath });
+  await context.addInitScript(() => {
+    if (location.protocol !== 'chrome-extension:' || location.pathname !== '/result/result.html') return;
+    window.testAutomaticSplitFilenames = [];
+    const download = chrome.downloads.download.bind(chrome.downloads);
+    chrome.downloads.download = async options => {
+      const id = await download(options);
+      window.testAutomaticSplitFilenames.push(options.filename);
+      return id;
+    };
+    const params = new URLSearchParams(location.search);
+    if (!params.has('autoSplit') || !params.has('autoDownload')) return;
+    const post = Worker.prototype.postMessage;
+    Worker.prototype.postMessage = function (message, ...args) {
+      if (message?.type === 'EXEC' && !window.resumeAutomaticSplit
+        && document.getElementById('result-loading-message')?.textContent === '녹화 파일을 자동으로 나누는 중입니다.') {
+        window.resumeAutomaticSplit = () => post.call(this, message, ...args);
+        return;
+      }
+      return post.call(this, message, ...args);
+    };
+  });
+
+  const cases = [
+    { enabled: false, threshold: 1, mode: 'half', count: 0 },
+    { enabled: true, threshold: 10, mode: 'half', count: 0, download: true },
+    { enabled: true, threshold: 8, mode: 'half', count: 2 },
+    { enabled: true, threshold: 8, mode: 'duration', count: 3 },
+    { enabled: true, threshold: 8, mode: 'thirds', count: 3, download: true },
+    { enabled: true, threshold: 8, mode: 'quarters', format: 'webm', count: 4, download: true },
+    { enabled: true, threshold: 999, mode: 'size', maxMegabytes: 40, count: 0, download: true },
+    { enabled: true, threshold: 999, mode: 'size', maxMegabytes: 1, download: true },
+    { enabled: true, threshold: 8, mode: 'half', count: 2, download: true, autoFocus: false },
+  ];
+  const downloaded = () => worker.evaluate(async () => (await chrome.downloads.search({ state: 'complete' })).map(item => item.filename));
+  for (const scenario of cases) {
+    const { enabled, threshold, mode, download, format = 'mp4', maxMegabytes, autoFocus = true } = scenario;
+    let { count } = scenario;
+    const previousFiles = await downloaded();
+    const opened = context.waitForEvent('page');
+    await worker.evaluate(async options => {
+      await chrome.storage.local.set({
+        settings: {
+          enableAutoSplitRecording: options.enabled, autoSplitAfterSeconds: options.threshold,
+          autoSplitMode: options.mode, autoSplitIntervalSeconds: 4,
+          autoSplitFormat: options.format, autoSplitMaxMegabytes: options.maxMegabytes,
+          enableAutoDownloadRecording: Boolean(options.download), autoFocusResult: options.autoFocus,
+        },
+        recordingState: { status: 'completed', recordingId: options.id },
+      });
+      await chrome.alarms.create('open-recording-result', { when: Date.now() });
+    }, { enabled, threshold, mode, download, id, format, maxMegabytes, autoFocus });
+    const result = await opened;
+    if (download && count !== 0) {
+      await expect(result.locator('#result-loading-message')).toHaveText('녹화 파일을 자동으로 나누는 중입니다.');
+      await expect.poll(() => result.evaluate(() => Boolean(window.resumeAutomaticSplit))).toBe(true);
+      expect(await result.evaluate(async () => (await chrome.tabs.getCurrent())?.active)).toBe(autoFocus);
+      if (autoFocus) await expect.poll(() => result.locator('#preview-video').evaluate(video => video.readyState)).toBeGreaterThanOrEqual(2);
+      await result.evaluate(() => window.resumeAutomaticSplit());
+    }
+    if (download && !autoFocus) {
+      await expect.poll(() => result.isClosed()).toBe(true);
+      expect(await downloaded()).toHaveLength(previousFiles.length + count);
+      continue;
+    }
+    await expect(result.locator('#result-loading')).toBeHidden({ timeout: 60_000 });
+    await expect(result.locator('#split-button')).toBeEnabled();
+    await expect(result.getByRole('combobox', { name: '나누기 기준' })).toHaveValue(mode === 'size' ? 'size' : 'duration');
+    await expect(result.getByRole('combobox', { name: '나누기 파일 형식' })).toHaveValue(format);
+    const segments = result.locator('#split-files-list .split-chip-meta');
+    if (count === undefined) {
+      await expect.poll(() => segments.count()).toBeGreaterThan(1);
+      count = await segments.count();
+      await expect(result.getByRole('spinbutton', { name: '나누기 값' })).toHaveValue('1');
+    }
+    await expect(segments).toHaveCount(count);
+    if (count) {
+      await expect(result.locator('#split-status')).toHaveText(`자동 분할 완료 · ${count}개`);
+      await expect(segments.first()).toHaveText(/^0:00 - 0:[\d.]+ · [\d.]+초 · /);
+    }
+    if (mode === 'duration') await expect(segments.last()).toHaveText(/^0:08 - 0:09(?:\.\d)? · 1\.0초 · /);
+    const files = await downloaded();
+    expect(files).toHaveLength(previousFiles.length + (download ? Math.max(1, count) : 0));
+    if (maxMegabytes === 1) {
+      for (const file of files.filter(path => !previousFiles.includes(path))) {
+        expect((await stat(file)).size).toBeLessThanOrEqual(1_000_000);
+      }
+    }
+    if (download) {
+      const names = await result.evaluate(() => window.testAutomaticSplitFilenames);
+      if (count) expect(names).toEqual(Array.from({ length: count }, (_, index) =>
+        `motion_20260717_120000_${String(count - index).padStart(3, '0')}.${format}`));
+      else expect(names).toEqual(['motion_20260717_120000_9s.webm']);
+      expect(new URL(result.url()).searchParams.has('autoSplit')).toBe(false);
+      await result.reload();
+      await expect(result.locator('#split-button')).toBeEnabled();
+      await expect(result.locator('#split-files-list .split-chip-meta')).toHaveCount(0);
+      expect(await downloaded()).toEqual(files);
+    }
+    await result.close();
+  }
+});
+
+test('screen recording fallback keeps its notice distinct from an automatic split timeout', async ({ extension }) => {
+  const { context, worker } = extension;
+  const base = `chrome-extension://${new URL(worker.url()).host}/result/result.html`;
+  const result = await context.newPage();
+  const { id } = await prepareSplitSource(result, base);
+  await result.evaluate(async id => {
+    const { getPartsByRecordingId, putPart } = await import('/shared/idb.js');
+    const [part] = await getPartsByRecordingId(id);
+    await putPart({ ...part, captureMethod: 'screen' });
+    await chrome.storage.local.set({ settings: { enableAutoSplitRecording: true, autoSplitAfterSeconds: 1 } });
+  }, id);
+  await context.addInitScript(() => {
+    if (location.pathname !== '/result/result.html' || !location.search.includes('autoSplit=1')) return;
+    window.extraVideoElements = 0;
+    const create = document.createElement.bind(document);
+    document.createElement = (tag, ...args) => {
+      if (tag === 'video') window.extraVideoElements++;
+      return create(tag, ...args);
+    };
+    const prototype = HTMLMediaElement.prototype;
+    for (const [name, unready] of [['readyState', 0], ['duration', NaN]]) {
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+      Object.defineProperty(prototype, name, { ...descriptor, get() { return unready; } });
+    }
+    addEventListener('loadedmetadata', event => event.stopImmediatePropagation(), true);
+    const schedule = window.setTimeout.bind(window);
+    window.setTimeout = (callback, delay, ...args) => schedule(callback, delay === 15000 ? 800 : delay, ...args);
+  });
+  const pendingResult = await context.newPage();
+  await pendingResult.goto(`${base}?id=${id}&autoSplit=1`);
+  await expect(pendingResult.locator('#result-loading')).toBeHidden();
+  await expect(pendingResult.locator('#empty-message')).toBeHidden();
+  await expect(pendingResult.locator('#split-status')).toHaveText(/영상 길이를 확인하지 못해 자동 분할/);
+  await expect(pendingResult.locator('#download-current-button')).toBeEnabled();
+  expect(await pendingResult.evaluate(() => window.extraVideoElements)).toBe(0);
+  await pendingResult.getByRole('button', { name: '화면 녹화 저장 안내' }).focus();
+  await expect(pendingResult.locator('#capture-fallback-message')).toHaveText('방송 원본을 확보하지 못해 화면 녹화를 WebM으로 저장했습니다.');
+  await expect(pendingResult.locator('#capture-fallback-message')).toHaveCSS('opacity', '1');
+});
+
 test('original MP4 playback cap preserves the start and media bytes', async ({ extension }) => {
   const { context, worker } = extension;
   const result = await context.newPage();
@@ -315,7 +469,7 @@ test('large normal MP4 edits download from disk without reading full outputs int
       return post.call(this, message, ...args);
     };
   });
-  await result.locator('[data-split-ratio="0.5"]').click();
+  await result.locator('[data-split-count="2"]').click();
   await result.locator('#split-button').click();
   await expect(result.locator('#split-result-summary')).toHaveText('나눈 파일 (2개)');
   expect(await result.evaluate(() => window.splitDiskAudit)).toEqual({ mounts: 2, reads: 0 });
@@ -350,7 +504,7 @@ test('large normal MP4 edits download from disk without reading full outputs int
   await result.locator('#trim-start-input').fill('0.3');
   await result.locator('#trim-start-input').press('Tab');
   await expect.poll(jobCount).toBe(0);
-  await result.locator('[data-split-ratio="0.5"]').click();
+  await result.locator('[data-split-count="2"]').click();
   await result.evaluate(() => {
     const post = Worker.prototype.postMessage;
     Worker.prototype.postMessage = function (message, ...args) {
@@ -455,7 +609,7 @@ test('WebM to MP4 splits start with independently decodable video', async ({ ext
     }
     for (const count of [3, 4, 2]) {
       await result.locator('#split-format-select').selectOption('mp4');
-      await result.locator(count === 2 ? '[data-split-ratio="0.5"]' : `[data-split-count="${count}"]`).click();
+      await result.locator(`[data-split-count="${count}"]`).click();
       if (!trimmed && count === 3) await result.locator('#split-value-input').fill('3');
       const seconds = Number(await result.locator('#split-value-input').inputValue());
       await result.evaluate(() => { window.testSplitVideos = 0; });
@@ -617,10 +771,17 @@ test('split downloads finish in reverse order for newest-first folder sorting', 
   const session = await context.newCDPSession(result);
   const dialogs = [];
   result.on('dialog', async dialog => { dialogs.push(dialog.message()); await dialog.dismiss(); });
+  await result.evaluate(() => {
+    const download = chrome.downloads.download.bind(chrome.downloads);
+    chrome.downloads.download = async options => {
+      const id = await download(options);
+      window.testSavedFiles.push({ id, filename: options.filename });
+      return id;
+    };
+  });
   for (const automatic of [false, true]) {
     if (automatic) {
       await worker.evaluate(() => chrome.storage.local.set({ settings: { enableAutoDownloadSplit: true } }));
-      await result.reload();
       await expect(result.locator('#split-button')).toBeEnabled({ timeout: 30000 });
     }
     await expect(result.locator('#trim-thumbnails .trim-thumbnail').first()).toBeAttached();
@@ -629,15 +790,7 @@ test('split downloads finish in reverse order for newest-first folder sorting', 
     const downloadPath = testInfo.outputPath(automatic ? 'automatic' : 'manual');
     await mkdir(downloadPath, { recursive: true });
     await session.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath });
-    await result.evaluate(() => {
-      window.testSavedFiles = [];
-      const download = chrome.downloads.download.bind(chrome.downloads);
-      chrome.downloads.download = async options => {
-        const id = await download(options);
-        window.testSavedFiles.push({ id, filename: options.filename });
-        return id;
-      };
-    });
+    await result.evaluate(() => { window.testSavedFiles = []; });
     await result.locator('#split-format-select').selectOption('mp4');
     await result.locator('[data-split-count="4"]').click();
     await result.locator('#split-button').click();

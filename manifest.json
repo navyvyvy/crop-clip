@@ -32,6 +32,12 @@
   "content_scripts": [
     {
       "matches": ["*://*.chzzk.naver.com/*"],
+      "js": ["content/playback_codec.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["*://*.chzzk.naver.com/*"],
       "css": ["content/region_selector.css"],
       "js": ["shared/recording_encoder.js", "content/region_selector.js"],
       "run_at": "document_idle"

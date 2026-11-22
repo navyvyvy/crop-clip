@@ -1,14 +1,23 @@
-import type { RegionSelection, Settings } from "./types.js";
+import type { RegionSelection, Settings, ShortcutKeys } from "./types.js";
 
-export type PopupCommand =
-  | { type: "SELECT_REGION" }
-  | { type: "SAVE_REGIONS"; regions: RegionSelection[] }
-  | { type: "CLEAR_REGION"; region?: RegionSelection }
-  | { type: "START_FULL_RECORDING"; playback?: { src: string; time: number } }
-  | { type: "CAPTURE_FULL_SCREENSHOT" }
+export interface PlaybackSource {
+  src: string;
+}
+
+export type RecordingControlMessage =
+  | { type: "START_FULL_RECORDING"; playback?: PlaybackSource }
   | { type: "START_RECORDING" }
   | { type: "STOP_RECORDING"; recordingId?: string }
   | { type: "CANCEL_RECORDING" };
+
+export type PopupCommand =
+  | RecordingControlMessage
+  | { type: "SELECT_REGION" }
+  | { type: "SAVE_REGIONS"; regions: RegionSelection[] }
+  | { type: "CLEAR_REGION"; region?: RegionSelection }
+  | { type: "CAPTURE_FULL_SCREENSHOT" };
+
+export type SettingsPatch = Partial<Omit<Settings, "shortcutKeys">> & { shortcutKeys?: Partial<ShortcutKeys> };
 
 export type ContentCommand =
   | { type: "PREPARE_DIRECT_RECORDING"; recordingId: string; settings: Settings; fullPlayer?: boolean }
@@ -21,7 +30,7 @@ export type ContentCommand =
       type: "START_DIRECT_RECORDING";
       recordingId: string;
       fullPlayer: boolean;
-      playback?: { src: string; time: number };
+      playback?: PlaybackSource;
       region: RegionSelection;
       regions?: RegionSelection[];
       settings: Settings;
@@ -54,9 +63,21 @@ export type FinalizeRecordingMessage = {
   originalStreamEnd?: number;
 };
 
+export type RuntimeMessage =
+  | PopupCommand
+  | { type: "UPDATE_SETTINGS"; patch: SettingsPatch }
+  | RecordingStartedMessage
+  | RecordingErrorMessage
+  | StoreRecordingChunkMessage
+  | FinalizeRecordingMessage
+  | StreamOffsetRequest
+  | DeletionScheduleRequest
+  | AutoDownloadHandledMessage;
+
 type OkResponse<T = undefined> = { ok: true; data?: T };
 type ErrorResponse = { ok: false; error: string };
 export type MessageResponse<T = undefined> = OkResponse<T> | ErrorResponse;
+export const UNSUPPORTED_RUNTIME_MESSAGE = "지원하지 않는 메시지입니다.";
 
 export function ok<T = undefined>(data?: T): MessageResponse<T> {
   return data === undefined ? { ok: true } : { ok: true, data };

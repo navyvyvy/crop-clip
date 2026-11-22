@@ -1,16 +1,21 @@
 import { MAX_ORIGINAL_STREAM_SECONDS } from "../shared/time_range.js";
 import type { MessageResponse } from "../shared/messages.js";
-import { boxes } from "../shared/mp4_boxes.js";
+import { boxes, readMp4Tracks } from "../shared/mp4_boxes.js";
 
 const CONNECTOR_STREAM_PREFIX = "http://localhost:17080/chzzk/";
-export const ORIGINAL_STREAM_PREFIXES = ["https://ex-nlive-streaming.navercdn.com/", "https://nvelop-livecloud.pstatic.net/", CONNECTOR_STREAM_PREFIX];
+export const ORIGINAL_STREAM_PREFIXES = [
+  "https://ex-nlive-streaming.navercdn.com/",
+  "https://nvelop-livecloud.pstatic.net/",
+  "https://livecloud.pstatic.net/",
+  CONNECTOR_STREAM_PREFIX,
+];
 const FETCH_TIMEOUT_MS = 4_000;
 const STOP_FRAGMENT_TIMEOUT_MS = 3_000;
 const POLL_MS = 700;
 const MAX_FRAGMENT_BYTES = 8 * 1024 * 1024;
-const TIMELINE_HEADER_RANGE = "bytes=0-8191";
-// Bound captured data; remux output still occupies the converter's in-memory filesystem.
-const MAX_RECORDING_BYTES = 8_500_000 * MAX_ORIGINAL_STREAM_SECONDS / 8;
+const TIMELINE_HEADER_BYTES = 8 * 1024;
+const TIMELINE_HEADER_RANGE = `bytes=0-${TIMELINE_HEADER_BYTES - 1}`;
+const TIMELINE_TOLERANCE_SECONDS = 0.15;
 
 export type OriginalStreamProbe = { offset: number; playlist: string };
 
@@ -25,10 +30,11 @@ export function probeOriginalStream(src: string, prefixes: string[]): Promise<Me
     type ProbeHook = SourceBuffer["appendBuffer"] & { cancelCropClipProbe?: () => void };
     (SourceBuffer.prototype.appendBuffer as ProbeHook).cancelCropClipProbe?.();
     const original = SourceBuffer.prototype.appendBuffer;
-    const isPlaylist = (entry: PerformanceEntry) => prefixes.some(prefix => entry.name.startsWith(prefix))
-      && /\.m3u8(?:\?|$)/.test(entry.name);
+    let unrecognizedPlaylistHost: string | undefined;
     const choosePlaylist = (entries: PerformanceEntry[]): PerformanceEntry | undefined => {
-      const candidates = entries.filter(isPlaylist).reverse();
+      const playlists = entries.filter(entry => /^https?:\/\/[^?]+\.m3u8(?:\?|$)/.test(entry.name)).reverse();
+      const candidates = playlists.filter(entry => prefixes.some(prefix => entry.name.startsWith(prefix)));
+      if (!candidates.length && playlists[0]) unrecognizedPlaylistHost = new URL(playlists[0].name).host;
       return candidates.find(entry => new URL(entry.name).searchParams.has("_HLS_msn")) ?? candidates[0];
     };
     let playlist = choosePlaylist(performance.getEntriesByType("resource")
@@ -77,10 +83,12 @@ export function probeOriginalStream(src: string, prefixes: string[]): Promise<Me
         || !new URL(playlist.name).searchParams.has("_HLS_msn"))) playlist = candidate;
       tryFinish();
     });
-    const timer = setTimeout(() => finish({
-      ok: false,
-      error: playlist ? "방송의 재생 시각을 원본과 맞추지 못했습니다." : "이 재생 방식의 원본 목록을 찾지 못했습니다.",
-    }), 3_000);
+    const timer = setTimeout(() => {
+      let error = "이 재생 방식의 원본 목록을 찾지 못했습니다.";
+      if (playlist) error = "방송의 재생 시각을 원본과 맞추지 못했습니다.";
+      else if (unrecognizedPlaylistHost) error = `원본 목록을 찾지 못했습니다.\n감지한 호스트 · ${unrecognizedPlaylistHost}`;
+      finish({ ok: false, error });
+    }, 3_000);
     (sample as ProbeHook).cancelCropClipProbe = () => finish({ ok: false, error: "새 원본 탐색을 시작했습니다." });
     SourceBuffer.prototype.appendBuffer = sample;
     observer.observe({ type: "resource" });
@@ -94,32 +102,20 @@ interface Segment { duration: number; url: string }
 
 function readVideoTrack(init: ArrayBuffer): Track {
   const data = new DataView(init);
-  const moov = boxes(data).find(box => box.type === "moov");
   let videoTrack: Track | undefined;
   let hasAac = false;
-  for (const track of moov ? boxes(data, moov.start, moov.end) : []) {
-    if (track.type !== "trak") continue;
-    const headers = boxes(data, track.start, track.end);
-    const tkhd = headers.find(box => box.type === "tkhd");
-    const media = headers.find(box => box.type === "mdia");
-    if (!tkhd || !media) continue;
-    const children = boxes(data, media.start, media.end);
-    const handler = children.find(box => box.type === "hdlr");
-    const mdhd = children.find(box => box.type === "mdhd");
-    const minf = children.find(box => box.type === "minf");
-    const stbl = minf && boxes(data, minf.start, minf.end).find(box => box.type === "stbl");
-    const stsd = stbl && boxes(data, stbl.start, stbl.end).find(box => box.type === "stsd");
-    if (!handler || !mdhd || !stsd || handler.start + 12 > handler.end) continue;
-    const codec = boxes(data, stsd.start + 8, stsd.end)[0]?.type;
-    const kind = data.getUint32(handler.start + 8);
+  for (const { kind, codec, headers, media } of readMp4Tracks(data)) {
     if (kind === 0x736f756e && codec === "mp4a") hasAac = true;
-    if (kind !== 0x76696465 || (codec !== "avc1" && codec !== "avc3")) continue;
+    if (kind !== 0x76696465 || !["avc1", "avc3", "hvc1", "hev1"].includes(codec)) continue;
+    const tkhd = headers.find(box => box.type === "tkhd");
+    const mdhd = media.find(box => box.type === "mdhd");
+    if (!tkhd || !mdhd) continue;
     const id = data.getUint32(tkhd.start + (data.getUint8(tkhd.start) === 1 ? 20 : 12));
     const timescale = data.getUint32(mdhd.start + (data.getUint8(mdhd.start) === 1 ? 20 : 12));
     if (id && timescale) videoTrack = { id, timescale };
   }
   if (videoTrack && hasAac) return videoTrack;
-  throw new OriginalStreamError("H.264 영상과 AAC 음성이 함께 있는 방송만 원본 저장을 지원합니다.");
+  throw new OriginalStreamError("H.264 또는 H.265 영상과 AAC 음성이 있는 방송만 원본 저장을 지원합니다.");
 }
 
 function fragmentStart(fragment: ArrayBuffer, track: Track): number {
@@ -136,6 +132,16 @@ function fragmentStart(fragment: ArrayBuffer, track: Track): number {
     }
   }
   throw new OriginalStreamError("원본 조각의 시작 시간을 읽지 못했습니다.");
+}
+
+async function readFragmentStart(fragment: Blob, track: Track): Promise<number> {
+  const header = await fragment.slice(0, TIMELINE_HEADER_BYTES).arrayBuffer();
+  try {
+    return fragmentStart(header, track);
+  } catch (error) {
+    if (fragment.size === header.byteLength) throw error;
+    return fragmentStart(await fragment.arrayBuffer(), track);
+  }
 }
 
 function mediaUrl(value: string, base: URL): string {
@@ -184,6 +190,7 @@ async function fetchOriginal(url: string | URL, signal: AbortSignal, range?: str
     signal: AbortSignal.any([signal, AbortSignal.timeout(FETCH_TIMEOUT_MS)]),
     cache: "no-store",
     redirect: "error",
+    priority: "low",
     headers: range ? { Range: range } : undefined,
   });
   if (!response.ok || Number(response.headers.get("Content-Length")) > MAX_FRAGMENT_BYTES) {
@@ -193,10 +200,10 @@ async function fetchOriginal(url: string | URL, signal: AbortSignal, range?: str
   return response;
 }
 
-async function readFragment(response: Response): Promise<ArrayBuffer> {
+async function readOriginalBody(response: Response): Promise<Blob> {
   const reader = response.body?.getReader();
   if (!reader) throw new OriginalStreamError("원본 방송 데이터가 비어 있습니다.");
-  const chunks: Uint8Array[] = [];
+  const chunks: Uint8Array<ArrayBuffer>[] = [];
   let size = 0;
   try {
     while (true) {
@@ -204,47 +211,43 @@ async function readFragment(response: Response): Promise<ArrayBuffer> {
       if (done) break;
       size += value.byteLength;
       if (size > MAX_FRAGMENT_BYTES) throw new OriginalStreamError("원본 조각 크기가 올바르지 않습니다.");
-      chunks.push(value);
+      chunks.push(value.buffer instanceof ArrayBuffer
+        ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+        : value.slice());
     }
   } finally {
     await reader.cancel().catch(() => {});
     reader.releaseLock();
   }
   if (size === 0) throw new OriginalStreamError("원본 방송 데이터가 비어 있습니다.");
-  const data = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    data.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return data.buffer;
+  return new Blob(chunks);
 }
 
-async function fetchFragment(url: string, signal: AbortSignal): Promise<ArrayBuffer> {
-  return readFragment(await fetchOriginal(url, signal));
+async function fetchFragment(url: string, signal: AbortSignal): Promise<Blob> {
+  return readOriginalBody(await fetchOriginal(url, signal));
 }
 
 export async function openOriginalStream(url: URL, startSeconds: number, signal: AbortSignal) {
   const loadPlaylist = async (requestSignal = signal) =>
-    parsePlaylist(new TextDecoder().decode(await readFragment(await fetchOriginal(url, requestSignal))), url);
+    parsePlaylist(await (await readOriginalBody(await fetchOriginal(url, requestSignal))).text(), url);
   let playlist = await loadPlaylist();
   const initUrl = playlist.init;
   const initPromise = fetchFragment(initUrl, signal);
-  const trackPromise = initPromise.then(readVideoTrack);
+  const trackPromise = initPromise.then(async init => readVideoTrack(await init.arrayBuffer()));
   const readTail = async (tailUrl: string) => {
     const [track, probe] = await Promise.all([
       trackPromise,
       fetchOriginal(tailUrl, signal, TIMELINE_HEADER_RANGE).catch(() => fetchOriginal(tailUrl, signal)),
     ]);
-    const header = await readFragment(probe);
+    const header = await readOriginalBody(probe);
     let complete = probe.status === 206 ? undefined : header;
     let start: number;
     try {
-      start = fragmentStart(header, track);
+      start = await readFragmentStart(header, track);
     } catch (error) {
       if (complete) throw error;
       complete = await fetchFragment(tailUrl, signal);
-      start = fragmentStart(complete, track);
+      start = await readFragmentStart(complete, track);
     }
     return { start, complete };
   };
@@ -271,20 +274,20 @@ export async function openOriginalStream(url: URL, startSeconds: number, signal:
   let index = lastIndex;
   let expectedStart = tail.start;
   while (index > 0 && startSeconds < expectedStart) expectedStart -= playlist.segments[--index].duration;
-  let first: ArrayBuffer | undefined = (index === lastIndex ? last : undefined) ?? await fetchFragment(playlist.segments[index].url, signal);
+  if (startSeconds < expectedStart - TIMELINE_TOLERANCE_SECONDS) {
+    throw new OriginalStreamError("클릭한 위치의 원본 조각을 찾지 못했습니다.");
+  }
+  const cachedFirst = index === lastIndex ? last : undefined;
+  const first = cachedFirst ?? await fetchFragment(playlist.segments[index].url, signal);
   if (index === lastIndex) last = undefined;
-  const firstStart = fragmentStart(first, track);
+  const firstStart = cachedFirst ? tail.start : await readFragmentStart(first, track);
   let savedThrough = firstStart + playlist.segments[index].duration;
-  if (startSeconds < firstStart || startSeconds >= savedThrough || Math.abs(firstStart - expectedStart) > 0.15) {
+  if (startSeconds < firstStart || startSeconds >= savedThrough || Math.abs(firstStart - expectedStart) > TIMELINE_TOLERANCE_SECONDS) {
     throw new OriginalStreamError("클릭한 위치의 원본 조각을 찾지 못했습니다.");
   }
   let next = playlist.sequence + index + 1;
-  let size = init.byteLength + first.byteLength;
   const limit = startSeconds + MAX_ORIGINAL_STREAM_SECONDS;
-  // The first and last fragments include samples outside the requested interval.
-  const maxInputBytes = MAX_RECORDING_BYTES + size + MAX_FRAGMENT_BYTES;
   let firstChunk: Blob | undefined = new Blob([init, first], { type: "video/mp4" });
-  first = undefined;
   const stopDeadline = new AbortController();
   const requestSignal = AbortSignal.any([signal, stopDeadline.signal]);
   let stopTimer: ReturnType<typeof setTimeout> | undefined;
@@ -335,11 +338,9 @@ export async function openOriginalStream(url: URL, startSeconds: number, signal:
       const cached = next === playlist.sequence + lastIndex && segment.url === lastUrl ? last : undefined;
       const fragment = cached ?? await fetchFragment(segment.url, requestSignal);
       if (cached) last = undefined;
-      if (size + fragment.byteLength > maxInputBytes) return Math.min(savedThrough, end);
-      const start = fragmentStart(fragment, track);
-      if (Math.abs(start - savedThrough) > 0.15) throw new Error("원본 방송 조각이 연속되지 않습니다.");
+      const start = cached ? tail.start : await readFragmentStart(fragment, track);
+      if (Math.abs(start - savedThrough) > TIMELINE_TOLERANCE_SECONDS) throw new Error("원본 방송 조각이 연속되지 않습니다.");
       await onChunk(new Blob([fragment], { type: "video/mp4" }));
-      size += fragment.byteLength;
       savedThrough = start + segment.duration;
       next++;
       lastProgress = performance.now();

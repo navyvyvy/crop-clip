@@ -56,9 +56,9 @@ export async function expectResultResourcesReleased(page, urlCount) {
   await expect.poll(() => page.evaluate(() => window.testObjectUrls.size), { message: 'temporary media/download URLs must be revoked' }).toBe(urlCount);
 }
 
-export async function prepareVideo(page, width = 640, height = 360) {
+export async function prepareVideo(page, width = 640, height = 360, durationMs = 3000, mseMimeType) {
   await page.getByRole('button', { name: 'Native', exact: true }).click();
-  await page.evaluate(async ({ width, height }) => {
+  await page.evaluate(async ({ width, height, durationMs, mseMimeType }) => {
     await VideoEncoder.isConfigSupported({ codec: 'vp8', width, height, hardwareAcceleration: 'prefer-hardware' });
     const canvas = document.createElement('canvas');
     canvas.width = width; canvas.height = height;
@@ -82,11 +82,11 @@ export async function prepareVideo(page, width = 640, height = 360) {
     const stream = canvas.captureStream(30);
     stream.addTrack(destination.stream.getAudioTracks()[0]);
     const chunks = [];
-    const recorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp8,opus' });
+    const recorder = new MediaRecorder(stream, { mimeType: mseMimeType ?? 'video/webm;codecs=vp8,opus' });
     recorder.ondataavailable = event => chunks.push(event.data);
     const stopped = new Promise(resolve => { recorder.onstop = resolve; });
     recorder.start();
-    await new Promise(resolve => setTimeout(resolve, 3000));
+    await new Promise(resolve => setTimeout(resolve, durationMs));
     recorder.stop();
     await stopped;
     painting = false;
@@ -94,10 +94,26 @@ export async function prepareVideo(page, width = 640, height = 360) {
     oscillator.stop();
     await audio.close();
     const video = document.querySelector('video');
-    video.src = URL.createObjectURL(new Blob(chunks, { type: recorder.mimeType }));
+    const blob = new Blob(chunks, { type: recorder.mimeType });
+    if (mseMimeType) {
+      const source = window.testMediaSource = new MediaSource();
+      const opened = new Promise(resolve => source.addEventListener('sourceopen', resolve, { once: true }));
+      video.src = URL.createObjectURL(source);
+      await opened;
+      const buffer = source.addSourceBuffer(mseMimeType);
+      const appended = new Promise((resolve, reject) => {
+        buffer.addEventListener('updateend', resolve, { once: true });
+        buffer.addEventListener('error', () => reject(new Error('MSE fixture could not append the recorded source')), { once: true });
+      });
+      buffer.appendBuffer(await blob.arrayBuffer());
+      await appended;
+      source.endOfStream();
+    } else {
+      video.src = URL.createObjectURL(blob);
+    }
     video.loop = true;
     await video.play().catch(error => { throw new Error(`${error.message}; source ${recorder.mimeType}, ${chunks.map(chunk => chunk.size)}`); });
-  }, { width, height });
+  }, { width, height, durationMs, mseMimeType });
 }
 
 export async function interceptDownloads(page) {

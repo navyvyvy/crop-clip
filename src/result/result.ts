@@ -1,18 +1,19 @@
 import { canvasToBlob } from "../shared/canvas.js";
-import { MEDIA_SEEK_TOLERANCE_SECONDS, createObjectUrlSource, releaseVideoSource, getPartSource, pickRecorderMimeType, waitForMediaEvent, hydratePart, loadVideoForPart, seekVideo, recordVideoRange, type LoadedPart } from "./media.js";
+import { MEDIA_SEEK_TOLERANCE_SECONDS, MediaEventTimeoutError, createObjectUrlSource, releaseVideoSource, getPartSource, pickRecorderMimeType, waitForMediaEvent, hydratePart, loadVideoForPart, seekVideo, recordVideoRange, type LoadedPart } from "./media.js";
 import { downloadSource, downloadSourcesSequentially, downloadSourcesAndConfirm } from "./downloads.js";
 import { capMp4PlaybackDuration } from "./mp4_duration.js";
 import { loadFfmpeg, releaseFfmpeg, deleteFfmpegFile, clearFfmpegOutputs, readFfmpegBlob, type FfmpegLike } from "./ffmpeg.js";
 import { getPart, getPartsByRecordingId, getRecording, putPart, putRecording } from "../shared/idb.js";
 import { openEditOutputs } from "../shared/temporary_outputs.js";
 import type { AutoDownloadHandledMessage, DeletionScheduleRequest, MessageResponse } from "../shared/messages.js";
-import { loadAppState } from "../shared/storage.js";
+import { loadSettings } from "../shared/storage.js";
 import {
   bytesToMegabytes,
   estimateRangeSize,
   floorTimeToStep,
   getExpectedSplitCount,
   getNextSizeSplitSeconds,
+  getSplitIntervalForCount,
   isFullTimeRange,
   MAX_ORIGINAL_STREAM_SECONDS,
   MILLISECONDS_PER_SECOND,
@@ -28,17 +29,19 @@ import {
   type TimeRange,
   type TimeRangeHandle,
 } from "../shared/time_range.js";
-import { RECORDING_FORMAT, STANDARD_RECORDING_FRAME_RATE, STARTUP_STALL_WINDOW_SECONDS, STARTUP_TRIM_MAX_SECONDS, type RecordingFormat, type RecordingRecord } from "../shared/types.js";
+import { MAX_VIDEO_BITS_PER_SECOND, MIN_VIDEO_BITS_PER_SECOND, RECORDING_FORMAT, SPLIT_COUNTS, STANDARD_RECORDING_FRAME_RATE, STARTUP_STALL_WINDOW_SECONDS, STARTUP_TRIM_MAX_SECONDS, type RecordingFormat, type RecordingRecord, type Settings } from "../shared/types.js";
 
 const params = new URLSearchParams(location.search);
 const recordingId = params.get("id") ?? "";
 const sourceTabId = Number(params.get("sourceTabId") ?? "");
 const autoDownloadRecording = params.get("autoDownload") === "1";
+const autoSplitRecording = params.get("autoSplit") === "1";
+let showResult = !autoDownloadRecording || params.get("keepOpen") === "1";
 type OutputFormat = RecordingFormat;
 type ConvertFormat = OutputFormat | "gif";
+type SplitOptions = { mode: "duration" | "size"; value: number; format: OutputFormat };
 
-let autoDownloadSplit = false;
-let restoreSourceTabOnClose = !autoDownloadRecording;
+let restoreSourceTabOnClose = showResult;
 let allowRecordingDeletion = !autoDownloadRecording;
 // During pagehide the tab may already be gone, so track activity before closing.
 let resultTab: chrome.tabs.Tab | undefined;
@@ -50,8 +53,13 @@ chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
 const elements = {
   resultLoading: document.getElementById("result-loading") as HTMLDivElement,
   resultLoadingMessage: document.getElementById("result-loading-message") as HTMLSpanElement,
+  previewWaiting: document.getElementById("preview-waiting") as HTMLDivElement,
+  previewRecovery: document.getElementById("preview-recovery") as HTMLDivElement,
   title: document.getElementById("title") as HTMLHeadingElement,
   formatChip: document.getElementById("format-chip") as HTMLDivElement,
+  formatSummary: document.getElementById("format-summary") as HTMLSpanElement,
+  captureFallback: document.getElementById("capture-fallback") as HTMLSpanElement,
+  captureFallbackMessage: document.getElementById("capture-fallback-message") as HTMLSpanElement,
   previewVideo: document.getElementById("preview-video") as HTMLVideoElement,
   framePreviewCard: document.getElementById("frame-preview-card") as HTMLDivElement,
   framePreviewImage: document.getElementById("frame-preview-image") as HTMLImageElement,
@@ -109,11 +117,14 @@ let recording: RecordingRecord | null = null;
 
 let parts: LoadedPart[] = [];
 let splitSegments: SplitSegment[] = [];
+let autoSplitSettings: Settings | undefined;
 let removeSplitOutput: (() => Promise<void>) | undefined;
 const resultLifetime = new AbortController();
 let previewUrl: string | null = null;
 let recordingDurationSeconds = 0;
 let fullDownloadNameLocked = false;
+let canQueueDownload = false;
+let downloadWhenReady = false;
 let sourceDurationSeconds = 0;
 let sourceSizeBytes = 0;
 let ffmpegProgressBase = 0;
@@ -550,11 +561,14 @@ async function trimRecordingStartup(part: LoadedPart, trimSeconds: number, disk?
     await clearFfmpegOutputs(ffmpeg, true);
     const preciseName = `output-startup-trimmed.${part.extension}`;
     const preciseFile = disk && await mountEditOutput(ffmpeg, disk, preciseName);
+    const bitrate = part.videoBitsPerSecond;
+    const webmRate = typeof bitrate === "number" && bitrate >= MIN_VIDEO_BITS_PER_SECOND && bitrate <= MAX_VIDEO_BITS_PER_SECOND
+      ? ["-b:v", String(bitrate)] : ["-crf", "18"];
     const preciseCode = await ffmpeg.exec([
       "-ss", String(trimSeconds), "-i", inputName, "-map", "0:v:0", "-map", "0:a:0?",
       // MP4 can hide decoder preroll in its edit list. Matroska needs a new opening keyframe.
       ...(format === "mp4" ? ["-c", "copy", "-use_editlist", "1", "-avoid_negative_ts", "disabled", "-movflags", "+faststart"]
-        : ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "18", "-fps_mode", "vfr", "-c:a", "libvorbis", "-cues_to_front", "1", "-f", format]),
+        : ["-c:v", "libx264", "-preset", "ultrafast", ...webmRate, "-fps_mode", "vfr", "-c:a", "libvorbis", "-cues_to_front", "1", "-f", format]),
       preciseName,
     ]);
     if (preciseCode !== 0 || !await validStart(preciseName)) return null;
@@ -880,6 +894,10 @@ async function runResultJob(operation: () => Promise<void>, failureMessage: stri
     await operation();
   } catch (error) {
     if (resultLifetime.signal.aborted) return;
+    if (error instanceof MediaEventTimeoutError) {
+      setWorkStatus(failureMessage);
+      return;
+    }
     const message = error instanceof Error ? error.message : failureMessage;
     setWorkStatus(message);
     window.alert(message);
@@ -935,27 +953,24 @@ function applySplitValueDefault(): void {
   const range = getSelectedTimeRange(duration);
   const selectedDuration = range.end - range.start;
   const selectedSizeMegabytes = bytesToMegabytes(estimateRangeSize(sourceSizeBytes, range, duration));
-  const value = elements.splitModeSelect.value === "size"
+  const mode = elements.splitModeSelect.value;
+  const maximum = mode === "size"
     ? Math.max(1, Math.ceil(selectedSizeMegabytes))
     : Math.max(TIME_STEP_SECONDS, roundTrimTime(selectedDuration));
+  const configured = autoSplitSettings && getAutomaticSplitOptions(autoSplitSettings, selectedDuration);
+  const value = configured?.mode === mode
+    ? Math.min(maximum, Math.max(mode === "size" ? 1 : TIME_STEP_SECONDS, configured.value))
+    : maximum;
   elements.splitValueInput.value = String(value);
-  elements.splitValueInput.max = String(value);
+  elements.splitValueInput.max = String(maximum);
   updateSplitPresetButtons();
 }
 
 function getSplitPresetValue(button: HTMLButtonElement): number {
   const count = Number(button.dataset.splitCount);
-  if (count === 3 || count === 4) {
+  if (count) {
     const range = getSelectedTimeRange();
-    const steps = Number(((range.end - range.start) / count / TIME_STEP_SECONDS).toFixed(10));
-    return Number((Math.ceil(steps) * TIME_STEP_SECONDS).toFixed(TIME_DECIMAL_PLACES));
-  }
-
-  const ratio = Number(button.dataset.splitRatio);
-  if (Number.isFinite(ratio) && ratio > 0) {
-    const duration = getFullSourceDuration();
-    const range = getSelectedTimeRange(duration);
-    return Math.max(1, Math.ceil((range.end - range.start) * ratio));
+    return getSplitIntervalForCount(range.end - range.start, count);
   }
 
   return Number(button.dataset.splitValue);
@@ -1104,10 +1119,15 @@ async function renderTimelineThumbnails(part: LoadedPart | undefined): Promise<v
   }
 }
 
-async function readSplitSourceDuration(part: LoadedPart): Promise<number> {
-  const duration = elements.previewVideo.duration;
-  if (part === getSelectedSourcePart() && Number.isFinite(duration) && duration > 0) return duration;
-  const loaded = await loadVideoForPart(part, getRecordingDurationFallback(), resultLifetime.signal);
+async function readSplitSourceDuration(part: LoadedPart, fallbackDuration = getRecordingDurationFallback()): Promise<number> {
+  const video = elements.previewVideo;
+  if (part === getSelectedSourcePart() && video.hasAttribute("src")) {
+    if (!video.error && video.readyState < HTMLMediaElement.HAVE_METADATA) {
+      await waitForMediaEvent(video, "loadedmetadata", resultLifetime.signal);
+    }
+    if (Number.isFinite(video.duration) && video.duration > 0) return video.duration;
+  }
+  const loaded = await loadVideoForPart(part, fallbackDuration, resultLifetime.signal);
   releaseVideoSource(loaded.video, loaded.url, loaded.revoke);
   return loaded.duration;
 }
@@ -1309,6 +1329,8 @@ function revokePreviewUrl(): void {
 
 function setPreviewFromPart(part: LoadedPart | undefined): void {
   revokePreviewUrl();
+  showPreviewError("");
+  elements.previewWaiting.hidden = !part;
   if (!part) {
     elements.previewVideo.removeAttribute("src");
     elements.previewVideo.load();
@@ -1320,6 +1342,12 @@ function setPreviewFromPart(part: LoadedPart | undefined): void {
   elements.previewVideo.preload = "auto";
   elements.previewVideo.src = source.url;
   elements.previewVideo.load();
+}
+
+function showPreviewError(message: string): void {
+  elements.emptyMessage.textContent = message;
+  elements.previewRecovery.hidden = !message;
+  if (message) elements.previewWaiting.hidden = true;
 }
 
 function buildRecordingFromParts(recordingId: string, loadedParts: LoadedPart[]): RecordingRecord | null {
@@ -1347,19 +1375,25 @@ function renderHeader(): void {
   const duration = range.end - range.start;
   const streamer = getStreamerNameFromFilename();
   const size = `${getActiveTimeRange() ? "예상 " : ""}${formatBytes(getSelectedSourceSizeBytes())}`;
-  const summary = [streamer, getCaptureMethodLabel(parts[0]), recording.actualExtension.toUpperCase(), size, formatTimeInput(duration)].filter(Boolean).join(" · ");
-  elements.formatChip.textContent = summary;
+  const part = parts[0];
+  const extension = part?.extension ?? recording.actualExtension;
+  elements.formatSummary.textContent = [streamer, getCaptureMethodLabel(part), extension.toUpperCase(), size, formatTimeInput(duration)].filter(Boolean).join(" · ");
+  elements.formatChip.hidden = false;
+  elements.captureFallback.hidden = part?.captureMethod !== "screen";
+  elements.captureFallbackMessage.textContent = elements.captureFallback.hidden ? ""
+    : `방송 원본을 확보하지 못해 화면 녹화를 ${extension === RECORDING_FORMAT.webm ? "WebM으로" : "MP4로"} 저장했습니다.`;
 }
 
 function renderActions(): void {
   const hasSelectedRange = Boolean(getActiveTimeRange());
   elements.downloadOriginalButton.hidden = !hasSelectedRange;
-  elements.downloadCurrentLabel.textContent = hasSelectedRange ? "구간 다운로드" : "다운로드";
-  elements.downloadCurrentButton.title = hasSelectedRange ? "현재 선택 구간 다운로드" : "전체 결과 다운로드";
+  elements.downloadCurrentLabel.textContent = downloadWhenReady ? "다운로드 예약됨" : hasSelectedRange ? "구간 다운로드" : "다운로드";
+  elements.downloadCurrentButton.title = downloadWhenReady ? "다운로드 예약됨" : canQueueDownload
+    ? "파일 준비가 끝나면 다운로드" : hasSelectedRange ? "현재 선택 구간 다운로드" : "전체 결과 다운로드";
   updateSpeedControls();
   if (!recording || parts.length === 0 || workBusy) {
     elements.downloadOriginalButton.disabled = true;
-    elements.downloadCurrentButton.disabled = true;
+    elements.downloadCurrentButton.disabled = !canQueueDownload || downloadWhenReady;
     for (const button of elements.convertButtons) {
       button.disabled = true;
     }
@@ -1387,7 +1421,7 @@ function renderSplitDownloads(): void {
 
     const meta = document.createElement("span");
     meta.className = "split-chip-meta";
-    meta.textContent = `${formatTimeInput(segment.startSeconds)} - ${formatTimeInput(segment.endSeconds)} · ${formatBytes(segment.blob.size)}`;
+    meta.textContent = `${formatTimeInput(segment.startSeconds)} - ${formatTimeInput(segment.endSeconds)} · ${formatSecondsLabel(segment.endSeconds - segment.startSeconds)} · ${formatBytes(segment.blob.size)}`;
 
     const button = document.createElement("button");
     button.className = "button primary icon-button";
@@ -1414,13 +1448,13 @@ function renderParts(): void {
 
   if (parts.length === 0) {
     clearTimelineThumbnails();
-    elements.emptyMessage.textContent = "녹화 파일을 찾지 못했습니다.";
+    showPreviewError("녹화 파일을 찾지 못했습니다.");
     renderActions();
     return;
   }
 
-  elements.emptyMessage.textContent = "";
-  elements.splitFormatSelect.value = RECORDING_FORMAT.mp4;
+  elements.splitModeSelect.value = autoSplitSettings?.autoSplitMode === "size" ? "size" : "duration";
+  elements.splitFormatSelect.value = autoSplitSettings?.autoSplitFormat ?? RECORDING_FORMAT.mp4;
   const fallbackDuration = recordingDurationSeconds || getRecordingDurationFallback();
   if (fallbackDuration > 0) {
     setSourceDuration(fallbackDuration);
@@ -1429,7 +1463,6 @@ function renderParts(): void {
   setPreviewFromPart(parts[0]);
   updateSplitDefaultValues(parts[0]);
   renderSplitDownloads();
-  setSplitBusy(false);
 }
 
 async function scheduleRecordingDeletion(): Promise<void> {
@@ -1482,19 +1515,21 @@ function restoreSourceTab(): void {
   }
 }
 
-async function revealAutoDownloadFailure(): Promise<void> {
-  if (!autoDownloadRecording) {
-    return;
-  }
+async function activateResultTab(): Promise<void> {
+  restoreSourceTabOnClose = true;
   try {
     const tab = await chrome.tabs.getCurrent();
     if (typeof tab?.id === "number") {
-      restoreSourceTabOnClose = true;
       await chrome.tabs.update(tab.id, { active: true });
     }
   } catch {
-    // The tab may already have been closed while reporting the failure.
+    // The tab may already have been closed.
   }
+}
+
+async function revealAutoDownloadFailure(): Promise<void> {
+  if (!autoDownloadRecording) return;
+  await activateResultTab();
   try {
     await markAutoDownloadHandled();
     allowRecordingDeletion = true;
@@ -1504,10 +1539,79 @@ async function revealAutoDownloadFailure(): Promise<void> {
   }
 }
 
+function clearAutomaticResultActions(): void {
+  const resultUrl = new URL(location.href);
+  for (const key of ["autoDownload", "keepOpen", "autoSplit"]) resultUrl.searchParams.delete(key);
+  history.replaceState(history.state, "", resultUrl);
+}
+
+async function splitRecordingPart(
+  part: LoadedPart,
+  duration: number,
+  options: SplitOptions & { range?: TimeRange },
+): Promise<void> {
+  const { mode, value, format, range } = options;
+  const workspace = part.size >= DISK_OUTPUT_MIN_BYTES ? await createEditWorkspace(part.recordingId) : undefined;
+  try {
+    splitSegments = mode === "size"
+      ? await createSizeSplit(part, duration, value, format, range, workspace?.disk)
+      : await createDurationSplitWithFfmpeg(part, duration, value, format, range, undefined, workspace?.disk);
+  } catch (error) {
+    await releaseFfmpeg();
+    await workspace?.remove().catch(() => {});
+    throw error;
+  }
+  removeSplitOutput = workspace?.remove;
+  await releaseFfmpeg();
+}
+
+async function downloadSplitFiles(): Promise<void> {
+  setWorkStatus("나눈 파일을 마지막 번호부터 차례대로 저장하는 중입니다.");
+  await downloadSourcesAndConfirm(splitSegments.map(segment => ({ source: segment.blob, filename: segment.filename })), true);
+}
+
+function getAutomaticSplitOptions(settings: Settings, duration: number): SplitOptions {
+  const { autoSplitMode, autoSplitFormat: format } = settings;
+  if (autoSplitMode === "size") return { mode: "size", value: settings.autoSplitMaxMegabytes, format };
+  const value = autoSplitMode === "duration" ? settings.autoSplitIntervalSeconds
+    : getSplitIntervalForCount(duration, SPLIT_COUNTS[autoSplitMode]);
+  return { mode: "duration", value, format };
+}
+
+async function tryAutomaticSplit(settings: Settings | undefined): Promise<boolean> {
+  if (!autoSplitRecording || !settings || parts.length !== 1) return false;
+  const [part] = parts;
+  const splitBySize = settings.autoSplitMode === "size";
+  if (splitBySize && part.size <= megabytesToBytes(settings.autoSplitMaxMegabytes)) return false;
+  const duration = await readSplitSourceDuration(part, 0).catch(error => {
+    resultLifetime.signal.throwIfAborted();
+    throw new Error("영상 길이를 확인하지 못해 자동 분할을 완료하지 못했습니다. 녹화 파일은 다운로드할 수 있습니다.", { cause: error });
+  });
+  if (duration <= 0 || (!splitBySize && duration <= settings.autoSplitAfterSeconds)) return false;
+  const options = getAutomaticSplitOptions(settings, duration);
+  if (options.mode === "duration") {
+    const expected = settings.autoSplitMode === "duration" || settings.autoSplitMode === "size"
+      ? 2 : SPLIT_COUNTS[settings.autoSplitMode];
+    if (getExpectedSplitCount(duration, options.value) < expected) return false;
+  }
+
+  elements.resultLoadingMessage.textContent = "녹화 파일을 자동으로 나누는 중입니다.";
+  setPreparingProgress("녹화 파일을 자동으로 나누는 중입니다.");
+  await splitRecordingPart(part, duration, options);
+  if (showResult) renderSplitDownloads();
+  if (autoDownloadRecording || settings.enableAutoDownloadSplit) {
+    elements.resultLoadingMessage.textContent = "나눈 파일을 다운로드하는 중입니다.";
+    await downloadSplitFiles();
+  }
+  hideSplitProgress();
+  return true;
+}
+
 async function boot(): Promise<void> {
-  let downloadWhenReady = false;
-  const appState = await loadAppState().catch(() => null);
-  autoDownloadSplit = Boolean(appState?.settings.enableAutoDownloadSplit);
+  const settings = await loadSettings().catch(() => undefined);
+  showResult ||= settings?.autoFocusResult === true;
+  restoreSourceTabOnClose = showResult;
+  if (settings?.enableAutoSplitRecording) autoSplitSettings = settings;
   if (!recordingId) {
     throw new Error("녹화 ID가 없습니다.");
   }
@@ -1535,23 +1639,16 @@ async function boot(): Promise<void> {
     throw new Error("자동 다운로드할 녹화 파일을 찾지 못했습니다.");
   }
 
+  if (showResult) renderHeader();
   if (!autoDownloadRecording) {
     startDeletionKeepalive();
-    renderHeader();
-    if (parts.length && parts.every(part => part.originalStreamStart === undefined)) {
-      const download = document.getElementById("download-while-preparing") as HTMLButtonElement;
-      download.hidden = false;
-      download.onclick = () => {
-        downloadWhenReady = true;
-        download.disabled = true;
-        download.textContent = "다운로드 예약됨";
-      };
-    }
+    canQueueDownload = parts.length > 0 && parts.every(part => part.originalStreamStart === undefined);
+    renderActions();
   }
   elements.resultLoadingMessage.textContent = "미리보기를 준비하는 중입니다.";
   let preparationStatus: string | undefined;
   try {
-    preparationStatus = await prepareRecordedFiles(!autoDownloadRecording);
+    preparationStatus = await prepareRecordedFiles(showResult);
   } catch (error) {
     if (parts.some(part => part.originalStreamStart !== undefined)) throw error;
     preparationStatus = "파일을 정리하지 못해 원본을 사용합니다.";
@@ -1561,6 +1658,7 @@ async function boot(): Promise<void> {
   }
 
   for (const part of parts) part.filename = getRecordingFilename(part.filename);
+  if (showResult) renderParts();
   if (autoDownloadRecording) {
     if (parts.some(part => part.originalStreamStart !== undefined)) {
       throw new Error("원본 조각을 정리하지 못했습니다. 결과창에서 녹화 데이터를 확인하세요.");
@@ -1568,41 +1666,63 @@ async function boot(): Promise<void> {
     if (parts.some(part => part.startupTrimSeconds)) {
       throw new Error("초반 끊김을 정리하지 못했습니다. 결과창에서 원본을 확인하고 다운로드할 수 있습니다.");
     }
-    for (const part of parts) {
-      if (part.captureMethod !== "original" && part.extension === RECORDING_FORMAT.webm
-        && part.seekMetadataVersion !== SEEK_METADATA_VERSION && recordingDurationSeconds > 0) {
-        part.filename = getRecordingFilename(part.filename, parts.length === 1 ? recordingDurationSeconds : 0);
-        continue;
+  }
+  const automaticSplit = await tryAutomaticSplit(autoSplitSettings);
+  if (autoDownloadRecording) {
+    if (!automaticSplit) {
+      for (const part of parts) {
+        if (part.captureMethod !== "original" && part.extension === RECORDING_FORMAT.webm
+          && part.seekMetadataVersion !== SEEK_METADATA_VERSION && recordingDurationSeconds > 0) {
+          part.filename = getRecordingFilename(part.filename, parts.length === 1 ? recordingDurationSeconds : 0);
+          continue;
+        }
+        const duration = await readSplitSourceDuration(part, 0).catch(() => 0);
+        if (duration > 0) part.filename = getRecordingFilename(part.filename, duration);
       }
-      const loaded = await loadVideoForPart(part, 0, resultLifetime.signal).catch(() => undefined);
-      if (loaded) {
-        part.filename = getRecordingFilename(part.filename, loaded.duration);
-        releaseVideoSource(loaded.video, loaded.url, loaded.revoke);
-      }
+      resultLifetime.signal.throwIfAborted();
+      fullDownloadNameLocked = true;
+      elements.resultLoadingMessage.textContent = "녹화 파일을 다운로드하는 중입니다.";
+      await downloadSourcesAndConfirm(parts.map(getRecordingDownload));
     }
-    resultLifetime.signal.throwIfAborted();
-    await downloadSourcesAndConfirm(parts.map(getRecordingDownload));
     await markAutoDownloadHandled();
     allowRecordingDeletion = true;
-    window.close();
-    return;
-  }
-  renderHeader();
-  renderParts();
-  if (preparationStatus) setWorkStatus(preparationStatus);
-  if (downloadWhenReady) {
-    // A stalled preview must not keep a prepared file from downloading.
-    const video = elements.previewVideo;
-    if (!video.error && video.readyState < HTMLMediaElement.HAVE_METADATA) {
-      await waitForMediaEvent(video, "loadedmetadata").catch(() => {});
+    if (!showResult) {
+      const latestSettings = await loadSettings().catch(() => undefined);
+      if (resultLifetime.signal.aborted) return;
+      if (latestSettings?.autoFocusResult === false) {
+        window.close();
+        return;
+      }
+      showResult = true;
+      renderParts();
+      await activateResultTab();
     }
-    syncPreviewDuration();
-    if (video.readyState < HTMLMediaElement.HAVE_METADATA && parts.length === 1) {
-      parts[0].filename = getRecordingFilename(parts[0].filename, recordingDurationSeconds);
-    }
-    fullDownloadNameLocked = true;
-    downloadFullRecording();
+    startDeletionKeepalive();
   }
+  if (autoDownloadRecording || autoSplitRecording) clearAutomaticResultActions();
+  if (automaticSplit) setWorkStatus(`자동 분할 완료 · ${splitSegments.length}개`);
+  else if (preparationStatus) setWorkStatus(preparationStatus);
+  else if (autoDownloadRecording) setWorkStatus("자동 다운로드가 완료되었습니다.");
+  await finishQueuedDownload();
+  setSplitBusy(false);
+}
+
+async function finishQueuedDownload(): Promise<void> {
+  canQueueDownload = false;
+  if (!downloadWhenReady) return;
+  // A stalled preview must not keep a prepared file from downloading.
+  const video = elements.previewVideo;
+  if (!video.error && video.readyState < HTMLMediaElement.HAVE_METADATA) {
+    await waitForMediaEvent(video, "loadedmetadata", resultLifetime.signal).catch(() => {});
+  }
+  downloadWhenReady = false;
+  if (resultLifetime.signal.aborted) return;
+  syncPreviewDuration();
+  if (video.readyState < HTMLMediaElement.HAVE_METADATA && parts.length === 1) {
+    parts[0].filename = getRecordingFilename(parts[0].filename, recordingDurationSeconds);
+  }
+  fullDownloadNameLocked = true;
+  downloadFullRecording();
 }
 
 function downloadFullRecording(): void {
@@ -1633,6 +1753,12 @@ async function downloadEditedParts(
 }
 
 elements.downloadCurrentButton.addEventListener("click", () => {
+  if (canQueueDownload) {
+    downloadWhenReady = true;
+    renderActions();
+    return;
+  }
+  if (workBusy) return;
   const range = getActiveTimeRange();
   if (!range) {
     downloadFullRecording();
@@ -1743,8 +1869,7 @@ elements.downloadAllButton.addEventListener("click", () => {
     return;
   }
   void runResultJob(async () => {
-    setWorkStatus("나눈 파일을 마지막 번호부터 차례대로 저장하는 중입니다.");
-    await downloadSourcesAndConfirm(splitSegments.map((segment) => ({ source: segment.blob, filename: segment.filename })), true);
+    await downloadSplitFiles();
     setWorkStatus("나눈 파일 저장이 완료되었습니다.");
   }, "나눈 파일을 저장하지 못했습니다.");
 });
@@ -1758,15 +1883,33 @@ function syncPreviewDuration(): void {
 }
 
 elements.previewVideo.addEventListener("durationchange", syncPreviewDuration);
+for (const event of ["loadeddata", "canplay"]) {
+  elements.previewVideo.addEventListener(event, () => { elements.previewWaiting.hidden = true; });
+}
+elements.previewVideo.addEventListener("error", () => {
+  if (elements.previewVideo.hasAttribute("src") && !resultLifetime.signal.aborted) {
+    showPreviewError("미리보기를 열지 못했습니다. 녹화 파일은 다운로드할 수 있습니다.");
+  }
+});
+elements.previewVideo.addEventListener("waiting", () => {
+  elements.previewWaiting.hidden = !elements.previewVideo.hasAttribute("src") || !elements.previewRecovery.hidden;
+});
 elements.loadTimelineThumbnails.addEventListener("click", () => void renderTimelineThumbnails(getSelectedSourcePart()));
+function preparePreviewThumbnails(): void {
+  if (!elements.resultLoading.hidden || elements.previewVideo.readyState < HTMLMediaElement.HAVE_METADATA
+    || resultLifetime.signal.aborted || thumbnailController || thumbnailUrls.length > 0) return;
+  const part = getSelectedSourcePart();
+  if (!part || part.originalStreamStart !== undefined) return;
+  // A second decoder is only needed if the user wants thumbnails for a heavy result.
+  const deferThumbnails = part.captureMethod === "original" || part.size >= DISK_OUTPUT_MIN_BYTES;
+  elements.loadTimelineThumbnails.hidden = !deferThumbnails;
+  if (!deferThumbnails) void renderTimelineThumbnails(part);
+}
+
 elements.previewVideo.addEventListener("loadedmetadata", () => {
   updateSpeedControls();
   syncPreviewDuration();
-  const part = getSelectedSourcePart();
-  // A second decoder is only needed if the user wants thumbnails for a heavy result.
-  const deferThumbnails = part?.captureMethod === "original" || (part?.size ?? 0) >= DISK_OUTPUT_MIN_BYTES;
-  elements.loadTimelineThumbnails.hidden = !deferThumbnails;
-  if (!deferThumbnails) void renderTimelineThumbnails(part);
+  preparePreviewThumbnails();
 });
 
 elements.previewVideo.addEventListener("play", () => {
@@ -1972,9 +2115,10 @@ elements.splitButton.addEventListener("click", () => {
     return;
   }
   void runResultJob(async () => {
+    const { enableAutoDownloadSplit } = await loadSettings().catch(() => ({ enableAutoDownloadSplit: false }));
     clearSplitResults();
     setPreparingProgress("파일 나누기를 준비하는 중입니다.");
-    const mode = elements.splitModeSelect.value;
+    const mode = elements.splitModeSelect.value === "size" ? "size" : "duration";
     const outputFormat = elements.splitFormatSelect.value === RECORDING_FORMAT.mp4 ? RECORDING_FORMAT.mp4 : RECORDING_FORMAT.webm;
     const minimum = mode === "duration" ? TIME_STEP_SECONDS : 1;
     const splitValue = Math.max(minimum, Number(elements.splitValueInput.value || minimum));
@@ -1984,26 +2128,9 @@ elements.splitButton.addEventListener("click", () => {
       throw new Error("나누기 시간은 선택 구간보다 짧아야 합니다.");
     }
     const duration = await readSplitSourceDuration(part);
-    const workspace = part.size >= DISK_OUTPUT_MIN_BYTES ? await createEditWorkspace(part.recordingId) : undefined;
-    const disk = workspace?.disk;
-    let segments: SplitSegment[];
-    try {
-      segments = mode === "size"
-        ? await createSizeSplit(part, duration, splitValue, outputFormat, range, disk)
-        : await createDurationSplitWithFfmpeg(part, duration, splitValue, outputFormat, range, undefined, disk);
-    } catch (error) {
-      await workspace?.remove().catch(() => {});
-      throw error;
-    }
-
-    splitSegments = segments;
-    removeSplitOutput = workspace?.remove;
-    await releaseFfmpeg();
+    await splitRecordingPart(part, duration, { mode, value: splitValue, format: outputFormat, range });
     renderSplitDownloads();
-    if (autoDownloadSplit) {
-      setWorkStatus("나눈 파일을 마지막 번호부터 차례대로 저장하는 중입니다.");
-      await downloadSourcesAndConfirm(segments.map((segment) => ({ source: segment.blob, filename: segment.filename })), true);
-    }
+    if (enableAutoDownloadSplit) await downloadSplitFiles();
     setWorkStatus("파일 나누기가 완료되었습니다.");
   }, "파일을 나누지 못했습니다.");
 });
@@ -2038,6 +2165,8 @@ window.addEventListener("pageshow", () => {
 setSplitBusy(true);
 void boot().catch(async (error: Error) => {
   if (resultLifetime.signal.aborted) return;
+  hideSplitProgress();
+  const message = error instanceof Error ? error.message : String(error);
   const fragments = parts.filter(part => part.originalStreamStart !== undefined);
   if (fragments.length) {
     setSplitBusy(true);
@@ -2052,14 +2181,23 @@ void boot().catch(async (error: Error) => {
       })));
     };
     backup.hidden = false;
-  } else if (autoDownloadRecording && recording && parts.length > 0) {
+    showPreviewError("방송 원본을 MP4로 준비하지 못했습니다.");
+  } else if ((autoDownloadRecording || autoSplitRecording) && recording && parts.length > 0) {
+    if (autoSplitRecording) clearAutomaticResultActions();
     renderHeader();
-    renderParts();
-  } else if (parts.length === 0) {
+    if (!elements.previewVideo.hasAttribute("src")) renderParts();
+    setWorkStatus(message);
+    await finishQueuedDownload();
     setSplitBusy(false);
+  } else {
+    canQueueDownload = false;
+    downloadWhenReady = false;
+    setSplitBusy(false);
+    showPreviewError(message);
   }
-  elements.emptyMessage.textContent = error instanceof Error ? error.message : String(error);
   await revealAutoDownloadFailure();
 }).finally(() => {
   elements.resultLoading.hidden = true;
+  if (!elements.previewVideo.hasAttribute("src")) elements.previewWaiting.hidden = true;
+  preparePreviewThumbnails();
 });

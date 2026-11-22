@@ -1,9 +1,12 @@
-import { createRecordingController, type LocalRecordingState } from "./recording_controller.js";
+import { createRecordingController } from "./recording_controller.js";
 import type { DirectCrop } from "./crop_layout.js";
+import { getPlayerRecordingState, type PlayerRecordingState } from "./player_state.js";
 import { canvasToBlob } from "../shared/canvas.js";
+import type { ContentCommand, MessageResponse, RecordingControlMessage, RuntimeMessage } from "../shared/messages.js";
+import { getRegionLimit, normalizeRecordingState, normalizeRegion, normalizeRegions, normalizeSettings } from "../shared/normalize.js";
+import { loadAppState } from "../shared/storage.js";
 import { formatRecordingTimer, MILLISECONDS_PER_SECOND } from "../shared/time_range.js";
-import { normalizeSettings, normalizeRegion, normalizeRegions } from "../shared/normalize.js";
-import { RECORDING_STATUS, RECORDING_MODE, DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, DEFAULT_SHORTCUT_KEYS as DEFAULT_CONTENT_SHORTCUT_KEYS } from "../shared/types.js";
+import { RECORDING_STATUS, RECORDING_MODE, DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, DEFAULT_SETTINGS, DEFAULT_SHORTCUT_KEYS as DEFAULT_CONTENT_SHORTCUT_KEYS, type AppState, type RegionSelection, type Settings, type ShortcutAction, type ShortcutKeys } from "../shared/types.js";
 
 (() => {
   // The build bundles shared imports into one classic content script.
@@ -33,8 +36,6 @@ const RESIZE_MAGNIFIER_BORDER = 2;
 const RESIZE_MAGNIFIER_SAMPLE_WIDTH = 28;
 const RESIZE_MAGNIFIER_SAMPLE_HEIGHT = 21;
 const SNAP_DISTANCE = 10;
-const MIN_ACTIVE_REGIONS = 2;
-const MAX_ACTIVE_REGIONS = 4;
 
 const VIDEO_FRAME_READY_TIMEOUT_MS = 3_000;
 const CHZZK_TOOL_DISCOVERY_INTERVAL_MS = 500;
@@ -69,14 +70,6 @@ const CHZZK_BUTTON_HOST_SELECTOR = [
 ].join(",");
 const PLAYER_TOOL_LABEL = "녹화 영역 선택";
 
-type ContentCommand = import("../shared/messages.js").ContentCommand;
-type MessageResponse<T = undefined> = import("../shared/messages.js").MessageResponse<T>;
-type RecordingState = import("../shared/types.js").RecordingState;
-type RegionSelection = import("../shared/types.js").RegionSelection;
-type Settings = import("../shared/types.js").Settings;
-type ShortcutAction = import("../shared/types.js").ShortcutAction;
-type ShortcutKeys = import("../shared/types.js").ShortcutKeys;
-
 type GuideSide = "n" | "s" | "w" | "e";
 type RegionGeometryResponse = MessageResponse<RegionSelection>;
 type RegionGeometriesResponse = MessageResponse<RegionSelection[]>;
@@ -100,13 +93,14 @@ let shortcutsEnabled = false;
 let shortcutKeys: ShortcutKeys = DEFAULT_CONTENT_SHORTCUT_KEYS;
 let removeSelectionHandlers: (() => void) | null = null;
 let removeBorderHandlers: (() => void) | null = null;
-let currentRecordingState: LocalRecordingState = { status: RECORDING_STATUS.idle };
+let currentRecordingState: PlayerRecordingState = { status: RECORDING_STATUS.idle };
 let preparedRecordingId: string | undefined;
-type RecordingControlCommand = "START_RECORDING" | "START_FULL_RECORDING" | "STOP_RECORDING" | "CANCEL_RECORDING";
+type RecordingControlCommand = RecordingControlMessage["type"];
 let recordingCommandInFlight: RecordingControlCommand | null = null;
 let pendingRecordingTerminalCommand: "STOP_RECORDING" | "CANCEL_RECORDING" | null = null;
 let storedStateRevision = 0;
 let chzzkToolObserver: MutationObserver | null = null;
+let observedChzzkToolHost: HTMLElement | null = null;
 let chzzkToolDiscoveryTimerId: number | null = null;
 let chzzkToolSyncFrame: number | null = null;
 let chzzkRecordTimerId: number | null = null;
@@ -117,16 +111,15 @@ let regionLayoutVideo: HTMLVideoElement | null = null;
 let regionLayoutSyncFrame: number | null = null;
 
 const {
-  getDirectRecording, checkDirectRecordingEncoder, prepareDirectRecordingEncoder,
+  getDirectRecording, checkDirectRecordingEncoder, prepareDirectRecordingEncoder, playbackUsesHevc,
   startDirectRecording, stopDirectRecording, cancelDirectRecording, stopDirectRecordingForUnload,
 } = createRecordingController({
-  findPrimaryVideoElement, waitForCurrentVideoFrame, computeDirectCropFromSelection, getMultiRegionLimit, buildBaseName,
+  findPrimaryVideoElement, waitForCurrentVideoFrame, computeDirectCropFromSelection, buildBaseName,
   handleDetachedPlayer, sendRuntimeMessage, showPlayerFeedback, syncRecordingCommandButtons, loadState,
   renderRecordingState(state) {
     currentRecordingState = state;
     showSelectionBorders(currentRegions);
     requestChzzkToolSync();
-    syncChzzkRecordTimer();
   },
 });
 
@@ -418,17 +411,12 @@ function computeDirectCropFromSelection(region: RegionSelection, video: HTMLVide
   return right > x && bottom > y ? { x, y, width: right - x, height: bottom - y } : null;
 }
 
-function getMultiRegionLimit(settings?: Partial<Settings>): number {
-  const value = settings?.multiRegionMaxCount ?? multiRegionMaxCount;
-  return clamp(Math.round(Number(value) || DEFAULT_MULTI_REGION_COUNT), MIN_ACTIVE_REGIONS, MAX_ACTIVE_REGIONS);
-}
-
 function getActiveRegionLimit(): number {
-  return multiRegionEnabled ? getMultiRegionLimit() : 1;
+  return getRegionLimit({ enableMultiRegion: multiRegionEnabled, multiRegionMaxCount });
 }
 
-function buildBaseName(): string {
-  const date = new Date();
+function buildBaseName(startedAt = Date.now()): string {
+  const date = new Date(startedAt);
   const pad = (value: number) => String(value).padStart(2, "0");
   const rawName = streamerFilenameEnabled ? getStreamerName() : "";
   const prefix = rawName ? sanitizeFilenamePart(rawName) || "cropClip" : "cropClip";
@@ -760,10 +748,12 @@ async function runRecordingCommand(type: RecordingControlCommand): Promise<void>
     showPlayerFeedback(type === "STOP_RECORDING" ? "녹화를 종료하고 저장 중입니다."
       : type === "CANCEL_RECORDING" ? "녹화를 취소 중입니다." : "녹화를 시작 중입니다.");
     const video = type === "START_FULL_RECORDING" ? findPrimaryVideoElement() : null;
-    const playback = video ? { src: video.currentSrc, time: video.currentTime } : undefined;
+    const message: RecordingControlMessage = type === "START_FULL_RECORDING" && video
+      ? { type, playback: { src: video.currentSrc } }
+      : { type };
     const response = type === "STOP_RECORDING" && getDirectRecording()
       ? await stopDirectRecording()
-      : await sendRuntimeMessage({ type, playback });
+      : await sendRuntimeMessage(message);
     if (!response.ok) throw new Error(response.error);
     succeeded = true;
   } finally {
@@ -790,7 +780,7 @@ async function cancelRecording(): Promise<void> {
   await runRecordingCommand("CANCEL_RECORDING");
 }
 
-function sendRuntimeMessage<T = undefined>(message: Record<string, unknown>): Promise<MessageResponse<T>> {
+function sendRuntimeMessage<T = undefined>(message: RuntimeMessage): Promise<MessageResponse<T>> {
   return new Promise((resolve, reject) => {
     if (!isExtensionContextAvailable()) {
       reject(new Error("확장 프로그램이 새로고침되었습니다. 페이지를 새로고침한 뒤 다시 시도하세요."));
@@ -898,7 +888,7 @@ function syncRegionLayoutGeometry(): void {
   }
 
   const video = findPrimaryVideoElement();
-  if (video && video !== regionLayoutVideo) startRegionLayoutWatch();
+  if (video !== regionLayoutVideo) startRegionLayoutWatch();
   const renderedRect = getVideoRenderedViewportRect();
   currentRegions.forEach((region, index) => {
     const border = currentBorders.get(index);
@@ -1455,27 +1445,21 @@ function applyPlayerSettings(settings: Settings): void {
   shortcutKeys = settings.shortcutKeys;
 }
 
-async function loadState(): Promise<{ region: RegionSelection | null; regions: RegionSelection[]; recordingState: LocalRecordingState; settings: Settings }> {
-  let result: { region?: unknown; regions?: unknown; recordingState?: unknown; settings?: unknown } = {};
+async function loadState(): Promise<Omit<AppState, "recordingState"> & { recordingState: PlayerRecordingState }> {
   if (isExtensionContextAvailable()) {
     try {
       let revision: number;
+      let state: AppState;
       do {
         revision = storedStateRevision;
-        result = await chrome.storage.local.get({ region: null, regions: [], recordingState: { status: RECORDING_STATUS.idle }, settings: {} });
+        state = await loadAppState();
       } while (revision !== storedStateRevision);
+      return { ...state, recordingState: getPlayerRecordingState(state.recordingState, getLocalRecordingId()) };
     } catch {
-      // Reloaded extensions fall back to the same normalized defaults.
-      result = {};
+      // The extension context may have been invalidated by an update.
     }
   }
-  const region = normalizeRegion(result.region);
-  return {
-    region,
-    regions: normalizeRegions(result.regions, region),
-    recordingState: normalizeRecordingState(result.recordingState, getLocalRecordingId()),
-    settings: normalizeSettings(result.settings),
-  };
+  return { region: null, regions: [], recordingState: { status: RECORDING_STATUS.idle }, settings: DEFAULT_SETTINGS };
 }
 
 function getLocalRecordingId(): string | undefined {
@@ -1485,23 +1469,6 @@ function getLocalRecordingId(): string | undefined {
     return preparedRecordingId;
   }
   return undefined;
-}
-
-function normalizeRecordingState(raw: unknown, activeRecordingId?: string): LocalRecordingState {
-  const value = raw as Partial<RecordingState> | null | undefined;
-  const mode = value?.mode === RECORDING_MODE.region || value?.mode === RECORDING_MODE.full ? value.mode : undefined;
-  if (value?.status === RECORDING_STATUS.recording && (!activeRecordingId || value.recordingId !== activeRecordingId)) {
-    return { status: RECORDING_STATUS.idle, recordingElsewhere: true, mode };
-  }
-  if (value?.status === RECORDING_STATUS.recording || value?.status === RECORDING_STATUS.completed || value?.status === RECORDING_STATUS.error) {
-    return {
-      status: value.status,
-      startedAt: Number.isFinite(value.startedAt as number) ? Number(value.startedAt) : undefined,
-      mode,
-    };
-  }
-
-  return { status: RECORDING_STATUS.idle };
 }
 
 function trimRegionsToLimit(): boolean {
@@ -1534,6 +1501,7 @@ function clearSavedRegions(region?: RegionSelection): void {
 
 async function refreshBorder(): Promise<void> {
   const state = await loadState();
+  if (isChzzkClipEditorPage()) return;
   currentRegion = state.region;
   currentRegions = state.regions;
   activeRegionIndex = Math.min(activeRegionIndex, Math.max(0, currentRegions.length - 1));
@@ -1549,6 +1517,7 @@ async function refreshBorder(): Promise<void> {
 
 async function initializePageState(): Promise<void> {
   const state = await loadState();
+  if (isChzzkClipEditorPage()) return;
   currentRecordingState = state.recordingState;
   applyPlayerSettings(state.settings);
 
@@ -2070,12 +2039,14 @@ function handlePlayerCancelActivation(event: MouseEvent): void {
   void cancelRecording().catch((error: Error) => window.alert(error.message));
 }
 
+const boundPlayerButtons = new WeakSet<HTMLElement>();
+
 function bindDirectPlayerActivation(button: HTMLElement, handler: (event: MouseEvent) => void): void {
-  if (button.dataset.cropClipBound === "true") {
+  if (boundPlayerButtons.has(button)) {
     return;
   }
 
-  button.dataset.cropClipBound = "true";
+  boundPlayerButtons.add(button);
   button.addEventListener("pointerdown", handler);
   button.addEventListener("click", (event) => {
     // Pointer activation already ran on pointerdown, regardless of click delay.
@@ -2093,13 +2064,8 @@ function isVisibleElement(element: HTMLElement): boolean {
 }
 
 function getPzpButtons(root: ParentNode = document): HTMLElement[] {
-  return Array.from(root.querySelectorAll<HTMLElement>(CHZZK_NATIVE_BUTTON_SELECTOR)).filter((button) =>
-    button.id !== CHZZK_TOOL_BUTTON_ID &&
-    button.id !== CHZZK_RECORD_BUTTON_ID &&
-    button.id !== CHZZK_RECORD_TIME_ID &&
-    button.id !== CHZZK_CANCEL_BUTTON_ID &&
-    button.id !== CHZZK_SCREENSHOT_BUTTON_ID
-  );
+  return Array.from(root.querySelectorAll<HTMLElement>(CHZZK_NATIVE_BUTTON_SELECTOR))
+    .filter((button) => !playerControlIds.has(button.id));
 }
 
 function getVisiblePzpButtons(root: ParentNode = document): HTMLElement[] {
@@ -2119,9 +2085,9 @@ function findChzzkButtonHost(): HTMLElement | null {
     document.querySelectorAll<HTMLElement>(CHZZK_BUTTON_HOST_SELECTOR),
   )
     .map((host) => {
-      const buttons = getPzpButtons(host);
-      const reference = buttons.find(isVisibleElement) ?? buttons[0];
-      return reference ? { host, reference, rect: host.getBoundingClientRect(), visible: isVisibleElement(host) } : null;
+      if (!getPzpButtons(host).length) return null;
+      const rect = host.getBoundingClientRect();
+      return { host, rect, visible: rect.width > 0 && rect.height > 0 };
     })
     .filter((item): item is NonNullable<typeof item> => item !== null)
     .sort((a, b) => Number(b.visible) - Number(a.visible) || compareBottomRight(a.rect, b.rect));
@@ -2163,131 +2129,88 @@ function findChzzkButtonHost(): HTMLElement | null {
   return fallback?.host ?? null;
 }
 
-function syncChzzkToolButton(target: HTMLElement | null = findChzzkButtonHost()): void {
-  if (!location.hostname.includes("chzzk.naver.com")) {
-    return;
+function showFullRecordingControls(): boolean {
+  return currentRecordingState.status === RECORDING_STATUS.recording
+    && currentRecordingState.mode === RECORDING_MODE.full;
+}
+
+function playerButton(
+  id: string,
+  isVisible: () => boolean,
+  update: (button: HTMLButtonElement) => void,
+  activate: (event: MouseEvent) => void,
+) {
+  return {
+    id,
+    isVisible,
+    render(existing: HTMLElement | null): HTMLButtonElement {
+      const button = existing instanceof HTMLButtonElement ? existing : document.createElement("button");
+      if (existing && existing !== button) existing.remove();
+      button.id = id;
+      button.className = CHZZK_TOOL_BUTTON_CLASS;
+      button.type = "button";
+      update(button);
+      bindDirectPlayerActivation(button, activate);
+      return button;
+    },
+  };
+}
+
+const playerControls = [
+  {
+    id: CHZZK_RECORD_TIME_ID,
+    isVisible: showFullRecordingControls,
+    render(existing: HTMLElement | null): HTMLElement {
+      const badge = existing ?? document.createElement("span");
+      badge.id = CHZZK_RECORD_TIME_ID;
+      badge.className = `${CHZZK_TOOL_BUTTON_CLASS} crop-clip-record-time`;
+      badge.setAttribute("aria-hidden", "true");
+      badge.hidden = false;
+      badge.textContent = getRecordingTimeText();
+      return badge;
+    },
+  },
+  playerButton(CHZZK_RECORD_BUTTON_ID, () => fullRecordButtonEnabled || showFullRecordingControls(), (button) => setRecordButtonContent(button, true), handlePlayerRecordActivation),
+  playerButton(CHZZK_CANCEL_BUTTON_ID, showFullRecordingControls, setChzzkCancelButtonContent, handlePlayerCancelActivation),
+  playerButton(CHZZK_SCREENSHOT_BUTTON_ID, () => fullScreenshotButtonEnabled, setChzzkScreenshotButtonContent, handlePlayerScreenshotActivation),
+  playerButton(CHZZK_TOOL_BUTTON_ID, () => true, setChzzkButtonContent, handlePlayerToolActivation),
+];
+const playerControlIds = new Set(playerControls.map(control => control.id));
+const playerControlSelector = Array.from(playerControlIds, id => `#${id}`).join(",");
+
+function syncChzzkToolButton(candidate?: HTMLElement | null): void {
+  if (!isChzzkPage || isChzzkClipEditorPage()) return;
+
+  const host = candidate === undefined ? findChzzkButtonHost() : candidate;
+  if (host !== observedChzzkToolHost) {
+    stopChzzkToolObservation();
+    if (host) observeChzzkToolHost(host);
+    for (const control of document.querySelectorAll(playerControlSelector)) {
+      if (control.parentElement !== host) control.remove();
+    }
+    requestRegionLayoutSync();
   }
+  if (host) stopChzzkToolDiscovery();
+  else startChzzkToolDiscovery();
+  syncChzzkRecordTimer();
 
-  const existing = document.getElementById(CHZZK_TOOL_BUTTON_ID) as HTMLButtonElement | null;
-  const existingRecord = document.getElementById(CHZZK_RECORD_BUTTON_ID) as HTMLButtonElement | null;
-  const existingTime = document.getElementById(CHZZK_RECORD_TIME_ID) as HTMLSpanElement | null;
-  const existingCancel = document.getElementById(CHZZK_CANCEL_BUTTON_ID) as HTMLButtonElement | null;
-  const existingScreenshot = document.getElementById(CHZZK_SCREENSHOT_BUTTON_ID) as HTMLButtonElement | null;
-  if (isChzzkClipEditorPage()) {
-    existing?.remove();
-    existingRecord?.remove();
-    existingTime?.remove();
-    existingCancel?.remove();
-    existingScreenshot?.remove();
-    return;
+  const visibleControls: HTMLElement[] = [];
+  for (const control of playerControls) {
+    const existing = document.getElementById(control.id);
+    if (!host || !control.isVisible()) {
+      existing?.remove();
+    } else {
+      visibleControls.push(control.render(existing));
+    }
   }
+  if (!host) return;
 
-  const isFullRecording = currentRecordingState.status === RECORDING_STATUS.recording && currentRecordingState.mode === RECORDING_MODE.full;
-  if (!fullRecordButtonEnabled) {
-    existingRecord?.remove();
-    existingTime?.remove();
-    existingCancel?.remove();
-  } else if (!isFullRecording) {
-    existingTime?.remove();
-    existingCancel?.remove();
-  }
-  if (!fullScreenshotButtonEnabled) {
-    existingScreenshot?.remove();
-  }
-
-  const host = target;
-  if (!host) {
-    startChzzkToolDiscovery();
-    return;
-  }
-
-  const timeBadge = fullRecordButtonEnabled && isFullRecording ? existingTime ?? document.createElement("span") : null;
-  if (timeBadge) {
-    timeBadge.id = CHZZK_RECORD_TIME_ID;
-    timeBadge.className = `${CHZZK_TOOL_BUTTON_CLASS} crop-clip-record-time`;
-    timeBadge.setAttribute("aria-hidden", "true");
-    timeBadge.hidden = false;
-    timeBadge.textContent = getRecordingTimeText();
-  } else {
-    existingTime?.remove();
-  }
-
-  const recordButton = fullRecordButtonEnabled ? existingRecord ?? document.createElement("button") : null;
-  if (recordButton) {
-    recordButton.id = CHZZK_RECORD_BUTTON_ID;
-    recordButton.className = CHZZK_TOOL_BUTTON_CLASS;
-    recordButton.type = "button";
-    setRecordButtonContent(recordButton, true);
-    bindDirectPlayerActivation(recordButton, handlePlayerRecordActivation);
-  }
-
-  const cancelButton = fullRecordButtonEnabled && isFullRecording ? existingCancel ?? document.createElement("button") : null;
-  if (cancelButton) {
-    cancelButton.id = CHZZK_CANCEL_BUTTON_ID;
-    cancelButton.className = CHZZK_TOOL_BUTTON_CLASS;
-    cancelButton.type = "button";
-    setChzzkCancelButtonContent(cancelButton);
-    bindDirectPlayerActivation(cancelButton, handlePlayerCancelActivation);
-  } else {
-    existingCancel?.remove();
-  }
-
-  const screenshotButton = fullScreenshotButtonEnabled ? existingScreenshot ?? document.createElement("button") : null;
-  if (screenshotButton) {
-    screenshotButton.id = CHZZK_SCREENSHOT_BUTTON_ID;
-    screenshotButton.className = CHZZK_TOOL_BUTTON_CLASS;
-    screenshotButton.type = "button";
-    setChzzkScreenshotButtonContent(screenshotButton);
-    bindDirectPlayerActivation(screenshotButton, handlePlayerScreenshotActivation);
-  }
-
-  const selectButton = existing ?? document.createElement("button");
-  selectButton.id = CHZZK_TOOL_BUTTON_ID;
-  selectButton.className = CHZZK_TOOL_BUTTON_CLASS;
-  selectButton.type = "button";
-  setChzzkButtonContent(selectButton);
-  bindDirectPlayerActivation(selectButton, handlePlayerToolActivation);
-
-  const needsReinsert = (recordButton ? recordButton.parentElement !== host : false)
-    || (cancelButton ? cancelButton.parentElement !== host : false)
-    || (screenshotButton ? screenshotButton.parentElement !== host : false)
-    || selectButton.parentElement !== host
-    || (timeBadge && recordButton ? timeBadge.parentElement !== host || timeBadge.nextElementSibling !== recordButton : false)
-    || (recordButton && cancelButton ? recordButton.nextElementSibling !== cancelButton : false)
-    || (cancelButton && screenshotButton ? cancelButton.nextElementSibling !== screenshotButton : false)
-    || (recordButton && !cancelButton && screenshotButton ? recordButton.nextElementSibling !== screenshotButton : false)
-    || (recordButton && !cancelButton && !screenshotButton ? recordButton.nextElementSibling !== selectButton : false)
-    || (cancelButton && !screenshotButton ? cancelButton.nextElementSibling !== selectButton : false)
-    || (screenshotButton ? screenshotButton.nextElementSibling !== selectButton : false);
-
+  const needsReinsert = visibleControls.some((element, index) => element.parentElement !== host
+    || (index + 1 < visibleControls.length && element.nextElementSibling !== visibleControls[index + 1]));
   if (needsReinsert) {
-    timeBadge?.remove();
-    recordButton?.remove();
-    cancelButton?.remove();
-    screenshotButton?.remove();
-    selectButton.remove();
-    const firstControl = Array.from(host.children).find(
-      (child) =>
-        child instanceof HTMLElement &&
-        child.id !== CHZZK_TOOL_BUTTON_ID &&
-        child.id !== CHZZK_RECORD_BUTTON_ID &&
-        child.id !== CHZZK_CANCEL_BUTTON_ID &&
-        child.id !== CHZZK_SCREENSHOT_BUTTON_ID &&
-        child.id !== CHZZK_RECORD_TIME_ID,
-    );
-    if (timeBadge) {
-      host.insertBefore(timeBadge, firstControl ?? null);
-    }
-    if (recordButton) {
-      host.insertBefore(recordButton, firstControl ?? null);
-    }
-    if (cancelButton) {
-      host.insertBefore(cancelButton, firstControl ?? null);
-    }
-    if (screenshotButton) {
-      host.insertBefore(screenshotButton, firstControl ?? null);
-    }
-    host.insertBefore(selectButton, firstControl ?? null);
+    for (const element of visibleControls) element.remove();
+    const firstControl = Array.from(host.children).find(child => child instanceof HTMLElement) ?? null;
+    for (const element of visibleControls) host.insertBefore(element, firstControl);
   }
 }
 
@@ -2303,17 +2226,13 @@ function requestChzzkToolSync(): void {
 }
 
 function syncChzzkRecordTimer(): void {
-  if (chzzkRecordTimerId !== null) {
-    window.clearInterval(chzzkRecordTimerId);
+  if (!observedChzzkToolHost || !showFullRecordingControls()) {
+    if (chzzkRecordTimerId !== null) window.clearInterval(chzzkRecordTimerId);
     chzzkRecordTimerId = null;
-  }
-
-  if (!fullRecordButtonEnabled || currentRecordingState.status !== RECORDING_STATUS.recording || currentRecordingState.mode !== RECORDING_MODE.full) {
-    document.getElementById(CHZZK_RECORD_TIME_ID)?.remove();
     return;
   }
 
-  chzzkRecordTimerId = window.setInterval(() => {
+  chzzkRecordTimerId ??= window.setInterval(() => {
     const timeBadge = document.getElementById(CHZZK_RECORD_TIME_ID);
     if (timeBadge) {
       timeBadge.textContent = getRecordingTimeText();
@@ -2336,84 +2255,64 @@ function startChzzkToolDiscovery(): void {
   chzzkToolDiscoveryTimerId = window.setInterval(() => {
     if (isChzzkClipEditorPage()) {
       suspendPlayerTools();
-    } else if (findChzzkButtonHost()) {
-      installChzzkToolButton();
+      return;
     }
+    const host = findChzzkButtonHost();
+    if (host) syncChzzkToolButton(host);
   }, CHZZK_TOOL_DISCOVERY_INTERVAL_MS);
 }
 
-function mutationAddsChzzkButtonHost(records: MutationRecord[]): boolean {
-  return records.some((record) => Array.from(record.addedNodes).some((node) =>
-    node instanceof Element && (node.matches(CHZZK_BUTTON_HOST_SELECTOR) || Boolean(node.querySelector(CHZZK_BUTTON_HOST_SELECTOR)))
-  ));
+function nodesContain(nodes: NodeList, selector: string): boolean {
+  return Array.from(nodes).some(node => node instanceof Element && (node.matches(selector) || Boolean(node.querySelector(selector))));
 }
 
-function installChzzkToolButton(): void {
-  if (!location.hostname.includes("chzzk.naver.com") || isChzzkClipEditorPage()) {
-    return;
-  }
-
+function stopChzzkToolObservation(): void {
   chzzkToolObserver?.disconnect();
   chzzkToolObserver = null;
-  stopChzzkToolDiscovery();
-  const toolHost = findChzzkButtonHost();
-  syncChzzkToolButton(toolHost);
-  syncChzzkRecordTimer();
-  if (!toolHost) {
-    return;
-  }
+  observedChzzkToolHost = null;
+}
 
-  const playerRoot = toolHost?.closest(".chzzk_player, .pzp");
-  const controlsRoot = toolHost?.closest(".pzp-pc__bottom, .pzp-pc-ui-bottom") ?? toolHost?.parentElement;
-  const controlsParent = controlsRoot?.parentElement;
-  const playerParent = playerRoot?.parentElement;
+function observeChzzkToolHost(toolHost: HTMLElement): void {
+  observedChzzkToolHost = toolHost;
+  const ancestry: Element[] = [];
+  for (let node: Element | null = toolHost; node; node = node.parentElement) ancestry.push(node);
+  const controlsRoot = toolHost.closest(".pzp-pc__bottom, .pzp-pc-ui-bottom") ?? toolHost.parentElement ?? toolHost;
   chzzkToolObserver = new MutationObserver((records) => {
     if (isChzzkClipEditorPage()) {
       suspendPlayerTools();
       return;
     }
-    const selectButton = document.getElementById(CHZZK_TOOL_BUTTON_ID);
-    const recordButton = document.getElementById(CHZZK_RECORD_BUTTON_ID);
-    const timeBadge = document.getElementById(CHZZK_RECORD_TIME_ID);
-    const cancelButton = document.getElementById(CHZZK_CANCEL_BUTTON_ID);
-    const screenshotButton = document.getElementById(CHZZK_SCREENSHOT_BUTTON_ID);
-    const expectsFullRecordingControls = fullRecordButtonEnabled
-      && currentRecordingState.status === RECORDING_STATUS.recording
-      && currentRecordingState.mode === RECORDING_MODE.full;
-    const missingExpectedButton = selectButton?.parentElement !== toolHost
-      || (fullRecordButtonEnabled && recordButton?.parentElement !== toolHost)
-      || (expectsFullRecordingControls && timeBadge?.parentElement !== toolHost)
-      || (expectsFullRecordingControls && cancelButton?.parentElement !== toolHost)
-      || (fullScreenshotButtonEnabled && screenshotButton?.parentElement !== toolHost);
-    if (!toolHost.isConnected || missingExpectedButton) {
-      syncPlayerToolsForLocation();
-    } else if (mutationAddsChzzkButtonHost(records) && findChzzkButtonHost() !== toolHost) {
-      syncPlayerToolsForLocation();
+    // The same player can move into the mini player before the room is rebuilt.
+    if (!toolHost.isConnected || ancestry.some((node, index) => node.parentElement !== (ancestry[index + 1] ?? null))) {
+      stopChzzkToolObservation();
+      syncChzzkToolButton();
+      requestRegionLayoutSync();
+      return;
+    }
+    if (records.some(record => nodesContain(record.addedNodes, CHZZK_BUTTON_HOST_SELECTOR))) {
+      syncChzzkToolButton();
+    } else if (playerControls.some(control => control.isVisible() && document.getElementById(control.id)?.parentElement !== toolHost)) {
+      syncChzzkToolButton(toolHost);
+    }
+    if (currentRegions.length && records.some(record => nodesContain(record.addedNodes, "video") || nodesContain(record.removedNodes, "video"))) {
+      requestRegionLayoutSync();
     }
   });
-  if (controlsRoot) {
-    chzzkToolObserver.observe(controlsRoot, { childList: true, subtree: true });
-  }
-  if (controlsParent) {
-    chzzkToolObserver.observe(controlsParent, { childList: true });
-  }
-  if (playerParent && playerParent !== controlsParent) {
-    chzzkToolObserver.observe(playerParent, { childList: true });
+  chzzkToolObserver.observe(controlsRoot, { childList: true, subtree: true });
+  // A restarted live room can replace a wrapper above the player without navigating.
+  for (let ancestor = controlsRoot?.parentElement; ancestor; ancestor = ancestor.parentElement) {
+    chzzkToolObserver.observe(ancestor, { childList: true });
   }
 }
 
 function suspendPlayerTools(): void {
-  chzzkToolObserver?.disconnect();
-  chzzkToolObserver = null;
+  stopChzzkToolObservation();
   stopChzzkToolDiscovery();
   if (chzzkToolSyncFrame !== null) {
     window.cancelAnimationFrame(chzzkToolSyncFrame);
     chzzkToolSyncFrame = null;
   }
-  if (chzzkRecordTimerId !== null) {
-    window.clearInterval(chzzkRecordTimerId);
-    chzzkRecordTimerId = null;
-  }
+  syncChzzkRecordTimer();
   stopRegionLayoutWatch();
   teardownOverlay();
   removeSelectionBorders();
@@ -2421,7 +2320,7 @@ function suspendPlayerTools(): void {
   document.getElementById(SCREENSHOT_STACK_ID)?.querySelectorAll<HTMLElement>(".screenshot-card").forEach(removeScreenshotCard);
   currentRegion = null;
   currentRegions = [];
-  for (const id of [CHZZK_TOOL_BUTTON_ID, CHZZK_RECORD_BUTTON_ID, CHZZK_CANCEL_BUTTON_ID, CHZZK_SCREENSHOT_BUTTON_ID, CHZZK_RECORD_TIME_ID]) {
+  for (const { id } of playerControls) {
     document.getElementById(id)?.remove();
   }
 }
@@ -2433,7 +2332,7 @@ function syncPlayerToolsForLocation(): void {
   }
 
   void refreshBorder()
-    .then(installChzzkToolButton)
+    .then(() => syncChzzkToolButton())
     .catch(() => {});
 }
 
@@ -2528,10 +2427,10 @@ function handleShortcut(event: KeyboardEvent): void {
   } else if (key === shortcutKeys.regionScreenshot) {
     event.preventDefault();
     void captureRegionScreenshot();
-  } else if (key === shortcutKeys.fullRecord && fullRecordButtonEnabled) {
+  } else if (key === shortcutKeys.fullRecord) {
     event.preventDefault();
     void toggleRecording(true).catch((error: Error) => window.alert(error.message));
-  } else if (key === shortcutKeys.fullScreenshot && fullScreenshotButtonEnabled) {
+  } else if (key === shortcutKeys.fullScreenshot) {
     event.preventDefault();
     void captureFullScreenshot();
   }
@@ -2577,8 +2476,9 @@ function findPrimaryVideoElement(): HTMLVideoElement | null {
 if (isExtensionContextAvailable()) {
   chrome.runtime.onMessage.addListener((message: ContentCommand, _sender, sendResponse: (response: MessageResponse<boolean | number> | RegionGeometryResponse | RegionGeometriesResponse) => void) => {
     if (message.type === "PREPARE_DIRECT_RECORDING") {
+      const video = message.settings.recordingCodec === "hevc" ? findPrimaryVideoElement() : null;
       const prepare = message.fullPlayer && message.settings.enableOriginalStreamRecording
-        ? Promise.resolve() : prepareDirectRecordingEncoder(message.settings);
+        ? Promise.resolve() : prepareDirectRecordingEncoder(message.settings, video !== null && playbackUsesHevc(video));
       void prepare
         .then(() => {
           preparedRecordingId = message.recordingId;
@@ -2697,20 +2597,18 @@ if (isExtensionContextAvailable()) {
     }
 
     if (changes.recordingState) {
-      const nextState = normalizeRecordingState(changes.recordingState.newValue, getLocalRecordingId());
+      const nextState = getPlayerRecordingState(normalizeRecordingState(changes.recordingState.newValue), getLocalRecordingId());
       currentRecordingState = nextState;
       if (selectionActive && isRegionEditingLocked(nextState)) {
         cancelSelection("녹화 중에는 영역을 다시 선택할 수 없습니다.");
       }
       // A background tab may not receive an animation frame until it is focused.
       syncChzzkToolButton();
-      syncChzzkRecordTimer();
     }
 
     if (changes.settings) {
       applyPlayerSettings(normalizeSettings(changes.settings.newValue));
       requestChzzkToolSync();
-      syncChzzkRecordTimer();
     }
     if (changes.recordingState || changes.settings) {
       if (trimRegionsToLimit() || changes.recordingState) showSelectionBorders(currentRegions);
@@ -2763,11 +2661,16 @@ window.addEventListener("keydown", (event) => {
 }, true);
 
   const navigationApi = (window as Window & { navigation?: EventTarget }).navigation;
-  navigationApi?.addEventListener("currententrychange", syncPlayerToolsForLocation);
-  window.addEventListener("popstate", syncPlayerToolsForLocation);
+  if (navigationApi) navigationApi.addEventListener("currententrychange", syncPlayerToolsForLocation);
+  else window.addEventListener("popstate", syncPlayerToolsForLocation);
 
   if (isChzzkPage) {
     document.addEventListener("playing", prepareEncoderDuringPlayback, true);
+    document.addEventListener("playing", event => {
+      if (!(event.target instanceof HTMLVideoElement)) return;
+      const toolPlayer = observedChzzkToolHost?.closest(".chzzk_player, .pzp");
+      if (!toolPlayer?.contains(event.target)) syncChzzkToolButton();
+    }, true);
     if (Array.from(document.querySelectorAll("video")).some(video =>
       !video.paused && !video.ended && video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA
     )) prepareEncoderDuringPlayback();
@@ -2778,6 +2681,6 @@ window.addEventListener("keydown", (event) => {
   } else {
     void initializePageState()
       .catch(() => {})
-      .then(installChzzkToolButton);
+      .then(() => syncChzzkToolButton());
   }
 })();

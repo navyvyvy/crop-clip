@@ -1,5 +1,21 @@
 import assert from 'node:assert/strict';
-import { createVideoFrameCapture } from '../dist/content/frame_capture.js';
+import { createVideoFrameCapture, getNextRecordingFrameDeadline } from '../dist/content/frame_capture.js';
+
+for (const sourceFps of [24, 30, 50, 60]) {
+  const interval = 1000 / 30;
+  let deadline = 140;
+  let captured = 0;
+  for (let index = 0; index < sourceFps * 10; index++) {
+    const next = getNextRecordingFrameDeadline(140 + index * 1000 / sourceFps, deadline, interval);
+    if (next === undefined) continue;
+    deadline = next;
+    captured++;
+  }
+  assert.equal(captured, Math.min(sourceFps, 30) * 10, `${sourceFps} fps input must keep the intended recording cadence`);
+}
+const afterDelay = getNextRecordingFrameDeadline(160, 100, 1000 / 30);
+assert.ok(afterDelay > 160);
+assert.equal(getNextRecordingFrameDeadline(161, afterDelay, 1000 / 30), undefined, 'delayed callbacks must not cause a catch-up burst');
 
 assert.equal(createVideoFrameCapture({}, 640, 360, () => {}), null, 'unsupported browsers retain canvas recording');
 const frames = [], writers = [], errors = [];

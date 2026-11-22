@@ -3,7 +3,8 @@ import fs from "node:fs";
 import ts from "typescript";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { RECORDING_MIME_CANDIDATES } from "../dist/shared/types.js";
+import { HEVC_MP4_MIME_TYPES, RECORDING_MIME_CANDIDATES } from "../dist/shared/types.js";
+import { getRegionLimit } from "../dist/shared/normalize.js";
 
 if (!global.gc) {
   const result = spawnSync(process.execPath, ["--expose-gc", fileURLToPath(import.meta.url)], { stdio: "inherit" });
@@ -33,12 +34,12 @@ function visit(node) {
   ts.forEachChild(node, visit);
 }
 visit(file);
-const selectMime = new Function("MediaRecorder", "RECORDING_MIME_CANDIDATES", `
+const selectMime = new Function("MediaRecorder", "RECORDING_MIME_CANDIDATES", "HEVC_MP4_MIME_TYPES", `
   const RECORDING_FORMAT = { webm: 'webm', mp4: 'mp4' };
   ${ts.transpile(selectDirectMimeTypeSource, { target: ts.ScriptTarget.ES2022 })}
   return selectDirectMimeType;
 `);
-const selectSupportedMime = recorder => selectMime(recorder, RECORDING_MIME_CANDIDATES);
+const selectSupportedMime = recorder => selectMime(recorder, RECORDING_MIME_CANDIDATES, HEVC_MP4_MIME_TYPES);
 assert.equal(selectSupportedMime({ isTypeSupported: () => true })({ outputFormat: "webm" }).mimeType,
   "video/webm;codecs=avc1", "prefer H.264 to preserve fast MP4 splitting without re-encoding");
 assert.equal(selectSupportedMime({ isTypeSupported: type => type.includes("vp8") })({ outputFormat: "webm" }).mimeType,
@@ -46,6 +47,10 @@ assert.equal(selectSupportedMime({ isTypeSupported: type => type.includes("vp8")
 assert.equal(selectSupportedMime({ isTypeSupported: type => type.includes("vp9") })({ outputFormat: "webm" }).mimeType,
   "video/webm;codecs=vp9,opus");
 assert.match(selectSupportedMime({ isTypeSupported: () => true })({ outputFormat: "mp4" }).mimeType, /^video\/mp4/);
+assert.equal(selectSupportedMime({ isTypeSupported: () => true })({ outputFormat: "mp4", recordingCodec: "hevc" }, true).mimeType, HEVC_MP4_MIME_TYPES[0]);
+assert.match(selectSupportedMime({ isTypeSupported: () => true })({ outputFormat: "mp4", recordingCodec: "hevc" }).mimeType, /avc1/);
+assert.match(selectSupportedMime({ isTypeSupported: type => /hev1|avc1/.test(type) })({ outputFormat: "mp4", recordingCodec: "hevc" }, true).mimeType, /hev1/);
+assert.match(selectSupportedMime({ isTypeSupported: type => !/hvc1|hev1/.test(type) })({ outputFormat: "mp4", recordingCodec: "hevc" }, true).mimeType, /avc1/);
 assert.throws(() => selectSupportedMime({ isTypeSupported: () => false })({ outputFormat: "webm" }), /WebM/);
 console.log("recording codec selection checks passed");
 const stopSource = functions.find(code => code.startsWith("function requestDirectPartStop("));
@@ -406,7 +411,7 @@ console.log("recording border timer cleanup checks passed");
 
 // Exercise the real startup scope: clearing session fields alone cannot detect
 // a pending Promise handler that still retains the drawing closure.
-const createStartup = new Function("playerState", "mimeType", "nativeCapture", `
+const createStartup = new Function("getRegionLimit", "playerState", "mimeType", "nativeCapture", `
   let directSession = null, recordingEncoderCheck, savedFirstScreenRecording = false;
   const timers = new Map(), refs = {};
   const window = { setInterval(fn) { timers.set(1, fn); return 1; }, clearInterval(id) { timers.delete(id); } };
@@ -422,7 +427,6 @@ const createStartup = new Function("playerState", "mimeType", "nativeCapture", `
     const player = { ...playerState }; refs.video = new WeakRef(player); return player;
   };
   const waitForCurrentVideoFrame = async () => true;
-  const getMultiRegionLimit = () => 2;
   const prepareRecordingEncoder = async () => { refs.encoderPreparations = (refs.encoderPreparations ?? 0) + 1; };
   const computeDirectCropFromSelection = () => {
     refs.cropReads = (refs.cropReads ?? 0) + 1;
@@ -447,7 +451,7 @@ const createStartup = new Function("playerState", "mimeType", "nativeCapture", `
   return { start: startDirectRecording, refs, timers,
     stop() { releaseDirectRecordingCapture(directSession); },
     finish() { directSession.resolveFinish(); } };
-`);
+`).bind(null, getRegionLimit);
 for (const allowMutedRecording of [undefined, false, true]) {
   for (const playerState of [{ muted: false, volume: 1 }, { muted: true, volume: 1 }, { muted: false, volume: 0 }]) {
     const recording = createStartup(playerState);

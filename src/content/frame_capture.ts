@@ -4,6 +4,13 @@ import type { DirectCropPlacement } from "./crop_layout.js";
 type FrameTrack = MediaStreamTrack & { writable: WritableStream<VideoFrame> };
 type FrameTrackConstructor = new (options: { kind: "video" }) => FrameTrack;
 
+export function getNextRecordingFrameDeadline(displayTime: number, deadline: number, interval: number): number | undefined {
+  const elapsed = displayTime - deadline + interval / 8;
+  if (elapsed < 0) return undefined;
+  // Keep the sampling phase when an input frame arrives between two deadlines.
+  return deadline + (Math.floor(elapsed / interval) + 1) * interval;
+}
+
 export function createVideoFrameCapture(video: HTMLVideoElement, width: number, height: number, onError: (error: Error) => void, allowDirectCrop = true) {
   const Generator = (globalThis as typeof globalThis & { MediaStreamTrackGenerator?: FrameTrackConstructor }).MediaStreamTrackGenerator;
   if (!Generator || typeof VideoFrame === "undefined") return null;

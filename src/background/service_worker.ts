@@ -1,8 +1,8 @@
 import { deleteRecording, deleteRecordingChunks, getChunksByRecordingId, getRecording, getRecordingDeletionCandidates, putChunk, putPart, putRecording } from "../shared/idb.js";
-import { fail, ok, type AutoDownloadHandledMessage, type ContentCommand, type DeletionScheduleRequest, type FinalizeRecordingMessage, type MessageResponse, type PopupCommand, type RecordingErrorMessage, type RecordingStartedMessage, type StoreRecordingChunkMessage, type StreamOffsetRequest } from "../shared/messages.js";
-import { loadAppState, loadRecordingState, saveRecordingState } from "../shared/storage.js";
+import { fail, ok, UNSUPPORTED_RUNTIME_MESSAGE, type AutoDownloadHandledMessage, type ContentCommand, type MessageResponse, type PlaybackSource, type PopupCommand, type RecordingErrorMessage, type RuntimeMessage, type StoreRecordingChunkMessage } from "../shared/messages.js";
+import { loadAppState, loadRecordingState, saveRecordingState, updateStoredSettings, waitForSettingsWrites } from "../shared/storage.js";
 import { removeEditOutputs } from "../shared/temporary_outputs.js";
-import { normalizeRegion, normalizeRegions } from "../shared/normalize.js";
+import { getRegionLimit, normalizeRegion, normalizeRegions } from "../shared/normalize.js";
 import { MILLISECONDS_PER_SECOND, SECONDS_PER_MINUTE } from "../shared/time_range.js";
 import { ORIGINAL_STREAM_PREFIXES, probeOriginalStream } from "../content/original_stream.js";
 import { RECORDING_MODE, RECORDING_STATUS, STARTUP_TRIM_MIN_SECONDS, STARTUP_TRIM_MAX_SECONDS, type RecordingRecord, type RegionSelection } from "../shared/types.js";
@@ -260,7 +260,7 @@ function queueRegionWrite<T>(operation: () => Promise<T>): Promise<T> {
 
 function saveRecordingRegions(message: Extract<PopupCommand, { type: "CLEAR_REGION" | "SAVE_REGIONS" }>, sender: chrome.runtime.MessageSender): Promise<MessageResponse> {
   return queueRegionWrite(async () => {
-    const { recordingState: state, regions: savedRegions } = await loadAppState();
+    const { recordingState: state, regions: savedRegions, settings } = await loadAppState();
     const isRecording = state.status === RECORDING_STATUS.recording;
     const ownsRecording = state.tabId !== undefined && sender.tab?.id === state.tabId;
     const popupClear = message.type === "CLEAR_REGION" && message.region === undefined && sender.url === chrome.runtime.getURL("popup/popup.html");
@@ -272,6 +272,8 @@ function saveRecordingRegions(message: Extract<PopupCommand, { type: "CLEAR_REGI
       if (isRecording) return fail("녹화 중에는 영역을 삭제만 할 수 있습니다.");
       regions = normalizeRegions(message.regions);
       if (!Array.isArray(message.regions) || regions.length !== message.regions.length) return fail("녹화 영역이 올바르지 않습니다.");
+      const limit = getRegionLimit(settings);
+      if (regions.length > limit) return fail(`녹화 영역은 최대 ${limit}개까지 저장할 수 있습니다.`);
     } else if (message.region === undefined) {
       regions = [];
     } else {
@@ -317,7 +319,7 @@ async function cancelDirectRecording(tabId: number, recordingId?: string): Promi
   return await sendCommandToContentScript(tabId, { type: "CANCEL_DIRECT_RECORDING", recordingId });
 }
 
-async function startRecordingSession(fullPlayer: boolean, sourceTab?: chrome.tabs.Tab, playback?: Extract<PopupCommand, { type: "START_FULL_RECORDING" }>["playback"]): Promise<MessageResponse<{ recordingId: string }>> {
+async function startRecordingSession(fullPlayer: boolean, sourceTab?: chrome.tabs.Tab, playback?: PlaybackSource): Promise<MessageResponse<{ recordingId: string }>> {
   const tab = await getActiveRecordableTab(sourceTab);
   const tabId = tab.id;
   if (typeof tabId !== "number") {
@@ -415,14 +417,14 @@ async function startRecordingSession(fullPlayer: boolean, sourceTab?: chrome.tab
   }
 }
 
-async function startRecording(fullPlayer = false, sourceTab?: chrome.tabs.Tab, playback?: Extract<PopupCommand, { type: "START_FULL_RECORDING" }>["playback"]): Promise<MessageResponse<{ recordingId: string }>> {
+async function startRecording(fullPlayer = false, sourceTab?: chrome.tabs.Tab, playback?: PlaybackSource): Promise<MessageResponse<{ recordingId: string }>> {
   if (recordingStartInFlight) {
     return fail("녹화 시작을 처리 중입니다.");
   }
 
   recordingStartInFlight = true;
   try {
-    await pendingRegionWrite;
+    await Promise.all([pendingRegionWrite, waitForSettingsWrites()]);
     return await startRecordingSession(fullPlayer, sourceTab, playback);
   } finally {
     recordingStartInFlight = false;
@@ -521,8 +523,11 @@ async function openCompletedRecordingResult(): Promise<boolean> {
 
   const source = typeof recordingState.tabId === "number" ? `&sourceTabId=${recordingState.tabId}` : "";
   const autoDownload = settings.enableAutoDownloadRecording ? "&autoDownload=1" : "";
+  const keepResultOpen = settings.enableAutoDownloadRecording && settings.autoFocusResult;
+  const keepOpen = keepResultOpen ? "&keepOpen=1" : "";
+  const autoSplit = settings.enableAutoSplitRecording ? "&autoSplit=1" : "";
   const resultPage = chrome.runtime.getURL("result/result.html");
-  const url = `${resultPage}?id=${encodeURIComponent(recordingState.recordingId)}${source}${autoDownload}`;
+  const url = `${resultPage}?id=${encodeURIComponent(recordingState.recordingId)}${source}${autoDownload}${keepOpen}${autoSplit}`;
 
   try {
     // State persistence can fail after creation. Find the actual result across retries
@@ -530,7 +535,7 @@ async function openCompletedRecordingResult(): Promise<boolean> {
     let resultTabId = await findRecordingResultTab(recordingState.recordingId);
     for (let attempt = 0; resultTabId === undefined && attempt < RESULT_TAB_CREATE_ATTEMPTS; attempt += 1) {
       try {
-        resultTabId = (await chrome.tabs.create({ url, active: settings.autoFocusResult && !settings.enableAutoDownloadRecording })).id;
+        resultTabId = (await chrome.tabs.create({ url, active: settings.autoFocusResult })).id;
       } catch {
         if (attempt + 1 < RESULT_TAB_CREATE_ATTEMPTS) {
           await delay(RESULT_TAB_RETRY_DELAY_MS * (attempt + 1));
@@ -668,6 +673,7 @@ async function finalizeRecordingFromChunksUnlocked(recordingId: string, endedAt:
     blob,
     createdAt: actualEndedAt,
     frameRate: first.frameRate,
+    videoBitsPerSecond: originalStreamStart === undefined ? first.videoBitsPerSecond : undefined,
     inspectStartup: state.mode === RECORDING_MODE.full && originalStreamStart === undefined && first.inspectStartup === true ? true : undefined,
     startupTrimSeconds: state.mode === RECORDING_MODE.full && typeof startupTrimSeconds === "number"
       && startupTrimSeconds >= STARTUP_TRIM_MIN_SECONDS && startupTrimSeconds <= STARTUP_TRIM_MAX_SECONDS ? startupTrimSeconds : undefined,
@@ -805,16 +811,23 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   void queueRegionWrite(async () => {
     const { recordingState, settings, regions } = await loadAppState();
     if (recordingStartInFlight || recordingState.status === RECORDING_STATUS.recording) return;
-    const limit = settings.enableMultiRegion ? settings.multiRegionMaxCount : 1;
+    const limit = getRegionLimit(settings);
     if (regions.length > limit) {
       await chrome.storage.local.set({ region: regions[0], regions: regions.slice(0, limit) });
     }
   }).catch(() => {});
 });
 
-chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingErrorMessage | RecordingStartedMessage | StoreRecordingChunkMessage | FinalizeRecordingMessage | DeletionScheduleRequest | AutoDownloadHandledMessage | StreamOffsetRequest, sender, sendResponse: (response: MessageResponse<unknown>) => void) => {
+chrome.runtime.onMessage.addListener((message: RuntimeMessage, sender, sendResponse: (response: MessageResponse<unknown>) => void) => {
   const sourceTab = sender.url?.startsWith(chrome.runtime.getURL("")) ? undefined : sender.tab;
   void (async () => {
+    if (message.type === "UPDATE_SETTINGS") {
+      sendResponse(sender.url === chrome.runtime.getURL("popup/popup.html")
+        ? await updateStoredSettings(message.patch)
+        : fail("팝업에서만 설정을 변경할 수 있습니다."));
+      return;
+    }
+
     if (message.type === "SELECT_REGION") {
       sendResponse(await startSelection(sourceTab));
       return;
@@ -911,7 +924,8 @@ chrome.runtime.onMessage.addListener((message: PopupCommand | RecordingErrorMess
       return;
     }
 
-    sendResponse(fail("지원하지 않는 메시지입니다."));
+    message satisfies never;
+    sendResponse(fail(UNSUPPORTED_RUNTIME_MESSAGE));
   })().catch((error: unknown) => {
     sendResponse(fail(error instanceof Error ? error.message : "요청을 처리하지 못했습니다."));
   });

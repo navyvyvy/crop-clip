@@ -56,38 +56,37 @@ select {
 
 .result-loading {
   position: absolute;
-  z-index: 20;
   inset: 0;
   display: grid;
-  min-height: 320px;
-  place-items: center;
-  border-radius: inherit;
-  background: var(--card);
+  grid-template-columns: min(100%, 240px);
+  place-content: center;
+  gap: 8px;
+  padding: 12px;
+  background: var(--card-2);
+  text-align: center;
+  pointer-events: none;
 }
 
-.result-loading[hidden] {
+.preview-frame:not(:has(.preview-waiting:not([hidden]))) > .result-loading {
+  inset: 12px auto auto;
+  width: min(calc(100% - 24px), 264px);
+  border: var(--control-border);
+  border-radius: var(--control-radius);
+}
+
+.result-loading[hidden],
+.preview-frame:has(.preview-recovery:not([hidden])) > .result-loading,
+.preview-frame:has(.result-loading:not([hidden])) > .preview-waiting {
   display: none;
 }
 
-.result-loading-content {
-  display: grid;
-  width: min(320px, calc(100% - 48px));
-  gap: 8px;
-  text-align: center;
-}
-
-.result-loading-content strong {
-  font-size: 18px;
-}
-
-.result-loading-content span {
+#result-loading-message {
   color: var(--muted);
   font-size: 13px;
 }
 
 .result-loading-track {
   height: 3px;
-  margin-top: 8px;
   overflow: hidden;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.08);
@@ -117,21 +116,26 @@ select {
 }
 
 .result-head {
+  align-items: flex-start;
   justify-content: space-between;
   gap: 14px;
   margin-bottom: 16px;
-  padding-top: 16px;
 }
 
 .header-actions {
   display: flex;
-  gap: 8px;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.header-actions .button {
+  white-space: nowrap;
 }
 
 .title-row {
   gap: 14px;
   min-width: 0;
-  flex-wrap: wrap;
 }
 
 h1,
@@ -143,6 +147,7 @@ p {
 h1 {
   font-size: 28px;
   line-height: 1.1;
+  white-space: nowrap;
 }
 
 h2 {
@@ -151,12 +156,48 @@ h2 {
 }
 
 .meta-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 42px;
+  max-width: 100%;
+  gap: 5px;
   padding: 9px 14px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.04);
   color: var(--text);
   font-size: 15px;
+}
+
+.meta-chip[hidden] {
+  visibility: hidden;
+}
+
+#format-summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.capture-fallback[hidden] {
+  display: none;
+}
+
+.capture-fallback .help-button {
+  width: 20px;
+  height: 20px;
+}
+
+.meta-chip .capture-fallback {
+  position: static;
+  flex-shrink: 0;
+}
+
+.capture-fallback .help-popover {
+  left: 0;
+  max-width: min(280px, 100%);
 }
 
 .button {
@@ -223,13 +264,9 @@ select:focus-visible {
   background: rgba(67, 196, 135, 0.08);
 }
 
-.close-button {
-  position: absolute;
-  z-index: 21;
-  top: 8px;
-  right: 8px;
-  width: 24px;
-  height: 24px;
+.header-actions .close-button {
+  width: 30px;
+  height: 30px;
   padding: 0;
   border-color: transparent;
   border-radius: 50%;
@@ -258,13 +295,69 @@ select:focus-visible {
 }
 
 .preview-frame {
+  --preview-max-height: min(50vh, 460px);
   position: relative;
   display: flex;
   justify-content: center;
+  width: min(100%, calc(var(--preview-max-height) * 16 / 9));
+  aspect-ratio: 16 / 9;
+  margin-inline: auto;
   overflow: hidden;
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   border-radius: 12px;
-  background: #030608;
+}
+
+.preview-frame:has(.preview-waiting:not([hidden]), .preview-recovery:not([hidden])) {
+  border-color: var(--line);
+  background: var(--card-2);
+}
+
+.preview-waiting {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--card-2);
+  color: var(--muted);
+  font-size: 13px;
+  pointer-events: none;
+}
+
+.preview-waiting[hidden] {
+  display: none;
+}
+
+.preview-frame:has(.preview-waiting:not([hidden]), .preview-recovery:not([hidden])) > .preview-video {
+  visibility: hidden;
+}
+
+.preview-recovery {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 10px;
+  padding: 12px;
+  color: var(--text);
+  font-size: 13px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.preview-recovery[hidden],
+.preview-recovery-actions:not(:has(button:not([hidden]))) {
+  display: none;
+}
+
+.preview-recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+}
+
+.preview-recovery-actions button:not([hidden]) {
+  pointer-events: auto;
 }
 
 .frame-preview-card {
@@ -324,9 +417,15 @@ select:focus-visible {
 }
 
 .preview-video {
+  position: absolute;
+  top: 50%;
+  left: 50%;
   width: auto;
   max-width: 100%;
-  max-height: min(50vh, 460px);
+  max-height: 100%;
+  transform: translate(-50%, -50%);
+  object-fit: contain;
+  border-radius: 11px;
   background: #000;
 }
 
@@ -996,8 +1095,7 @@ select:focus-visible {
   pointer-events: none;
 }
 
-.split-status,
-.empty-message {
+.split-status {
   margin-top: 8px;
   color: var(--muted);
   font-size: 12px;
@@ -1082,7 +1180,6 @@ select:focus-visible {
 
 .split-chip-meta {
   color: var(--text);
-  white-space: nowrap;
 }
 
 .icon-button {
@@ -1112,17 +1209,41 @@ select:focus-visible {
     padding: 16px;
   }
 
-  .result-head,
   .split-download-head {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .header-actions {
-    flex-direction: column;
+  .result-head {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "title actions" "metadata metadata";
+    align-items: center;
+    column-gap: 8px;
+    row-gap: 8px;
   }
 
-  .result-head .button,
+  .title-row {
+    display: contents;
+  }
+
+  .result-head h1 {
+    grid-area: title;
+    font-size: 22px;
+    white-space: normal;
+  }
+
+  .header-actions {
+    grid-area: actions;
+  }
+
+  .meta-chip {
+    position: static;
+    grid-area: metadata;
+    justify-self: start;
+  }
+
   .split-download-head .button {
     width: 100%;
   }
@@ -1142,6 +1263,11 @@ select:focus-visible {
     margin-left: 0;
   }
 
+  .trim-range-fields {
+    flex-wrap: wrap;
+    max-width: 100%;
+  }
+
   .tool-row select,
   .split-value,
   .split-button,
@@ -1158,6 +1284,31 @@ select:focus-visible {
 
   .split-chip {
     width: 100%;
+  }
+}
+
+@media (max-width: 480px) {
+  .result-head {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas: "title download close" "metadata metadata metadata";
+  }
+
+  .header-actions {
+    display: contents;
+  }
+
+  #download-current-button {
+    grid-area: download;
+  }
+
+  #close-button {
+    grid-area: close;
+  }
+
+  #download-original-button {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    justify-self: end;
   }
 }
 

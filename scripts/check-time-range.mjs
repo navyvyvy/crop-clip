@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import ts from "typescript";
-import { bytesToMegabytes, estimateRangeSize, floorTimeToStep, formatElapsed, getExpectedSplitCount, getNextSizeSplitSeconds, isFullTimeRange, megabytesToBytes, normalizeTimeRange, parseSegmentTimeList, parseTimeInput, snapTimeRangeValue, updateTimeRangeHandle } from "../dist/shared/time_range.js";
+import { bytesToMegabytes, estimateRangeSize, floorTimeToStep, formatElapsed, getExpectedSplitCount, getNextSizeSplitSeconds, getSplitIntervalForCount, isFullTimeRange, megabytesToBytes, normalizeTimeRange, parseSegmentTimeList, parseTimeInput, snapTimeRangeValue, updateTimeRangeHandle } from "../dist/shared/time_range.js";
 
 for (const [ms, expected] of [[-1000, "00:00"], [59999, "00:59"], [60000, "01:00"], [3600000, "01:00:00"]]) {
   assert.equal(formatElapsed(ms), expected);
@@ -43,21 +41,10 @@ assert.equal(snapTimeRangeValue(8.7, 20), 8.7);
 
 console.log("time range checks passed");
 
-const source = ts.createSourceFile("result.ts", fs.readFileSync(new URL("../src/result/result.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
-const preset = source.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "getSplitPresetValue");
-const presetValue = new Function("duration", `
-  const TIME_STEP_SECONDS = 0.1, TIME_DECIMAL_PLACES = 1;
-  const getFullSourceDuration = () => duration;
-  const getSelectedTimeRange = () => ({ start: 0, end: duration });
-  const roundTrimTime = seconds => Math.round(seconds * 10) / 10;
-  ${ts.transpile(preset.getText(source), { target: ts.ScriptTarget.ES2022 })}
-  return getSplitPresetValue;
-`);
-for (const duration of [9, 10, 10.03, 10.049, 30.001]) {
+for (const duration of [1.01, 1.201, 1.21, 1.23, 9, 10, 10.03, 10.049, 30.001]) {
   for (const count of [2, 3, 4]) {
-    const dataset = count === 2 ? { splitRatio: "0.5" } : { splitCount: String(count) };
-    const seconds = presetValue(duration)({ dataset });
-    assert.equal(getExpectedSplitCount(duration, seconds), count, `${duration}s / ${count}: rounded duration must not create an extra segment`);
+    const seconds = getSplitIntervalForCount(duration, count);
+    assert.equal(getExpectedSplitCount(duration, seconds), count, `${duration}s / ${count}: the interval must preserve the requested segment count`);
   }
 }
 console.log("split preset checks passed");

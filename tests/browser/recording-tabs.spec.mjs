@@ -23,7 +23,8 @@ test('other tabs lock all recording controls and unlock after the owner stops', 
       videoRelative: { x: 0.1 + index % 2 * 0.5, y: 0.175 + Math.floor(index / 2) * 0.45, width: 0.375, height: 0.35 },
     }));
     await chrome.storage.local.set({ region: regions[0], regions, settings: {
-      enableShortcuts: true, enableFullRecordButton: true, enableMultiRegion: true, multiRegionMaxCount: 4,
+      enableShortcuts: true, enableFullRecordButton: true, enableFullScreenshotButton: true,
+      enableMultiRegion: true, multiRegionMaxCount: 4,
     } });
   });
   const state = () => worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState);
@@ -59,6 +60,9 @@ test('other tabs lock all recording controls and unlock after the owner stops', 
     await expect(other.locator('.cancel-recording:visible, #crop-clip-chzzk-cancel-button:visible')).toHaveCount(0);
   };
   await assertControls();
+  const toolbarControls = page.locator('.pzp-pc__bottom-buttons-right > .crop-clip-pzp-button');
+  const controlOrder = () => toolbarControls.evaluateAll(controls => controls.map(control => control.id.split('-').slice(3).join('-')));
+  await expect.poll(controlOrder).toEqual(['record-button', 'screenshot-button', 'tool-button']);
 
   for (const mode of ['full', 'region']) {
     await worker.evaluate(tabId => chrome.scripting.executeScript({ target: { tabId }, func: () => {
@@ -88,6 +92,7 @@ test('other tabs lock all recording controls and unlock after the owner stops', 
     await expect(page.locator('#crop-clip-overlay')).toHaveCount(0);
 
     if (mode === 'full') {
+      await expect.poll(controlOrder).toEqual(['record-time', 'record-button', 'cancel-button', 'screenshot-button', 'tool-button']);
       const regionRecord = page.locator('.crop-clip-border .record-region:visible');
       await expect(regionRecord).toBeDisabled();
       await expect(regionRecord).not.toHaveAttribute('disabled');
@@ -101,6 +106,7 @@ test('other tabs lock all recording controls and unlock after the owner stops', 
       for (const reply of replies) expect(reply).toMatchObject({ ok: false, error: /삭제만/ });
       expect(await storedRegions()).toEqual(initialRegions);
     } else {
+      await expect.poll(controlOrder).toEqual(['record-button', 'screenshot-button', 'tool-button']);
       const fullRecord = page.locator('#crop-clip-chzzk-record-button');
       await expect(fullRecord).toBeDisabled();
       await fullRecord.hover();
@@ -270,4 +276,17 @@ test('rapid region deletions apply to the latest saved list', async ({ extension
   await buttons.evaluateAll(([first, second]) => { first.click(); second.click(); });
   await expect.poll(() => worker.evaluate(async () => (await chrome.storage.local.get('regions')).regions)).toEqual(regions.slice(2));
   await expect(buttons).toHaveCount(1);
+
+  await worker.evaluate(() => chrome.storage.local.set({ settings: { enableMultiRegion: true, multiRegionMaxCount: 2 } }));
+  const reply = await worker.evaluate(async regions => {
+    const [tab] = await chrome.tabs.query({ url: 'https://chzzk.naver.com/extension-test' });
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: regions => chrome.runtime.sendMessage({ type: 'SAVE_REGIONS', regions }),
+      args: [regions],
+    });
+    return result;
+  }, regions);
+  expect(reply).toMatchObject({ ok: false, error: '녹화 영역은 최대 2개까지 저장할 수 있습니다.' });
+  expect(await worker.evaluate(async () => (await chrome.storage.local.get('regions')).regions)).toEqual(regions.slice(2));
 });

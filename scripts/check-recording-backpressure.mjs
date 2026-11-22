@@ -31,6 +31,7 @@ const api = new Function("sendRuntimeMessage", "showPlayerFeedback", `
   const MAX_RECORDING_MESSAGE_BLOB_BYTES = 8 * 1024 * 1024;
   const HIGH_RECORDING_FRAME_RATE = 60, STANDARD_RECORDING_FRAME_RATE = 30;
   const MAX_PENDING_RECORDING_BYTES = ${limit}, CHUNK_INDEX_DIGITS = 6;
+  const buildBaseName = createdAt => 'recording-' + createdAt;
   const readBlobAsDataUrl = async blob => 'data:' + blob.size;
   const cleanupDirectRecordingSession = () => {};
   const requestDirectPartStop = session => { session.stops++; };
@@ -42,7 +43,7 @@ const api = new Function("sendRuntimeMessage", "showPlayerFeedback", `
   return failWrite ? { ok: false, error: "disk failure" } : { ok: true };
 }, message => notices.push(message));
 const makeSession = () => ({
-  recordingId: "test", checkpointIndex: 0, checkpointSaveChain: Promise.resolve(),
+  recordingId: "test", createdAt: 1_000, checkpointIndex: 0, checkpointSaveChain: Promise.resolve(),
   pendingChunks: [], pendingBytes: 0, recordedBytes: 0, checkpointSaving: false, checkpointAbort: new AbortController(),
   settings: { enable60fps: true },
   stops: 0, resolveFinish() {},
@@ -63,6 +64,7 @@ releaseWrite();
 await session.checkpointSaveChain;
 assert.equal(writes.length, 9, "save all queued chunks and the encoder's final data without truncating");
 assert.deepEqual(writes.map(item => item.index), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+assert.ok(writes.every(item => item.baseName === "recording-1000"));
 assert.deepEqual(writes.filter(item => item.frameRate !== undefined).map(item => item.frameRate), [60]);
 assert.equal(session.pendingBytes, 0);
 assert.equal(session.pendingChunks.length, 0);

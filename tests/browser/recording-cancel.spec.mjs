@@ -11,6 +11,21 @@ test('full recording cancellation releases encoders without a stop callback', as
   })()`);
   await content(() => {
     const Recorder = MediaRecorder;
+    const requestFrame = HTMLVideoElement.prototype.requestVideoFrameCallback;
+    const cancelFrame = HTMLVideoElement.prototype.cancelVideoFrameCallback;
+    const frameCallbacks = window.__recordingFrameCallbacks = new Set();
+    HTMLVideoElement.prototype.requestVideoFrameCallback = function (callback) {
+      const id = requestFrame.call(this, (now, metadata) => {
+        frameCallbacks.delete(id);
+        callback(now, metadata);
+      });
+      frameCallbacks.add(id);
+      return id;
+    };
+    HTMLVideoElement.prototype.cancelVideoFrameCallback = function (id) {
+      frameCallbacks.delete(id);
+      return cancelFrame.call(this, id);
+    };
     window.__cancelledRecorders = [];
     window.__failNextStop = false;
     window.MediaRecorder = class extends Recorder {
@@ -40,6 +55,7 @@ test('full recording cancellation releases encoders without a stop callback', as
     }
     await expect.poll(() => worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState.status)).toBe('idle');
     await expect(page.locator('#crop-clip-chzzk-record-button')).toHaveAttribute('aria-busy', 'false');
+    expect(await content(() => __recordingFrameCallbacks.size)).toBe(0);
     const retained = await content(() => __cancelledRecorders.map(recorder => ({
       state: recorder.state,
       data: recorder.ondataavailable !== null,

@@ -1,11 +1,13 @@
 import { stopRecordingStream, releaseDirectRecordingCapture, releaseDirectRecordingRecorder, requestDirectPartStop, type DirectRecordingSession } from "./recording_session.js";
 import { getVideoStream } from "./player_capture.js";
-import { createVideoFrameCapture } from "./frame_capture.js";
+import { createVideoFrameCapture, getNextRecordingFrameDeadline } from "./frame_capture.js";
 import { getOriginalPlaylist, openOriginalStream, OriginalStreamError, type OriginalStreamProbe } from "./original_stream.js";
 import { computeDirectLayout, scaleLayout, type DirectCrop, type DirectCropPlacement } from "./crop_layout.js";
+import type { PlayerRecordingState } from "./player_state.js";
+import { getRegionLimit } from "../shared/normalize.js";
 import { MAX_ORIGINAL_STREAM_SECONDS, MILLISECONDS_PER_SECOND, SECONDS_PER_MINUTE } from "../shared/time_range.js";
-import { RECORDING_FORMAT, RECORDING_MIME_CANDIDATES, STANDARD_RECORDING_FRAME_RATE, HIGH_RECORDING_FRAME_RATE, STARTUP_STALL_WINDOW_SECONDS, STARTUP_TRIM_MIN_SECONDS, STARTUP_TRIM_MAX_SECONDS, type RecordingState, type RegionSelection, type Settings } from "../shared/types.js";
-import type { ContentCommand, MessageResponse } from "../shared/messages.js";
+import { HEVC_MP4_MIME_TYPES, RECORDING_FORMAT, RECORDING_MIME_CANDIDATES, STANDARD_RECORDING_FRAME_RATE, HIGH_RECORDING_FRAME_RATE, STARTUP_STALL_WINDOW_SECONDS, STARTUP_TRIM_MIN_SECONDS, STARTUP_TRIM_MAX_SECONDS, type RegionSelection, type Settings } from "../shared/types.js";
+import type { ContentCommand, MessageResponse, RuntimeMessage } from "../shared/messages.js";
 
 const CHUNK_INDEX_DIGITS = 6;
 const AUDIO_BITS_PER_SECOND = 128_000;
@@ -15,25 +17,36 @@ const MAX_PENDING_RECORDING_BYTES = 64 * 1024 * 1024;
 const CHECKPOINT_REPLY_TIMEOUT_MS = 15_000;
 const FINALIZE_REPLY_TIMEOUT_MS = 30_000;
 
-export type LocalRecordingState = Pick<RecordingState, "status" | "startedAt" | "mode"> & { recordingElsewhere?: boolean };
 type RecordingStatus = Readonly<Pick<DirectRecordingSession, "recordingId" | "startedAt" | "stopRequested" | "recordedBytes">>;
 
 interface RecordingControllerOptions {
   findPrimaryVideoElement(): HTMLVideoElement | null;
   waitForCurrentVideoFrame(video: HTMLVideoElement): Promise<boolean>;
   computeDirectCropFromSelection(region: RegionSelection, video: HTMLVideoElement): DirectCrop | null;
-  getMultiRegionLimit(settings: Settings): number;
-  buildBaseName(): string;
+  buildBaseName(startedAt: number): string;
   handleDetachedPlayer(video: HTMLVideoElement): void;
-  sendRuntimeMessage<T = undefined>(message: Record<string, unknown>): Promise<MessageResponse<T>>;
+  sendRuntimeMessage<T = undefined>(message: RuntimeMessage): Promise<MessageResponse<T>>;
   showPlayerFeedback(message: string, duration?: number): void;
   syncRecordingCommandButtons(): void;
-  loadState(): Promise<{ recordingState: LocalRecordingState }>;
-  renderRecordingState(state: LocalRecordingState): void;
+  loadState(): Promise<{ recordingState: PlayerRecordingState }>;
+  renderRecordingState(state: PlayerRecordingState): void;
 }
 
-function selectDirectMimeType(settings: Settings): { mimeType: string; extension: "webm" | "mp4" } {
+function playbackUsesHevc(video: HTMLVideoElement): boolean {
+  let hevc = false;
+  const receive = () => { hevc = true; };
+  video.addEventListener("cropclip-playback-hevc", receive, { once: true });
+  video.dispatchEvent(new Event("cropclip-check-playback-codec", { bubbles: true }));
+  video.removeEventListener("cropclip-playback-hevc", receive);
+  return hevc;
+}
+
+function selectDirectMimeType(settings: Settings, sourceUsesHevc = false): { mimeType: string; extension: "webm" | "mp4"; hevc?: true } {
   const extension = settings.outputFormat === RECORDING_FORMAT.mp4 ? RECORDING_FORMAT.mp4 : RECORDING_FORMAT.webm;
+  if (extension === RECORDING_FORMAT.mp4 && settings.recordingCodec === "hevc" && sourceUsesHevc) {
+    const mimeType = HEVC_MP4_MIME_TYPES.find(candidate => MediaRecorder.isTypeSupported(candidate));
+    if (mimeType) return { mimeType, extension, hevc: true };
+  }
   const candidates = RECORDING_MIME_CANDIDATES[extension];
 
   for (const mimeType of candidates) {
@@ -57,7 +70,7 @@ function getCropLayoutKey(crops: DirectCrop[]): string {
 }
 
 export function createRecordingController({
-  findPrimaryVideoElement, waitForCurrentVideoFrame, computeDirectCropFromSelection, getMultiRegionLimit, buildBaseName,
+  findPrimaryVideoElement, waitForCurrentVideoFrame, computeDirectCropFromSelection, buildBaseName,
   handleDetachedPlayer, sendRuntimeMessage, showPlayerFeedback, syncRecordingCommandButtons, loadState, renderRecordingState,
 }: RecordingControllerOptions) {
   let directSession: DirectRecordingSession | null = null;
@@ -113,7 +126,7 @@ export function createRecordingController({
     }
   }
 
-  function sendCheckpointMessage<T = undefined>(message: Record<string, unknown>, signal: AbortSignal): Promise<MessageResponse<T>> {
+  function sendCheckpointMessage<T = undefined>(message: RuntimeMessage, signal: AbortSignal): Promise<MessageResponse<T>> {
     if (signal.aborted) return Promise.reject(signal.reason);
     let abort: () => void;
     return new Promise<MessageResponse<T>>((resolve, reject) => {
@@ -125,6 +138,7 @@ export function createRecordingController({
 
   async function saveDirectCheckpoints(session: DirectRecordingSession): Promise<void> {
     try {
+      const baseName = session.baseName ??= buildBaseName(session.createdAt);
       while (session.pendingChunks.length > 0 && !session.cancelRequested) {
         const { blob, capturedAt } = session.pendingChunks.shift()!;
         const ranges = getRecordingChunkSliceRanges(blob.size, MAX_RECORDING_MESSAGE_BLOB_BYTES);
@@ -138,24 +152,28 @@ export function createRecordingController({
             return;
           }
           const deadline = AbortSignal.timeout(CHECKPOINT_REPLY_TIMEOUT_MS);
+          const chunkIndex = ++session.checkpointIndex;
+          const firstChunk = chunkIndex === 1;
+          const firstScreenChunk = firstChunk && session.originalStreamStart === undefined;
           const response = await sendCheckpointMessage({
             type: "STORE_RECORDING_CHUNK",
             chunk: {
-              id: `${session.recordingId}:chunk:${String(++session.checkpointIndex).padStart(CHUNK_INDEX_DIGITS, "0")}`,
+              id: `${session.recordingId}:chunk:${String(chunkIndex).padStart(CHUNK_INDEX_DIGITS, "0")}`,
               recordingId: session.recordingId,
-              index: session.checkpointIndex,
+              index: chunkIndex,
               mimeType: session.mimeType,
               extension: session.extension,
-              baseName: session.baseName,
+              baseName,
               createdAt: session.createdAt,
               capturedAt,
               completesBlob: rangeIndex === ranges.length - 1,
-              frameRate: session.checkpointIndex === 1 && session.originalStreamStart === undefined
+              frameRate: firstScreenChunk
                 ? session.settings.enable60fps ? HIGH_RECORDING_FRAME_RATE : STANDARD_RECORDING_FRAME_RATE
                 : undefined,
-              inspectStartup: session.checkpointIndex === 1 ? session.inspectStartup : undefined,
-              originalStreamStart: session.checkpointIndex === 1 ? session.originalStreamStart : undefined,
-              originalStreamFallback: session.checkpointIndex === 1 ? session.originalStreamFallback : undefined,
+              videoBitsPerSecond: firstScreenChunk ? session.settings.videoBitsPerSecond : undefined,
+              inspectStartup: firstChunk ? session.inspectStartup : undefined,
+              originalStreamStart: firstChunk ? session.originalStreamStart : undefined,
+              originalStreamFallback: firstChunk ? session.originalStreamFallback : undefined,
               dataUrl,
             },
           }, AbortSignal.any([session.checkpointAbort.signal, deadline])).catch(error => {
@@ -275,39 +293,55 @@ export function createRecordingController({
     };
   }
 
-  async function startDirectPart(session: DirectRecordingSession, onStarted?: () => void): Promise<void> {
+  async function startDirectPart(session: DirectRecordingSession, useHevc = false, onStarted?: () => void): Promise<void> {
     session.closingPart = false;
 
-    if (!session.outputStream) throw new Error("녹화 화면을 준비하지 못했습니다.");
-    const recorder = new MediaRecorder(session.outputStream, {
-      mimeType: session.mimeType,
-      videoBitsPerSecond: session.settings.videoBitsPerSecond,
-      audioBitsPerSecond: AUDIO_BITS_PER_SECOND,
-      ...(session.stabilizeStartup ? { videoKeyFrameIntervalDuration: MILLISECONDS_PER_SECOND } : {}),
-    });
-    session.recorder = recorder;
-    recorder.onstart = () => {
-      recorder.onstart = null;
-      markDirectRecordingStarted(session);
-      if (session.startedAt && !session.stopRequested && !session.cancelRequested) onStarted?.();
+    const output = session.outputStream;
+    if (!output) throw new Error("녹화 화면을 준비하지 못했습니다.");
+    const retryWithDefaultCodec = async () => {
+      releaseDirectRecordingRecorder(session);
+      session.mimeType = selectDirectMimeType({ ...session.settings, recordingCodec: "auto" }).mimeType;
+      showPlayerFeedback("H.265를 시작할 수 없어 기본 코덱으로 녹화합니다.", 8_000);
+      return startDirectPart(session, false, onStarted);
     };
+    try {
+      const recorder = new MediaRecorder(output, {
+        mimeType: session.mimeType,
+        videoBitsPerSecond: session.settings.videoBitsPerSecond,
+        audioBitsPerSecond: AUDIO_BITS_PER_SECOND,
+        ...(session.stabilizeStartup ? { videoKeyFrameIntervalDuration: MILLISECONDS_PER_SECOND } : {}),
+      });
+      session.recorder = recorder;
+      recorder.onstart = () => {
+        recorder.onstart = null;
+        session.mimeType = recorder.mimeType || session.mimeType;
+        markDirectRecordingStarted(session);
+        if (session.startedAt && !session.stopRequested && !session.cancelRequested) onStarted?.();
+      };
 
-    recorder.ondataavailable = (event) => {
-      if (event.data.size <= 0 || session.cancelRequested) {
-        return;
-      }
+      recorder.ondataavailable = (event) => {
+        if (event.data.size <= 0 || session.cancelRequested) return;
+        queueDirectChunkCheckpoint(session, event.data);
+      };
 
-      queueDirectChunkCheckpoint(session, event.data);
-    };
+      recorder.onerror = () => {
+        if (useHevc && !session.startedAt && !session.stopRequested && !session.cancelRequested) {
+          void retryWithDefaultCodec().catch(error => failDirectRecordingSession(session, error));
+        } else {
+          failDirectRecordingSession(session, new Error("녹화 중 오류가 발생했습니다."));
+        }
+      };
+      session.finishAfterStop = timedOut => {
+        if (timedOut) showPlayerFeedback("녹화 종료 신호가 늦어 받은 영상까지 저장합니다.", 8_000);
+        void finishDirectRecording(session);
+      };
+      recorder.onstop = () => session.finishAfterStop?.();
 
-    recorder.onerror = () => failDirectRecordingSession(session, new Error("녹화 중 오류가 발생했습니다."));
-    session.finishAfterStop = timedOut => {
-      if (timedOut) showPlayerFeedback("녹화 종료 신호가 늦어 받은 영상까지 저장합니다.", 8_000);
-      void finishDirectRecording(session);
-    };
-    recorder.onstop = () => session.finishAfterStop?.();
-
-    recorder.start(MILLISECONDS_PER_SECOND);
+      recorder.start(MILLISECONDS_PER_SECOND);
+    } catch (error) {
+      if (useHevc) return retryWithDefaultCodec();
+      throw error;
+    }
   }
 
   // A handler created inside startDirectRecording retains its canvas/video scope until saving finishes.
@@ -326,9 +360,9 @@ export function createRecordingController({
     });
   }
 
-  async function prepareDirectRecordingEncoder(settings: Settings): Promise<{ mimeType: string; extension: "webm" | "mp4" }> {
-    const mime = selectDirectMimeType(settings);
-    if (mime.extension === "mp4" || mime.mimeType.includes("avc1")) await checkDirectRecordingEncoder();
+  async function prepareDirectRecordingEncoder(settings: Settings, sourceUsesHevc = false): Promise<ReturnType<typeof selectDirectMimeType>> {
+    const mime = selectDirectMimeType(settings, sourceUsesHevc);
+    if (!mime.hevc && (mime.extension === "mp4" || mime.mimeType.includes("avc1"))) await checkDirectRecordingEncoder();
     return mime;
   }
 
@@ -352,7 +386,6 @@ export function createRecordingController({
       canvas: null,
       mimeType,
       extension,
-      baseName: buildBaseName(),
       checkpointIndex: 0,
       checkpointSaveChain: Promise.resolve(),
       pendingChunks: [],
@@ -375,6 +408,7 @@ export function createRecordingController({
   function markDirectRecordingStarted(session: DirectRecordingSession): void {
     if (directSession !== session || session.startedAt || session.stopRequested || session.cancelRequested) return;
     session.startedAt = session.createdAt = Date.now();
+    session.baseName = buildBaseName(session.startedAt);
     syncRecordingCommandButtons();
     void sendRuntimeMessage({
       type: "RECORDING_STARTED",
@@ -397,7 +431,6 @@ export function createRecordingController({
     if (command.playback && command.playback.src !== src) return "방송 영상이 바뀌었습니다.";
     const startTime = video.currentTime;
     if (!Number.isFinite(startTime) || startTime < 0) return "방송의 재생 시각을 읽지 못했습니다.";
-    const session = createRecordingSession(command, video, "video/mp4", "mp4");
     const timeout = window.setTimeout(() => probe.abort(), 5_000);
     let source;
     let offset: number;
@@ -419,8 +452,10 @@ export function createRecordingController({
 
     if (directSession !== fallback || fallback.stopRequested || fallback.cancelRequested || probe.signal.aborted) return;
     if (video.currentSrc !== src || video.seeking) return "방송 영상이 바뀌었습니다.";
+    const session = createRecordingSession(command, video, "video/mp4", "mp4");
     session.startedAt = fallback.startedAt;
     session.createdAt = fallback.createdAt;
+    session.baseName = fallback.baseName;
     session.checkpointAbort = probe;
     session.originalStreamStart = start;
     let end: number | undefined;
@@ -452,9 +487,7 @@ export function createRecordingController({
     }, () => video.currentTime - offset, () => end).then(async last => {
       if (session.cancelRequested) return;
       if (!session.stopRequested) {
-        showPlayerFeedback(last >= start + MAX_ORIGINAL_STREAM_SECONDS
-          ? `최대 녹화 시간인 ${MAX_ORIGINAL_STREAM_SECONDS / SECONDS_PER_MINUTE}분에 도달해 저장합니다.`
-          : "원본 저장 용량 한도에 도달해 받은 구간을 저장합니다.", 8_000);
+        showPlayerFeedback(`최대 녹화 시간인 ${MAX_ORIGINAL_STREAM_SECONDS / SECONDS_PER_MINUTE}분에 도달해 저장합니다.`, 8_000);
       }
       if (end !== undefined && last < end - 1 / STANDARD_RECORDING_FRAME_RATE) {
         showPlayerFeedback("마지막 방송 조각이 늦어 먼저 받은 구간까지 저장합니다.", 8_000);
@@ -510,9 +543,13 @@ export function createRecordingController({
     }
 
     const originalProbe = command.fullPlayer && command.settings.enableOriginalStreamRecording ? new AbortController() : undefined;
-    const mime = await prepareDirectRecordingEncoder(command.settings);
+    const sourceUsesHevc = command.settings.recordingCodec === "hevc" && playbackUsesHevc(video);
+    const mime = await prepareDirectRecordingEncoder(command.settings, sourceUsesHevc);
+    if (sourceUsesHevc && !mime.hevc) {
+      showPlayerFeedback("이 환경에서 H.265 인코딩을 지원하지 않아 기본 코덱으로 녹화합니다.", 8_000);
+    }
 
-    const sourceRegions = (command.regions?.length ? command.regions : [command.region]).slice(0, command.settings.enableMultiRegion ? getMultiRegionLimit(command.settings) : 1);
+    const sourceRegions = (command.regions?.length ? command.regions : [command.region]).slice(0, getRegionLimit(command.settings));
     const crops = sourceRegions
       .map((region) => computeDirectCropFromSelection(region, video))
       .filter((crop): crop is DirectCrop => crop !== null);
@@ -547,12 +584,19 @@ export function createRecordingController({
       if (frameCapture) {
         return frameCapture.paint(placements[0], () => { paintCanvas(placements); return canvas; });
       }
+      canvasTrack?.requestFrame();
       paintCanvas(placements);
       return true;
     };
 
     const frameRate = command.settings.enable60fps ? HIGH_RECORDING_FRAME_RATE : STANDARD_RECORDING_FRAME_RATE;
-    const canvasStream = frameCapture?.stream ?? canvas.captureStream(frameRate);
+    const frameInterval = MILLISECONDS_PER_SECOND / frameRate;
+    const manualCanvasCapture = typeof CanvasCaptureMediaStreamTrack !== "undefined"
+      && typeof CanvasCaptureMediaStreamTrack.prototype.requestFrame === "function";
+    const canvasStream = frameCapture?.stream ?? canvas.captureStream(manualCanvasCapture ? 0 : frameRate);
+    const canvasTrack = !frameCapture && manualCanvasCapture
+      ? canvasStream.getVideoTracks()[0] as CanvasCaptureMediaStreamTrack | undefined
+      : undefined;
     const releaseOutput = () => {
       frameCapture?.close();
       stopRecordingStream(canvasStream);
@@ -588,7 +632,7 @@ export function createRecordingController({
     let layoutVideoWidth = video.videoWidth;
     let layoutVideoHeight = video.videoHeight;
     let lastPaintedFrame = -1;
-    const stabilizeStartup = command.fullPlayer && mime.mimeType.includes("avc1");
+    const stabilizeStartup = command.fullPlayer && (mime.hevc || mime.mimeType.includes("avc1"));
     let startupStartedAt: number | undefined;
     let lastStartupFrameAt = 0;
     let lastStartupMediaTime = video.currentTime;
@@ -645,14 +689,33 @@ export function createRecordingController({
       frameCapture: frameCapture ?? undefined,
       stabilizeStartup,
       inspectStartup: stabilizeStartup && !savedFirstScreenRecording ? true : undefined,
-      drawTimerId: window.setInterval(drawFrame, Math.round(MILLISECONDS_PER_SECOND / frameRate)),
       placements: layout.placements,
     };
 
     directSession = session;
     try {
       if (stabilizeStartup) startupStartedAt = lastStartupFrameAt = performance.now();
-      await startDirectPart(session, originalProbe ? () => tryOriginalRecording(command, video, session, originalProbe) : undefined);
+      const useVideoCallbacks = typeof video.requestVideoFrameCallback === "function";
+      let lastVideoCallbackAt = performance.now();
+      let nextDrawAt: number | undefined;
+      const drawOnVideoFrame: VideoFrameRequestCallback = (now, { expectedDisplayTime }) => {
+        session.drawFrameCallbackId = undefined;
+        lastVideoCallbackAt = now;
+        if (!document.hidden) {
+          const next = getNextRecordingFrameDeadline(expectedDisplayTime, nextDrawAt ?? expectedDisplayTime, frameInterval);
+          if (next !== undefined) {
+            nextDrawAt = next;
+            drawFrame();
+          }
+        }
+        if (!session.cleanedUp) session.drawFrameCallbackId = video.requestVideoFrameCallback(drawOnVideoFrame);
+      };
+      if (useVideoCallbacks) session.drawFrameCallbackId = video.requestVideoFrameCallback(drawOnVideoFrame);
+      session.drawTimerId = window.setInterval(() => {
+        // Background tabs may stop receiving presentation callbacks even while audio continues.
+        if (!useVideoCallbacks || document.hidden || performance.now() - lastVideoCallbackAt > frameInterval * 2) drawFrame();
+      }, Math.round(frameInterval));
+      await startDirectPart(session, mime.hevc, originalProbe ? () => tryOriginalRecording(command, video, session, originalProbe) : undefined);
       watchDirectRecordingSource(session);
       await syncStartedRecording(session);
       return { ok: true };
@@ -699,6 +762,7 @@ export function createRecordingController({
     getDirectRecording: (): RecordingStatus | null => directSession,
     checkDirectRecordingEncoder,
     prepareDirectRecordingEncoder,
+    playbackUsesHevc,
     startDirectRecording,
     stopDirectRecording,
     cancelDirectRecording,

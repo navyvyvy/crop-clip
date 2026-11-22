@@ -23,8 +23,8 @@ const tscBin = path.join(root, "node_modules", "typescript", "bin", "tsc");
 
 execFileSync(process.execPath, [tscBin, "-p", "tsconfig.json"], { stdio: "inherit" });
 await build({
-  entryPoints: [path.join(srcDir, "content", "region_selector.ts")],
-  outfile: path.join(distDir, "content", "region_selector.js"),
+  entryPoints: ["region_selector", "playback_codec"].map(name => path.join(srcDir, "content", `${name}.ts`)),
+  outdir: path.join(distDir, "content"),
   bundle: true,
   format: "iife",
   platform: "browser",

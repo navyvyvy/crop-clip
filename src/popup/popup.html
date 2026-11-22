@@ -13,6 +13,7 @@
           <p class="eyebrow">CropClip <span id="version-badge" class="version-badge"></span></p>
           <h1>원하는 영역 녹화</h1>
           <p class="lede">방송 화면에서 필요한 영역만 선택해 녹화하고 저장하세요.</p>
+          <p id="popup-error" class="warning" role="alert"></p>
         </div>
         <p id="recording-time" class="recording-time" aria-live="polite"></p>
       </header>
@@ -30,8 +31,13 @@
 
         <section class="panel">
           <div class="settings-list">
-            <section class="settings-group" aria-labelledby="recording-settings-title">
-              <h2 id="recording-settings-title" class="settings-heading">녹화 설정</h2>
+            <div class="settings-tabs" role="tablist" aria-label="설정 항목" aria-orientation="vertical">
+              <button id="recording-settings-tab" type="button" role="tab" aria-controls="recording-settings" aria-selected="true">녹화</button>
+              <button id="player-settings-tab" type="button" role="tab" aria-controls="player-settings" aria-selected="false" tabindex="-1">플레이어</button>
+              <button id="saving-settings-tab" type="button" role="tab" aria-controls="saving-settings" aria-selected="false" tabindex="-1">저장·분할</button>
+              <button id="shortcut-settings-tab" type="button" role="tab" aria-controls="shortcut-settings" aria-selected="false" tabindex="-1">단축키</button>
+            </div>
+            <section id="recording-settings" class="settings-group" role="tabpanel" aria-labelledby="recording-settings-tab">
               <div class="setting-row">
                 <span class="setting-copy">
                   <span id="output-format-title" class="setting-title">저장 형식</span>
@@ -51,8 +57,19 @@
 
               <div class="setting-row">
                 <span class="setting-copy">
+                  <span id="recording-codec-title" class="setting-title">녹화 코덱</span>
+                  <span id="recording-codec-desc" class="setting-desc">MP4 · H.265 원본과 브라우저 인코딩 지원 시 적용</span>
+                </span>
+                <span class="segmented" role="radiogroup" aria-labelledby="recording-codec-title" aria-describedby="recording-codec-desc">
+                  <label><input type="radio" name="recording-codec" value="auto" /><span>기본</span></label>
+                  <label id="recording-codec-hevc"><input type="radio" name="recording-codec" value="hevc" /><span>H.265</span></label>
+                </span>
+              </div>
+
+              <div class="setting-row">
+                <span class="setting-copy">
                   <span id="original-stream-title" class="setting-title">전체 녹화 원본 사용</span>
-                  <span id="original-stream-desc" class="setting-desc">MP4 · 최대 5분 · 비트레이트 미적용</span>
+                  <span id="original-stream-desc" class="setting-desc">MP4 · 최대 5분 · 방송 화질과 코덱 유지</span>
                 </span>
                 <span class="segmented" role="radiogroup" aria-labelledby="original-stream-title" aria-describedby="original-stream-desc">
                   <label>
@@ -69,7 +86,7 @@
               <div class="setting-row">
                 <span class="setting-copy">
                   <span class="setting-title">비트레이트</span>
-                  <span class="setting-desc">화질·용량 조절, 기본 6 Mbps</span>
+                  <span class="setting-desc">화면 녹화 목표 · 방송 원본은 원래 비트레이트 유지</span>
                 </span>
                 <span class="bitrate-field">
                   <button id="bitrate-decrease-button" type="button" aria-label="비트레이트 감소">−</button>
@@ -115,6 +132,24 @@
 
               <div class="setting-row">
                 <span class="setting-copy">
+                  <span id="streamer-filename-mode-title" class="setting-title">스트리머명 파일명</span>
+                  <span class="setting-desc">파일명 앞에 이름을 붙입니다.</span>
+                </span>
+                <span class="segmented" role="radiogroup" aria-labelledby="streamer-filename-mode-title">
+                  <label>
+                    <input type="radio" name="streamer-filename-mode" value="off" />
+                    <span>OFF</span>
+                  </label>
+                  <label>
+                    <input type="radio" name="streamer-filename-mode" value="on" />
+                    <span>ON</span>
+                  </label>
+                </span>
+              </div>
+              <p id="fps-warning" class="warning" aria-live="polite"></p>
+
+              <div class="setting-row">
+                <span class="setting-copy">
                   <span id="multi-region-mode-title" class="setting-title">다중영역</span>
                   <span class="setting-desc">여러 영역을 이어 붙여 녹화합니다.</span>
                 </span>
@@ -143,26 +178,9 @@
                 </span>
               </div>
 
-              <div class="setting-row">
-                <span class="setting-copy">
-                  <span id="streamer-filename-mode-title" class="setting-title">스트리머명 파일명</span>
-                  <span class="setting-desc">파일명 앞에 이름을 붙입니다.</span>
-                </span>
-                <span class="segmented" role="radiogroup" aria-labelledby="streamer-filename-mode-title">
-                  <label>
-                    <input type="radio" name="streamer-filename-mode" value="off" />
-                    <span>OFF</span>
-                  </label>
-                  <label>
-                    <input type="radio" name="streamer-filename-mode" value="on" />
-                    <span>ON</span>
-                  </label>
-                </span>
-              </div>
             </section>
 
-            <section class="settings-group" aria-labelledby="convenience-settings-title">
-              <h2 id="convenience-settings-title" class="settings-heading">편의 기능</h2>
+            <section id="player-settings" class="settings-group" role="tabpanel" aria-labelledby="player-settings-tab" hidden>
               <div class="setting-row">
                 <span class="setting-copy">
                   <span id="recording-size-title" class="setting-title">녹화 용량 표시</span>
@@ -244,10 +262,13 @@
                 </span>
               </div>
 
+            </section>
+
+            <section id="saving-settings" class="settings-group" role="tabpanel" aria-labelledby="saving-settings-tab" hidden>
               <div class="setting-row">
                 <span class="setting-copy">
-                  <span id="auto-focus-result-title" class="setting-title">결과창 자동 전환</span>
-                  <span id="auto-focus-result-desc" class="setting-desc">OFF면 방송 화면을 유지합니다.</span>
+                  <span id="auto-focus-result-title" class="setting-title">결과창 보이기</span>
+                  <span id="auto-focus-result-desc" class="setting-desc">자동 다운로드가 끝난 뒤에도 결과창을 유지합니다.</span>
                 </span>
                 <span class="segmented" role="radiogroup" aria-labelledby="auto-focus-result-title" aria-describedby="auto-focus-result-desc">
                   <label>
@@ -264,7 +285,6 @@
               <div class="setting-row">
                 <span class="setting-copy">
                   <span id="auto-download-recording-mode-title" class="setting-title">녹화 완료 자동 다운로드</span>
-                  <span class="setting-desc">결과창 없이 원본을 저장합니다.</span>
                 </span>
                 <span class="segmented" role="radiogroup" aria-labelledby="auto-download-recording-mode-title">
                   <label>
@@ -284,22 +304,87 @@
                   <span class="setting-desc">완료된 파일을 순서대로 저장합니다.</span>
                 </span>
                 <span class="segmented" role="radiogroup" aria-labelledby="auto-download-split-mode-title">
-                  <label>
-                    <input type="radio" name="auto-download-split-mode" value="off" />
-                    <span>OFF</span>
-                  </label>
-                  <label>
-                    <input type="radio" name="auto-download-split-mode" value="on" />
-                    <span>ON</span>
-                  </label>
+                  <label><input type="radio" name="auto-download-split-mode" value="off" /><span>OFF</span></label>
+                  <label><input type="radio" name="auto-download-split-mode" value="on" /><span>ON</span></label>
                 </span>
               </div>
 
               <div class="setting-row">
                 <span class="setting-copy">
-                  <span id="shortcut-mode-title" class="setting-title">단축키</span>
-                  <span class="setting-desc">설정한 키로 페이지에서 실행</span>
+                  <span id="auto-split-title" class="setting-title">녹화 완료 자동 분할</span>
+                  <span class="setting-desc">결과창에서 진행 상태와 나눈 파일을 확인합니다.</span>
                 </span>
+                <span class="segmented" role="radiogroup" aria-labelledby="auto-split-title">
+                  <label><input type="radio" name="auto-split" value="off" /><span>OFF</span></label>
+                  <label><input type="radio" name="auto-split" value="on" /><span>ON</span></label>
+                </span>
+              </div>
+
+              <div id="auto-split-mode-row" class="auto-split-options sub-setting-row">
+                <div class="setting-row">
+                  <span id="auto-split-format-title" class="setting-title">분할 저장 형식</span>
+                  <span class="segmented" role="radiogroup" aria-labelledby="auto-split-format-title">
+                    <label><input type="radio" name="auto-split-format" value="mp4" /><span>MP4</span></label>
+                    <label><input type="radio" name="auto-split-format" value="webm" /><span>WebM</span></label>
+                  </span>
+                </div>
+                <div class="setting-row">
+                  <span id="auto-split-mode-title" class="setting-title">분할 방식</span>
+                  <span class="segmented" role="radiogroup" aria-labelledby="auto-split-mode-title">
+                    <label><input type="radio" name="auto-split-kind" value="duration" aria-controls="auto-split-time-options" /><span>시간</span></label>
+                    <label><input type="radio" name="auto-split-kind" value="size" aria-controls="auto-split-size-options" /><span>최대 용량</span></label>
+                  </span>
+                </div>
+                <div id="auto-split-time-options" class="auto-split-options">
+                  <div id="auto-split-threshold-row" class="setting-row">
+                    <label class="setting-title" for="auto-split-threshold">이 시간 초과 시 분할</label>
+                    <span class="seek-field">
+                      <button id="auto-split-threshold-decrease" type="button" aria-label="자동 분할 기준 시간 줄이기">−</button>
+                      <input id="auto-split-threshold" type="number" min="1" step="1" />
+                      <span>초</span>
+                      <button id="auto-split-threshold-increase" type="button" aria-label="자동 분할 기준 시간 늘리기">+</button>
+                    </span>
+                  </div>
+                  <div class="setting-row">
+                    <label class="setting-title" for="auto-split-time-mode">시간 나누기</label>
+                    <div class="seek-field split-time-picker">
+                      <button id="auto-split-time-previous" type="button" aria-label="이전 시간 나누기 방식">‹</button>
+                      <select id="auto-split-time-mode" class="setting-select split-time-select" aria-controls="auto-split-interval-row">
+                        <option value="half">절반</option>
+                        <option value="thirds">3분할</option>
+                        <option value="quarters">4분할</option>
+                        <option value="duration">직접 입력</option>
+                      </select>
+                      <button id="auto-split-time-next" type="button" aria-label="다음 시간 나누기 방식">›</button>
+                    </div>
+                  </div>
+                  <div id="auto-split-interval-row" class="setting-row" hidden>
+                    <label class="setting-title" for="auto-split-interval">파일당 시간</label>
+                    <span class="seek-field">
+                      <button id="auto-split-interval-decrease" type="button" aria-label="파일당 시간 줄이기">−</button>
+                      <input id="auto-split-interval" type="number" min="1" step="1" />
+                      <span>초</span>
+                      <button id="auto-split-interval-increase" type="button" aria-label="파일당 시간 늘리기">+</button>
+                    </span>
+                  </div>
+                </div>
+                <div id="auto-split-size-options" class="setting-row" hidden>
+                  <label class="setting-title" for="auto-split-max-megabytes">파일당 최대 용량</label>
+                  <span class="count-field">
+                    <button id="auto-split-size-decrease" type="button" aria-label="파일당 최대 용량 줄이기">−</button>
+                    <input id="auto-split-max-megabytes" type="number" min="1" step="1" />
+                    <span>MB</span>
+                    <button id="auto-split-size-increase" type="button" aria-label="파일당 최대 용량 늘리기">+</button>
+                  </span>
+                </div>
+              </div>
+
+            </section>
+
+            <section id="shortcut-settings" class="settings-group" role="tabpanel" aria-labelledby="shortcut-settings-tab" hidden>
+              <div class="setting-row shortcut-settings-header">
+                <span id="shortcut-mode-title" class="setting-title">단축키 사용</span>
+                <button id="shortcut-reset-button" class="button secondary shortcut-reset" type="button">단축키 초기화</button>
                 <span class="segmented" role="radiogroup" aria-labelledby="shortcut-mode-title">
                   <label>
                     <input type="radio" name="shortcut-mode" value="off" />
@@ -311,45 +396,39 @@
                   </label>
                 </span>
               </div>
+              <div id="shortcut-list" class="shortcut-list"></div>
             </section>
-          </div>
-          <p id="fps-warning" class="warning"></p>
 
-          <footer class="footer-links" aria-label="외부 링크">
-            <button id="shortcut-settings-button" class="icon-link" type="button" title="단축키 설정" aria-label="단축키 설정">
-              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                <path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M4 7h16v10H4z"/>
-                <path fill="currentColor" d="M7 10h2v2H7zm4 0h2v2h-2zm4 0h2v2h-2zM8 14h8v1.6H8z"/>
-              </svg>
-            </button>
-            <button id="reset-settings-button" class="icon-link" type="button" title="전체 초기화" aria-label="전체 초기화">
-              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M5 12a7 7 0 1 0 2-4.9M5 5v5h5"/>
-              </svg>
-            </button>
-            <a class="icon-link" href="https://github.com/navyvyvy/crop-clip" target="_blank" rel="noreferrer" aria-label="GitHub">
-              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                <path fill="currentColor" d="M12 2a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.8c-2.9.6-3.5-1.2-3.5-1.2-.5-1.1-1.1-1.4-1.1-1.4-.9-.6.1-.6.1-.6 1 0 1.6 1.1 1.6 1.1.9 1.5 2.4 1.1 3 .8.1-.7.4-1.1.7-1.3-2.3-.3-4.7-1.2-4.7-5A3.9 3.9 0 0 1 6.6 9c-.1-.3-.5-1.3.1-2.7 0 0 .9-.3 2.8 1a9.8 9.8 0 0 1 5 0c1.9-1.3 2.8-1 2.8-1 .6 1.4.2 2.4.1 2.7a3.9 3.9 0 0 1 1 2.7c0 3.9-2.4 4.8-4.7 5 .4.3.7 1 .7 2v2.3c0 .3.2.6.7.5A10 10 0 0 0 12 2Z"/>
-              </svg>
-            </a>
-            <a class="icon-link" href="mailto:navyvyvy@naver.com" aria-label="메일">
-              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                <path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M4 6h16v12H4z"/>
-                <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m4.5 7 7.5 6 7.5-6"/>
-              </svg>
-            </a>
-          </footer>
+            <footer class="footer-links" aria-label="설정 초기화 및 외부 링크">
+              <button id="reset-settings-button" class="icon-link" type="button" title="전체 초기화" aria-label="전체 초기화">
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M5 12a7 7 0 1 0 2-4.9M5 5v5h5"/>
+                </svg>
+              </button>
+              <a class="icon-link" href="https://github.com/navyvyvy/crop-clip" target="_blank" rel="noreferrer" aria-label="GitHub">
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path fill="currentColor" d="M12 2a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.8c-2.9.6-3.5-1.2-3.5-1.2-.5-1.1-1.1-1.4-1.1-1.4-.9-.6.1-.6.1-.6 1 0 1.6 1.1 1.6 1.1.9 1.5 2.4 1.1 3 .8.1-.7.4-1.1.7-1.3-2.3-.3-4.7-1.2-4.7-5A3.9 3.9 0 0 1 6.6 9c-.1-.3-.5-1.3.1-2.7 0 0 .9-.3 2.8 1a9.8 9.8 0 0 1 5 0c1.9-1.3 2.8-1 2.8-1 .6 1.4.2 2.4.1 2.7a3.9 3.9 0 0 1 1 2.7c0 3.9-2.4 4.8-4.7 5 .4.3.7 1 .7 2v2.3c0 .3.2.6.7.5A10 10 0 0 0 12 2Z"/>
+                </svg>
+              </a>
+              <a class="icon-link" href="mailto:navyvyvy@naver.com" aria-label="메일">
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M4 6h16v12H4z"/>
+                  <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m4.5 7 7.5 6 7.5-6"/>
+                </svg>
+              </a>
+            </footer>
+          </div>
         </section>
       </section>
     </main>
-    <dialog id="shortcut-dialog" class="shortcut-dialog" tabindex="-1">
+    <dialog id="settings-reset-dialog" class="settings-reset-dialog" aria-labelledby="settings-reset-title" aria-describedby="settings-reset-description">
       <form method="dialog">
-        <header class="dialog-head">
-          <strong>단축키 설정</strong>
-          <button id="shortcut-close-button" class="dialog-close" type="button" title="닫기" aria-label="닫기">×</button>
-        </header>
-        <div id="shortcut-list" class="shortcut-list"></div>
-        <button id="shortcut-reset-button" class="button secondary full-width" type="button">단축키 초기화</button>
+        <h2 id="settings-reset-title"></h2>
+        <p id="settings-reset-description"></p>
+        <div class="settings-reset-actions">
+          <button class="button secondary" value="cancel" autofocus>취소</button>
+          <button class="button primary" value="reset">초기화</button>
+        </div>
       </form>
     </dialog>
     <script type="module" src="./popup.js"></script>
