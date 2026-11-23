@@ -13,6 +13,8 @@ const CHUNK_INDEX_DIGITS = 6;
 const AUDIO_BITS_PER_SECOND = 128_000;
 const STARTUP_FRAME_GAP_MS = 150;
 const MAX_RECORDING_MESSAGE_BLOB_BYTES = 8 * 1024 * 1024;
+const MAX_ACTIVE_BACKLOG_SLICE_BYTES = 1024 * 1024;
+const ACTIVE_BACKLOG_WRITE_INTERVAL_MS = Math.ceil(MILLISECONDS_PER_SECOND / STANDARD_RECORDING_FRAME_RATE);
 const MAX_PENDING_RECORDING_BYTES = 64 * 1024 * 1024;
 const CHECKPOINT_REPLY_TIMEOUT_MS = 15_000;
 const FINALIZE_REPLY_TIMEOUT_MS = 30_000;
@@ -136,13 +138,32 @@ export function createRecordingController({
     }).finally(() => signal.removeEventListener("abort", abort));
   }
 
+  function waitBeforeBacklogWrite(signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return Promise.resolve();
+    return new Promise(resolve => {
+      const timer = window.setTimeout(finish, ACTIVE_BACKLOG_WRITE_INTERVAL_MS);
+      function finish(): void {
+        window.clearTimeout(timer);
+        signal.removeEventListener("abort", finish);
+        resolve();
+      }
+      signal.addEventListener("abort", finish, { once: true });
+    });
+  }
+
   async function saveDirectCheckpoints(session: DirectRecordingSession): Promise<void> {
     try {
       const baseName = session.baseName ??= buildBaseName(session.createdAt);
+      // An unsuccessful original probe can release several seconds of screen video at once.
+      let backlogChunks = session.originalStreamFallback && session.pendingChunks.length > 1 ? session.pendingChunks.length : 0;
       while (session.pendingChunks.length > 0 && !session.cancelRequested) {
         const { blob, capturedAt } = session.pendingChunks.shift()!;
-        const ranges = getRecordingChunkSliceRanges(blob.size, MAX_RECORDING_MESSAGE_BLOB_BYTES);
+        const paceBacklog = backlogChunks > 0 && !session.stopRequested && !document.hidden;
+        if (backlogChunks > 0) backlogChunks--;
+        const maxBytes = paceBacklog ? MAX_ACTIVE_BACKLOG_SLICE_BYTES : MAX_RECORDING_MESSAGE_BLOB_BYTES;
+        const ranges = getRecordingChunkSliceRanges(blob.size, maxBytes);
         for (const [rangeIndex, range] of ranges.entries()) {
+          if (paceBacklog && !session.stopRequested && !document.hidden) await waitBeforeBacklogWrite(session.checkpointAbort.signal);
           if (session.cancelRequested) {
             return;
           }

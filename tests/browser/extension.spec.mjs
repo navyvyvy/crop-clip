@@ -247,6 +247,9 @@ test('recording timers wait for capture and keep size visible after original fal
           document.documentElement.dataset.fallbackVideoBitrate = `${options.videoBitsPerSecond}/${this.videoBitsPerSecond}`;
           const dataset = document.documentElement.dataset;
           dataset.screenRecorders = String(Number(dataset.screenRecorders ?? '0') + 1);
+          this.addEventListener('dataavailable', ({ data }) => {
+            if (data.size) dataset.fallbackChunks = String(Number(dataset.fallbackChunks ?? '0') + 1);
+          });
         }
         start(...args) {
           document.documentElement.dataset.timingRecorderReady = '';
@@ -296,6 +299,7 @@ test('recording timers wait for capture and keep size visible after original fal
   await expect(popupTime).toHaveText(runningWithSize);
   expect(await worker.evaluate(() => Boolean(globalThis.failOriginalProbe))).toBe(true);
   await expect(page.locator('html')).toHaveAttribute('data-screen-recorders', '1');
+  await expect(page.locator('html')).toHaveAttribute('data-fallback-chunks', /^(?:[2-9]|\d{2,})$/);
   const startedAt = await worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState.startedAt);
   await worker.evaluate(() => { globalThis.failOriginalProbe(); });
   const feedback = page.locator('#crop-clip-seek-feedback');

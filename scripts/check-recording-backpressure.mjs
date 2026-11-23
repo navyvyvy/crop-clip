@@ -3,7 +3,7 @@ import fs from "node:fs";
 import ts from "typescript";
 
 const source = ts.createSourceFile("recording.ts", ["recording_controller.ts", "recording_session.ts"].map(name => fs.readFileSync(new URL(`../src/content/${name}`, import.meta.url), "utf8")).join("\n").replace(/^export /gm, ""), ts.ScriptTarget.Latest, true);
-const names = ["queueDirectChunkCheckpoint", "flushDirectCheckpoints", "saveDirectCheckpoints", "sendCheckpointMessage", "getRecordingChunkSliceRanges", "cancelDirectRecordingSession", "abortDirectRecordingSession", "releaseDirectRecordingRecorder", "readBlobAsDataUrl"];
+const names = ["queueDirectChunkCheckpoint", "flushDirectCheckpoints", "saveDirectCheckpoints", "waitBeforeBacklogWrite", "sendCheckpointMessage", "getRecordingChunkSliceRanges", "cancelDirectRecordingSession", "abortDirectRecordingSession", "releaseDirectRecordingRecorder", "readBlobAsDataUrl"];
 const functions = [];
 function visit(node) {
   if (ts.isFunctionDeclaration(node) && names.includes(node.name?.text)) functions.push(node.getText(source));
@@ -24,11 +24,18 @@ assert.equal(abortedReads, 1, "cancel must stop a checkpoint read already in pro
 
 const limit = 64 * 1024 * 1024;
 const writes = [], notices = [];
+const turns = new Map();
 let releaseWrite, blocked = true, failWrite = false;
-const api = new Function("sendRuntimeMessage", "showPlayerFeedback", `
-  const window = { clearTimeout };
+const clock = {
+  setTimeout(callback) { const id = Symbol(); turns.set(id, callback); return id; },
+  clearTimeout(id) { turns.delete(id); },
+};
+const api = new Function("sendRuntimeMessage", "showPlayerFeedback", "window", `
+  const document = { hidden: false };
   const CHECKPOINT_REPLY_TIMEOUT_MS = 15000;
   const MAX_RECORDING_MESSAGE_BLOB_BYTES = 8 * 1024 * 1024;
+  const MAX_ACTIVE_BACKLOG_SLICE_BYTES = 1024 * 1024;
+  const ACTIVE_BACKLOG_WRITE_INTERVAL_MS = 34;
   const HIGH_RECORDING_FRAME_RATE = 60, STANDARD_RECORDING_FRAME_RATE = 30;
   const MAX_PENDING_RECORDING_BYTES = ${limit}, CHUNK_INDEX_DIGITS = 6;
   const buildBaseName = createdAt => 'recording-' + createdAt;
@@ -36,12 +43,12 @@ const api = new Function("sendRuntimeMessage", "showPlayerFeedback", `
   const cleanupDirectRecordingSession = () => {};
   const requestDirectPartStop = session => { session.stops++; };
   ${ts.transpile(functions.join("\n"), { target: ts.ScriptTarget.ES2022 })}
-  return { queue: queueDirectChunkCheckpoint, cancel: cancelDirectRecordingSession };
+  return { queue: queueDirectChunkCheckpoint, flush: flushDirectCheckpoints, cancel: cancelDirectRecordingSession };
 `)(async message => {
   writes.push(message.chunk);
   if (blocked) await new Promise(resolve => { releaseWrite = resolve; });
   return failWrite ? { ok: false, error: "disk failure" } : { ok: true };
-}, message => notices.push(message));
+}, message => notices.push(message), clock);
 const makeSession = () => ({
   recordingId: "test", createdAt: 1_000, checkpointIndex: 0, checkpointSaveChain: Promise.resolve(),
   pendingChunks: [], pendingBytes: 0, recordedBytes: 0, checkpointSaving: false, checkpointAbort: new AbortController(),
@@ -97,6 +104,51 @@ api.queue(sliced, new Blob([chunk, chunk, "tail"]));
 await sliced.checkpointSaveChain;
 assert.deepEqual(writes.slice(beforeSliced).map(item => item.completesBlob), [false, false, true]);
 assert.equal(sliced.pendingBytes, 0);
+
+const fallback = makeSession(), beforeFallback = writes.length;
+fallback.originalStreamFallback = true;
+fallback.originalProbe = new AbortController();
+const backlogBlob = new Blob([new Uint8Array(2 * 1024 * 1024)]);
+api.queue(fallback, backlogBlob);
+api.queue(fallback, backlogBlob);
+assert.equal(writes.length, beforeFallback);
+fallback.originalProbe = undefined;
+api.flush(fallback);
+await tick();
+assert.equal(writes.length, beforeFallback, "a failed original lookup must yield before sending queued screen video");
+for (let sent = 0; sent < 4; sent++) {
+  assert.equal(turns.size, 1);
+  [...turns.values()][0]();
+  await tick();
+  assert.equal(writes.length, beforeFallback + sent + 1, "send at most one slice between render turns");
+}
+await fallback.checkpointSaveChain;
+assert.deepEqual(writes.slice(beforeFallback).map(item => item.completesBlob), [false, true, false, true]);
+assert.equal(fallback.pendingBytes, 0);
+
+const cancelledBacklog = makeSession(), beforeCancelledBacklog = writes.length;
+cancelledBacklog.originalStreamFallback = true;
+cancelledBacklog.originalProbe = new AbortController();
+api.queue(cancelledBacklog, backlogBlob);
+api.queue(cancelledBacklog, backlogBlob);
+cancelledBacklog.originalProbe = undefined;
+api.flush(cancelledBacklog);
+api.cancel(cancelledBacklog);
+await cancelledBacklog.checkpointSaveChain;
+assert.equal(turns.size, 0, "cancel must clear the scheduled backlog write");
+assert.equal(writes.length, beforeCancelledBacklog, "cancel must not write the backlog after the render turn");
+
+const stoppedBacklog = makeSession(), beforeStoppedBacklog = writes.length;
+stoppedBacklog.originalStreamFallback = true;
+stoppedBacklog.originalProbe = new AbortController();
+api.queue(stoppedBacklog, backlogBlob);
+api.queue(stoppedBacklog, backlogBlob);
+stoppedBacklog.originalProbe = undefined;
+stoppedBacklog.stopRequested = true;
+api.flush(stoppedBacklog);
+await stoppedBacklog.checkpointSaveChain;
+assert.equal(turns.size, 0, "stopping must save the remaining video without render delays");
+assert.deepEqual(writes.slice(beforeStoppedBacklog).map(item => item.completesBlob), [true, true]);
 
 failWrite = true;
 const failed = makeSession();
