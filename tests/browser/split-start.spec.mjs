@@ -611,6 +611,7 @@ test('WebM to MP4 splits start with independently decodable video', async ({ ext
       await result.locator('#split-format-select').selectOption('mp4');
       await result.locator(`[data-split-count="${count}"]`).click();
       if (!trimmed && count === 3) await result.locator('#split-value-input').fill('3');
+      await expect(result.locator('#split-estimate')).toHaveText(new RegExp(`^예상 ${count}개 · 파일당 .* MB`));
       const seconds = Number(await result.locator('#split-value-input').inputValue());
       await result.evaluate(() => { window.testSplitVideos = 0; });
       await result.locator('#split-button').click();
@@ -729,6 +730,7 @@ test('size split retries reuse one prepared source and recover from failure', as
   await result.locator('#split-format-select').selectOption('mp4');
   await result.locator('#split-mode-select').selectOption('size');
   await result.locator('#split-value-input').fill('1');
+  await expect(result.locator('#split-estimate')).toHaveText(/예상 \d+개 · 파일당 약 .+초 \/ 약 [\d.]+ MB/);
   await result.locator('#split-button').click();
   await expect(result.locator('#split-result-summary')).toHaveText(/나눈 파일 \([2-9]\d*개\)/, { timeout: 60000 });
   await expect(result.locator('#split-button')).toBeEnabled();

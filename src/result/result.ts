@@ -11,6 +11,7 @@ import {
   bytesToMegabytes,
   estimateRangeSize,
   floorTimeToStep,
+  formatRecordingSize,
   getExpectedSplitCount,
   getNextSizeSplitSeconds,
   getSplitIntervalForCount,
@@ -29,7 +30,7 @@ import {
   type TimeRange,
   type TimeRangeHandle,
 } from "../shared/time_range.js";
-import { MAX_VIDEO_BITS_PER_SECOND, MIN_VIDEO_BITS_PER_SECOND, RECORDING_FORMAT, SPLIT_COUNTS, STANDARD_RECORDING_FRAME_RATE, STARTUP_STALL_WINDOW_SECONDS, STARTUP_TRIM_MAX_SECONDS, type RecordingFormat, type RecordingRecord, type Settings } from "../shared/types.js";
+import { MAX_VIDEO_BITS_PER_SECOND, MIN_VIDEO_BITS_PER_SECOND, RECORDING_FORMAT, SPLIT_COUNTS, STANDARD_RECORDING_FRAME_RATE, STARTUP_SHORT_STALL_SECONDS, STARTUP_SHORT_STALL_WINDOW_SECONDS, STARTUP_STALL_WINDOW_SECONDS, STARTUP_TRIM_MAX_SECONDS, type RecordingFormat, type RecordingRecord, type Settings } from "../shared/types.js";
 
 const params = new URLSearchParams(location.search);
 const recordingId = params.get("id") ?? "";
@@ -711,13 +712,22 @@ async function inspectRecordedStartup(part: LoadedPart): Promise<number | undefi
     const frames = [...new Set((probe.packets ?? []).map(packet => Number(packet.pts_time) - origin)
       .filter(time => Number.isFinite(time) && time >= 0 && time <= STARTUP_TRIM_MAX_SECONDS))].sort((a, b) => a - b);
     const gaps = frames.map((time, index) => time - (frames[index - 1] ?? 0));
+    const stableFrameGapSeconds = 0.065;
+    let waitingForOpeningRecovery = false;
     let recovery: number | undefined;
     for (const [index, time] of frames.entries()) {
       if ((frames[index - 1] ?? 0) > STARTUP_STALL_WINDOW_SECONDS) break;
+      if (index > 0 && time <= STARTUP_SHORT_STALL_WINDOW_SECONDS
+        && (index === 1 || gaps[index - 1] <= stableFrameGapSeconds) && gaps[index] >= STARTUP_SHORT_STALL_SECONDS) {
+        waitingForOpeningRecovery = true;
+      }
       const following = gaps.slice(index + 1, index + 4);
-      if (following.length < 3 || following.some(gap => gap > 0.065)) continue;
+      if (following.length < 3 || following.some(gap => gap > stableFrameGapSeconds)) continue;
       const preceding = gaps.slice(Math.max(0, index - 3), index + 1);
-      if (gaps[index] >= 0.18 || preceding.filter(gap => gap >= 0.075).length >= 3) recovery = time;
+      if (waitingForOpeningRecovery || gaps[index] >= 0.18 || preceding.filter(gap => gap >= 0.075).length >= 3) {
+        recovery = time;
+        waitingForOpeningRecovery = false;
+      }
     }
     return recovery;
   }, "첫 녹화 파일의 초반 프레임을 확인하는 중입니다.");
@@ -993,26 +1003,38 @@ function updateSplitPresetButtons(): void {
   updateSplitEstimate();
 }
 
+function getSizeSplitInterval(bytes: number, duration: number, maxBytes: number): number {
+  const averageBytesPerSecond = Math.max(1, bytes / duration);
+  return Math.max(TIME_STEP_SECONDS, floorTimeToStep(maxBytes / averageBytesPerSecond));
+}
+
 function updateSplitEstimate(): void {
-  const range = getSelectedTimeRange();
+  const sourceDuration = getFullSourceDuration();
+  const range = getSelectedTimeRange(sourceDuration);
   const duration = range.end - range.start;
-  const seconds = Math.max(TIME_STEP_SECONDS, Number(elements.splitValueInput.value));
-  elements.splitEstimate.hidden = parts.length === 0
-    || elements.splitModeSelect.value !== "duration"
+  const bytes = parts[0]?.size ?? 0;
+  const value = Number(elements.splitValueInput.value);
+  const bySize = elements.splitModeSelect.value === "size";
+  const maxBytes = megabytesToBytes(Math.max(1, value));
+  const seconds = bySize ? getSizeSplitInterval(bytes, sourceDuration, maxBytes) : Math.max(TIME_STEP_SECONDS, value);
+  const count = getExpectedSplitCount(duration, seconds);
+  elements.splitEstimate.hidden = bytes <= 0 || sourceDuration <= 0
     || !elements.splitValueInput.value
-    || !Number.isFinite(seconds)
-    || seconds >= roundTrimTime(duration);
+    || !Number.isFinite(value)
+    || count < 2
+    || (bySize && maxBytes >= estimateRangeSize(bytes, range, sourceDuration));
   if (elements.splitEstimate.hidden) {
     elements.splitEstimate.textContent = "";
     return;
   }
 
-  const count = getExpectedSplitCount(duration, seconds);
+  const formatSegmentEstimate = (length: number) =>
+    `약 ${formatSecondsLabel(length)} / ${formatRecordingSize(estimateRangeSize(bytes, { start: 0, end: length }, sourceDuration))}`;
   const lastSeconds = duration - (count - 1) * seconds;
   const lastLabel = roundTrimTime(lastSeconds) < roundTrimTime(seconds)
-    ? ` · 마지막 약 ${formatSecondsLabel(lastSeconds)}`
+    ? ` · 마지막 ${formatSegmentEstimate(lastSeconds)}`
     : "";
-  elements.splitEstimate.textContent = `예상 ${count}개 · 약 ${formatSecondsLabel(seconds)}씩${lastLabel}`;
+  elements.splitEstimate.textContent = `예상 ${count}개 · 파일당 ${formatSegmentEstimate(seconds)}${lastLabel}`;
 }
 
 function updateSplitDefaultValues(part: LoadedPart | undefined = getSelectedSourcePart()): void {
@@ -1251,8 +1273,7 @@ async function createSizeSplit(part: LoadedPart, duration: number, maxMegabytes:
     throw new Error("파일별 최대 용량은 선택 구간의 전체 용량보다 작아야 합니다.");
   }
 
-  const averageBytesPerSecond = Math.max(1, part.size / duration);
-  let segmentSeconds = Math.max(TIME_STEP_SECONDS, floorTimeToStep(maxBytes / averageBytesPerSecond));
+  let segmentSeconds = getSizeSplitInterval(part.size, duration, maxBytes);
   return withFfmpegInput(part, async (ffmpeg, inputName) => {
     const input = { ffmpeg, inputName };
     for (let attempt = 0; attempt < MAX_SIZE_SPLIT_ATTEMPTS; attempt += 1) {

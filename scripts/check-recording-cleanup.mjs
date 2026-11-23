@@ -339,6 +339,7 @@ const checkStartupGap = new Function("video", "clock", `
   let layoutVideoWidth = video.videoWidth, layoutVideoHeight = video.videoHeight;
   let startupStartedAt = 0, lastStartupFrameAt = 0, lastStartupMediaTime = 0;
   const STARTUP_FRAME_GAP_MS = 150, STARTUP_TRIM_MIN_SECONDS = 0.15, STARTUP_STALL_WINDOW_SECONDS = 2.5, STARTUP_TRIM_MAX_SECONDS = 5;
+  const STARTUP_SHORT_STALL_SECONDS = 0.09, STARTUP_SHORT_STALL_WINDOW_SECONDS = 0.5;
   const MILLISECONDS_PER_SECOND = 1000, performance = { now: () => clock.now };
   const HTMLMediaElement = { HAVE_CURRENT_DATA: 2 }, session = { placements: [] };
   const paintPlacements = () => !clock.blocked;
@@ -367,6 +368,23 @@ for (const gap of [33, 350]) {
   source.currentTime = end / 1000;
   draw();
   assert.equal(session.startupTrimSeconds, gap === 33 ? undefined : end / 1000, "a stall crossing the startup deadline should be trimmed through recovery");
+}
+for (const beforeGap of [33, 495]) {
+  const clock = { now: 0 };
+  const source = { ...video, readyState: 4, currentTime: 0 };
+  const { session, draw } = checkStartupGap(source, clock);
+  while (clock.now < beforeGap) {
+    clock.now += 33;
+    source.currentTime = clock.now / 1000;
+    source.frame++;
+    draw();
+  }
+  clock.now += 100;
+  source.currentTime += 0.033;
+  source.frame++;
+  draw();
+  assert.equal(session.inspectStartup, beforeGap === 33 ? true : undefined, 'verify a short opening gap against saved timestamps');
+  assert.equal(session.startupTrimSeconds, undefined, 'a short opening gap must not force a cut from callback timing alone');
 }
 
 // Starting a recording rebuilds the border before its message response arrives.
@@ -439,7 +457,11 @@ const createStartup = new Function("getRegionLimit", "getNextRecordingFrameDeadl
   const getVideoStream = () => new MediaStream(), handleDetachedPlayer = () => {};
   const createVideoFrameCapture = () => nativeCapture ? {
     stream: new MediaStream(), close() {},
-    paint(_placement, fallback) { if (nativeCapture === 'fallback') fallback(); },
+    paint(_placement, fallback) {
+      if (typeof nativeCapture === 'function') return nativeCapture();
+      if (nativeCapture === 'fallback') fallback();
+      return true;
+    },
   } : null;
   const handleVideoFrameError = () => {};
   const getCropLayoutKey = () => '', buildBaseName = () => 'recording';
@@ -492,20 +514,44 @@ stableRegions.stop(); stableRegions.finish();
 for (const playbackRate of [0.5, 1, 2]) {
   let onFrame;
   const recording = createStartup({ muted: false, volume: 1, readyState: 4, videoWidth: 1920, videoHeight: 1080,
-    playbackRate, requestVideoFrameCallback(callback) { onFrame = callback; return 1; }, cancelVideoFrameCallback() {} });
+    playbackRate, reportedFrames: 0,
+    getVideoPlaybackQuality() { return { totalVideoFrames: this.reportedFrames }; },
+    requestVideoFrameCallback(callback) { onFrame = callback; return 1; }, cancelVideoFrameCallback() {} });
   await recording.start({ recordingId: 'frame-clock', region: {}, settings: {} });
   const initialPaint = recording.refs.paints;
+  const player = recording.refs.video.deref();
   for (let index = 0; index < 90; index++) {
+    player.reportedFrames = Math.floor(index / 3) * 3;
     const expectedDisplayTime = 40 + Math.floor((index * 100 / 3) / 10) * 10;
     onFrame(expectedDisplayTime, { expectedDisplayTime, mediaTime: 12 + index * playbackRate / 30 });
   }
   assert.equal(recording.refs.paints - initialPaint, 90,
-    `a 30fps picture must survive a quantized display clock at ${playbackRate}x playback`);
-  recording.refs.video.deref().playbackRate = playbackRate * 2;
+    `a 30fps picture must survive rounded display times and stale quality counters at ${playbackRate}x playback`);
+  player.playbackRate = playbackRate * 2;
   onFrame(3040, { expectedDisplayTime: 3040, mediaTime: 12 + 90 * playbackRate / 30 });
   assert.equal(recording.refs.paints - initialPaint, 91, 'a playback-rate change restarts the frame schedule');
   onFrame(3080, { expectedDisplayTime: 3080, mediaTime: 1 });
   assert.equal(recording.refs.paints - initialPaint, 92, 'a rewind restarts the frame schedule');
+  recording.stop(); recording.finish();
+}
+{
+  let onFrame;
+  let frameIndex;
+  const captured = [];
+  const recording = createStartup({
+    muted: false, volume: 1, readyState: 4, videoWidth: 1920, videoHeight: 1080, playbackRate: 1,
+    requestVideoFrameCallback(callback) { onFrame = callback; return 1; },
+    cancelVideoFrameCallback() {},
+  }, undefined, () => {
+    if (frameIndex === 2) return false;
+    if (frameIndex !== undefined) captured.push(frameIndex);
+    return true;
+  });
+  await recording.start({ recordingId: 'frame-backpressure', region: {}, settings: {} });
+  for (frameIndex = 0; frameIndex < 5; frameIndex++) {
+    onFrame(frameIndex * 1000 / 60, { mediaTime: frameIndex / 60 });
+  }
+  assert.deepEqual(captured, [0, 3, 4], 'resume on the next decoded frame when the capture writer becomes available');
   recording.stop(); recording.finish();
 }
 const croppedMp4 = createStartup({ muted: false, volume: 1 }, 'video/mp4', true);

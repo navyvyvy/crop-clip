@@ -6,7 +6,7 @@ import { computeDirectLayout, scaleLayout, type DirectCrop, type DirectCropPlace
 import type { PlayerRecordingState } from "./player_state.js";
 import { getRegionLimit } from "../shared/normalize.js";
 import { MAX_ORIGINAL_STREAM_SECONDS, MILLISECONDS_PER_SECOND, SECONDS_PER_MINUTE } from "../shared/time_range.js";
-import { HEVC_MP4_MIME_TYPES, RECORDING_FORMAT, RECORDING_MIME_CANDIDATES, STANDARD_RECORDING_FRAME_RATE, HIGH_RECORDING_FRAME_RATE, STARTUP_STALL_WINDOW_SECONDS, STARTUP_TRIM_MIN_SECONDS, STARTUP_TRIM_MAX_SECONDS, type RegionSelection, type Settings } from "../shared/types.js";
+import { HEVC_MP4_MIME_TYPES, RECORDING_FORMAT, RECORDING_MIME_CANDIDATES, STANDARD_RECORDING_FRAME_RATE, HIGH_RECORDING_FRAME_RATE, STARTUP_SHORT_STALL_SECONDS, STARTUP_SHORT_STALL_WINDOW_SECONDS, STARTUP_STALL_WINDOW_SECONDS, STARTUP_TRIM_MIN_SECONDS, STARTUP_TRIM_MAX_SECONDS, type RegionSelection, type Settings } from "../shared/types.js";
 import type { ContentCommand, MessageResponse, RuntimeMessage } from "../shared/messages.js";
 
 const CHUNK_INDEX_DIGITS = 6;
@@ -637,11 +637,12 @@ export function createRecordingController({
     let lastStartupFrameAt = 0;
     let lastStartupMediaTime = video.currentTime;
 
-    const drawFrame = () => {
+    const drawFrame = (fromVideoCallback = false) => {
       if (startupStartedAt !== undefined && (video.paused || video.seeking)) startupStartedAt = undefined;
-      if (video.paused || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+      if (video.paused || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return false;
       const frame = video.getVideoPlaybackQuality?.().totalVideoFrames;
-      if (frame !== undefined && frame === lastPaintedFrame) return;
+      // The quality counter can lag behind frames already delivered by the video callback.
+      if (!fromVideoCallback && frame !== undefined && frame === lastPaintedFrame) return false;
       if (!layoutDependsOnlyOnVideoSize || layoutVideoWidth !== video.videoWidth || layoutVideoHeight !== video.videoHeight) {
         layoutVideoWidth = video.videoWidth;
         layoutVideoHeight = video.videoHeight;
@@ -659,17 +660,20 @@ export function createRecordingController({
         }
       }
       try {
-        if (!paintPlacements(session.placements)) return;
+        if (!paintPlacements(session.placements)) return false;
       } catch (error) {
         failDirectRecordingSession(session, error instanceof Error ? error : new Error("녹화 프레임을 준비하지 못했습니다."));
-        return;
+        return false;
       }
       lastPaintedFrame = frame ?? -1;
       if (startupStartedAt !== undefined) {
         const now = performance.now();
         const elapsedSeconds = (now - startupStartedAt) / MILLISECONDS_PER_SECOND;
-        if (elapsedSeconds <= STARTUP_TRIM_MAX_SECONDS && now - lastStartupFrameAt >= STARTUP_FRAME_GAP_MS && video.currentTime >= lastStartupMediaTime) {
+        const gapMs = now - lastStartupFrameAt;
+        if (elapsedSeconds <= STARTUP_TRIM_MAX_SECONDS && gapMs >= STARTUP_FRAME_GAP_MS && video.currentTime >= lastStartupMediaTime) {
           session.startupTrimSeconds = Math.max(STARTUP_TRIM_MIN_SECONDS, elapsedSeconds);
+        } else if (elapsedSeconds <= STARTUP_SHORT_STALL_WINDOW_SECONDS && gapMs >= STARTUP_SHORT_STALL_SECONDS * MILLISECONDS_PER_SECOND) {
+          session.inspectStartup = true;
         }
         if (elapsedSeconds > STARTUP_STALL_WINDOW_SECONDS) {
           startupStartedAt = undefined;
@@ -677,6 +681,7 @@ export function createRecordingController({
         lastStartupFrameAt = now;
         lastStartupMediaTime = video.currentTime;
       }
+      return true;
     };
 
     const session: DirectRecordingSession = {
@@ -711,9 +716,8 @@ export function createRecordingController({
           // Display refresh can round consecutive 30fps frames to 30ms and 40ms.
           const frameTime = mediaTime * MILLISECONDS_PER_SECOND / playbackRate;
           const next = getNextRecordingFrameDeadline(frameTime, nextDrawAt ?? frameTime, frameInterval);
-          if (next !== undefined) {
+          if (next !== undefined && drawFrame(true)) {
             nextDrawAt = next;
-            drawFrame();
           }
         }
         if (!session.cleanedUp) session.drawFrameCallbackId = video.requestVideoFrameCallback(drawOnVideoFrame);

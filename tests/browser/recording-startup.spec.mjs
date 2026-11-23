@@ -49,6 +49,11 @@ test('recording keeps the opening frames when the display clock is rounded', asy
       let observed = 0;
       let painted = 0;
       let sampling = false;
+      const getQuality = HTMLVideoElement.prototype.getVideoPlaybackQuality;
+      HTMLVideoElement.prototype.getVideoPlaybackQuality = function () {
+        // Edge can report the same quality count for several newly presented frames.
+        return sampling ? { totalVideoFrames: Math.floor((observed - 1) / 3) * 3 } : getQuality.call(this);
+      };
       const fill = CanvasRenderingContext2D.prototype.fillRect;
       CanvasRenderingContext2D.prototype.fillRect = function (...args) {
         if (sampling) painted++;
@@ -79,9 +84,41 @@ test('recording keeps the opening frames when the display clock is rounded', asy
   await expect(recordButton).not.toHaveAttribute('data-recording', '');
 });
 
-for (const [format, label] of [['webm', 'WebM'], ['mp4', 'MP4']]) test(`${label} recording keeps middle frames when timer sampling is delayed`, async ({ extension }) => {
+for (const [format, label] of [['webm', 'WebM'], ['mp4', 'MP4']]) test(`${label} recording keeps middle frames when timer sampling is delayed`, async ({ extension }, testInfo) => {
+  test.setTimeout(150_000);
   const { context, worker, page } = extension;
-  await prepareVideo(page, 320, 180, 12000);
+  const generator = await context.newPage();
+  await generator.goto(`chrome-extension://${new URL(worker.url()).host}/result/result.html`);
+  const source = await generator.evaluate(async () => {
+    const { loadFfmpeg, releaseFfmpeg } = await import('/result/ffmpeg.js');
+    const ffmpeg = await loadFfmpeg(() => {});
+    try {
+      const code = await ffmpeg.exec(['-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30',
+        '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '45',
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', '-movflags', '+faststart', 'source.mp4']);
+      if (code !== 0) throw new Error('Continuity fixture encoding failed');
+      const bytes = await ffmpeg.readFile('source.mp4');
+      let binary = '';
+      for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+      return btoa(binary);
+    } finally { await releaseFfmpeg(); }
+  });
+  await generator.close();
+  await page.getByRole('button', { name: 'Native', exact: true }).click();
+  await page.locator('video').evaluate(async (video, base64) => {
+    const bytes = Uint8Array.from(atob(base64), byte => byte.charCodeAt(0));
+    video.src = URL.createObjectURL(new Blob([bytes], { type: 'video/mp4' }));
+    window.testSourceGaps = [];
+    let previous;
+    const observe = (now, { presentedFrames, mediaTime }) => {
+      if (previous !== undefined && now - previous >= 80) window.testSourceGaps.push({ now, gap: now - previous, mediaTime });
+      previous = now;
+      window.testSourceFrames = presentedFrames;
+      video.requestVideoFrameCallback(observe);
+    };
+    video.requestVideoFrameCallback(observe);
+    await video.play();
+  }, source);
   await worker.evaluate(async outputFormat => {
     const { settings } = await chrome.storage.local.get('settings');
     await chrome.storage.local.set({ settings: { ...settings, outputFormat, videoBitsPerSecond: 16_000_000 } });
@@ -95,7 +132,8 @@ for (const [format, label] of [['webm', 'WebM'], ['mp4', 'MP4']]) test(`${label}
         const started = performance.now();
         return setInterval(() => {
           const elapsed = performance.now() - started;
-          if ((elapsed >= 3200 && elapsed < 3500) || (elapsed >= 5300 && elapsed < 5600)) return;
+          if ((elapsed >= 3200 && elapsed < 3500) || (elapsed >= 16_000 && elapsed < 16_300)
+            || (elapsed >= 30_000 && elapsed < 30_300)) return;
           callback(...args);
         }, delay);
       };
@@ -103,12 +141,16 @@ for (const [format, label] of [['webm', 'WebM'], ['mp4', 'MP4']]) test(`${label}
   });
   await page.keyboard.press('e');
   await expect(page.locator('#crop-clip-chzzk-record-button')).toHaveAttribute('data-recording', '');
-  const playbackClock = () => page.locator('video').evaluate(video => ({ time: video.currentTime, wall: performance.now() / 1000 }));
+  const playbackClock = () => page.locator('video').evaluate(video => ({
+    time: video.currentTime, wall: performance.now() / 1000, frames: window.testSourceFrames ?? 0,
+  }));
   const start = await playbackClock();
-  await page.waitForTimeout(7200);
+  await page.waitForTimeout(33_000);
   const end = await playbackClock();
   const playedSeconds = end.time - start.time;
   expect(Math.abs(playedSeconds - (end.wall - start.wall))).toBeLessThan(0.5);
+  const sourceGaps = await page.evaluate(({ start, end }) => window.testSourceGaps.filter(({ now }) => now >= start && now <= end),
+    { start: start.wall * 1000, end: end.wall * 1000 });
   const opened = context.waitForEvent('page');
   await page.keyboard.press('e');
   const result = await opened;
@@ -116,7 +158,7 @@ for (const [format, label] of [['webm', 'WebM'], ['mp4', 'MP4']]) test(`${label}
   const downloaded = result.waitForEvent('download');
   await result.locator('#download-current-button').click();
   const bytes = await fs.readFile(await (await downloaded).path());
-  const { video, audio } = await result.evaluate(async ({ base64, format }) => {
+  const { video, audio, decodeResult, freezeReport } = await result.evaluate(async ({ base64, format }) => {
     const { loadFfmpeg, releaseFfmpeg } = await import('/result/ffmpeg.js');
     const bytes = Uint8Array.from(atob(base64), byte => byte.charCodeAt(0));
     const ffmpeg = await loadFfmpeg(() => {});
@@ -124,23 +166,41 @@ for (const [format, label] of [['webm', 'WebM'], ['mp4', 'MP4']]) test(`${label}
       const filename = `recording.${format}`;
       await ffmpeg.writeFile(filename, bytes);
       await ffmpeg.ffprobe(['-v', 'error', '-show_streams', '-show_packets', '-show_entries',
-        'stream=index,codec_type:packet=stream_index,pts_time', '-of', 'json', '-o', 'packets.json', filename], 4000);
+        'stream=index,codec_type:packet=stream_index,pts_time,duration_time', '-of', 'json', '-o', 'packets.json', filename], 4000);
       const { streams, packets } = JSON.parse(await ffmpeg.readFile('packets.json', 'utf8'));
-      const times = type => {
-        const index = streams.find(stream => stream.codec_type === type).index;
-        return packets.filter(packet => packet.stream_index === index).map(packet => Number(packet.pts_time)).sort((a, b) => a - b);
-      };
-      return { video: times('video'), audio: times('audio') };
+      const videoIndex = streams.find(stream => stream.codec_type === 'video').index;
+      const audioIndex = streams.find(stream => stream.codec_type === 'audio').index;
+      const video = packets.filter(packet => packet.stream_index === videoIndex).map(packet => Number(packet.pts_time)).sort((a, b) => a - b);
+      const audio = packets.filter(packet => packet.stream_index === audioIndex).map(packet => {
+        const start = Number(packet.pts_time);
+        return { start, end: start + Number(packet.duration_time) };
+      }).sort((a, b) => a.start - b.start);
+      const decodeResult = await ffmpeg.exec(['-v', 'error', '-xerror', '-i', filename, '-map', '0:v:0', '-map', '0:a:0',
+        '-vf', 'freezedetect=n=-60dB:d=0.18,metadata=mode=print:key=lavfi.freezedetect.freeze_start:file=freezes.txt',
+        '-f', 'null', '-'], 10_000);
+      const freezeReport = decodeResult === 0 ? await ffmpeg.readFile('freezes.txt', 'utf8') : '';
+      return { video, audio, decodeResult, freezeReport };
     } finally { await releaseFfmpeg(); }
   }, { base64: bytes.toString('base64'), format });
   const videoSeconds = video.at(-1) - video[0];
-  const audioSeconds = audio.at(-1) - audio[0];
+  const audioSeconds = audio.at(-1).end - audio[0].start;
+  const videoMaxGap = Math.max(...video.slice(1).map((time, index) => time - video[index]));
+  const audioMaxGap = Math.max(0, ...audio.slice(1).map((frame, index) => frame.start - audio[index].end));
+  await testInfo.attach('download-timing.json', {
+    body: JSON.stringify({
+      playedSeconds, sourceFrames: end.frames - start.frames, videoSeconds, audioSeconds, videoMaxGap, audioMaxGap,
+      videoFrames: video.length, freezeReport, sourceGaps,
+    }, null, 2),
+    contentType: 'application/json',
+  });
+  expect(decodeResult, 'the downloaded video and audio must decode to the end').toBe(0);
+  expect(freezeReport, 'the moving picture must not freeze, even if packets keep arriving').toBe('');
   expect(Math.abs(videoSeconds - playedSeconds), 'the downloaded video must keep the source playback speed').toBeLessThan(1);
-  expect(Math.abs(videoSeconds - audioSeconds), 'video and audio must cover the same recording interval').toBeLessThan(0.5);
-  const middle = video.filter(time => time >= 2.2 && time < 6.6);
-  expect(middle.length).toBeGreaterThan(80);
-  const gaps = middle.slice(1).map((time, index) => time - middle[index]);
-  expect(Math.max(...gaps)).toBeLessThan(0.25);
+  expect(Math.abs(video[0] - audio[0].start), 'picture and sound must start together').toBeLessThan(0.15);
+  expect(Math.abs(video.at(-1) - audio.at(-1).end), 'picture and sound must end together').toBeLessThan(0.25);
+  expect(video.length / videoSeconds, 'the 30fps source must retain its frame rate').toBeGreaterThan(25);
+  expect(videoMaxGap, 'the downloaded picture must stay continuous from start to end').toBeLessThan(0.12);
+  expect(audioMaxGap, 'the downloaded sound must stay continuous from start to end').toBeLessThan(0.08);
 });
 
 test('MP4 recording uses H.265 only for a confirmed H.265 source', async ({ extension }) => {
@@ -331,13 +391,14 @@ for (const format of ['webm', 'mp4']) test(`${format} download inspects opening 
     const { putRecording, putPart } = await import('/shared/idb.js');
     const ffmpeg = await loadFfmpeg(() => {});
     const filename = `startup.${format}`;
+    const openingDuration = format === 'webm' ? 0.16 : 1;
     let blob;
     try {
       const code = await ffmpeg.exec([
-        '-f', 'lavfi', '-i', 'color=red:size=160x90:rate=30:duration=1',
+        '-f', 'lavfi', '-i', `color=red:size=160x90:rate=30:duration=${openingDuration}`,
         '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=30:duration=1.3',
         '-filter_complex', `[0:v][1:v]concat=n=2:v=1:a=0[joined];[joined]select='${format === 'webm'
-          ? 'not(between(t,0.02,0.99))' : 'if(lt(t,1),not(mod(n,3)),1)'}'[v]`, '-map', '[v]', '-fps_mode', 'vfr',
+          ? 'not(between(n,1,2)+eq(n,4))' : 'if(lt(t,1),not(mod(n,3)),1)'}'[v]`, '-map', '[v]', '-fps_mode', 'vfr',
         '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '240', '-sc_threshold', '0',
         '-f', format === 'webm' ? 'matroska' : 'mp4', filename,
       ]);
@@ -345,7 +406,7 @@ for (const format of ['webm', 'mp4']) test(`${format} download inspects opening 
       blob = await readFfmpegBlob(ffmpeg, filename, `video/${format}`);
     } finally { await releaseFfmpeg(); }
     const id = crypto.randomUUID(), createdAt = Date.now();
-    await putRecording({ id, createdAt, endedAt: createdAt + 2300, totalSize: blob.size, actualExtension: format });
+    await putRecording({ id, createdAt, endedAt: createdAt + openingDuration * 1000 + 1300, totalSize: blob.size, actualExtension: format });
     await putPart({ id: `${id}:part:001`, recordingId: id, index: 1, filename, extension: format,
       mimeType: blob.type, size: blob.size, blob, createdAt, videoBitsPerSecond: 8_500_000, inspectStartup: true, seekMetadataVersion: 1 });
     return id;

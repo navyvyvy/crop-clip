@@ -134,12 +134,13 @@ assert.equal(webmSplitArgs[webmSplitArgs.indexOf("-segment_format") + 1], "webm"
 assert.equal(webmSplitArgs[webmSplitArgs.indexOf("-segment_times") + 1], "3,6", "metadata tails must stay in the final segment");
 assert.equal(webmSplitArgs[webmSplitArgs.indexOf("-force_key_frames") + 1], "expr:gte(t,n_forced*3)", "each WebM split must start at a keyframe at or after its boundary");
 const presetCode = resultFile.statements
-  .filter((node) => ts.isFunctionDeclaration(node) && ["getSplitPresetValue", "updateSplitPresetButtons", "updateSplitEstimate", "formatSecondsLabel", "formatTimeInput", "formatPreciseDuration", "roundTrimTime"].includes(node.name?.text))
+  .filter((node) => ts.isFunctionDeclaration(node) && ["getSplitPresetValue", "updateSplitPresetButtons", "updateSplitEstimate", "getSizeSplitInterval", "formatSecondsLabel", "formatTimeInput", "formatPreciseDuration", "roundTrimTime"].includes(node.name?.text))
   .map((node) => node.getText(resultFile)).join("\n");
 const timeRangeCode = ts.transpileModule(fs.readFileSync(new URL("../src/shared/time_range.ts", import.meta.url), "utf8"), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
 }).outputText;
-const { getExpectedSplitCount, getSplitIntervalForCount } = await import(`data:text/javascript;base64,${Buffer.from(timeRangeCode).toString("base64")}`);
+const timeRange = await import(`data:text/javascript;base64,${Buffer.from(timeRangeCode).toString("base64")}`);
+const { getExpectedSplitCount, getSplitIntervalForCount } = timeRange;
 const presetRuntime = ts.transpileModule(presetCode, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
 }).outputText;
@@ -149,12 +150,14 @@ const presetButtons = [3, 4].map((count) => ({
 }));
 const presetElements = { splitModeSelect: { value: "duration" }, splitValueInput: { value: "", max: "" }, splitPresetButtons: presetButtons, splitEstimate: { textContent: "", hidden: true } };
 let presetRange = { start: 0, end: 0 };
-const presetFunctions = new Function("elements", "getSelectedTimeRange", "getExpectedSplitCount", "getSplitIntervalForCount", `
-  const TIME_STEP_SECONDS = 0.1, TIME_DECIMAL_PLACES = 1, parts = [{}], workBusy = false;
+const presetFunctions = new Function("elements", "getSelectedTimeRange", "timeRange", `
+  const { getExpectedSplitCount, getSplitIntervalForCount, floorTimeToStep, estimateRangeSize, formatRecordingSize, megabytesToBytes } = timeRange;
+  const getFullSourceDuration = () => 180;
+  const TIME_STEP_SECONDS = 0.1, TIME_DECIMAL_PLACES = 1, parts = [{ size: 180_000_000 }], workBusy = false;
   const SECONDS_PER_MINUTE = 60, TIME_STEPS_PER_MINUTE = 600, TIME_STEPS_PER_HOUR = 36000;
   ${presetRuntime}
   return { getSplitPresetValue, updateSplitPresetButtons };
-`)(presetElements, () => presetRange, getExpectedSplitCount, getSplitIntervalForCount);
+`)(presetElements, () => presetRange, timeRange);
 for (const [start, end, expectedValues] of [[0, 120, [40, 30]], [10, 20, [3.4, 2.5]], [10, 18.7, [2.9, 2.2]], [4.2, 5.4, [0.4, 0.3]]]) {
   presetRange = { start, end };
   presetElements.splitValueInput.max = String(end - start);
@@ -184,18 +187,22 @@ presetRange = { start: 10, end: 20 };
 presetElements.splitValueInput.value = String(presetFunctions.getSplitPresetValue(presetButtons[0]));
 presetFunctions.updateSplitPresetButtons();
 assert.equal(presetElements.splitEstimate.hidden, false);
-assert.equal(presetElements.splitEstimate.textContent, "예상 3개 · 약 3.4초씩 · 마지막 약 3.2초");
+assert.equal(presetElements.splitEstimate.textContent, "예상 3개 · 파일당 약 3.4초 / 약 3.4 MB · 마지막 약 3.2초 / 약 3.2 MB");
 presetElements.splitValueInput.value = String(presetFunctions.getSplitPresetValue(presetButtons[1]));
 presetFunctions.updateSplitPresetButtons();
-assert.equal(presetElements.splitEstimate.textContent, "예상 4개 · 약 2.5초씩");
+assert.equal(presetElements.splitEstimate.textContent, "예상 4개 · 파일당 약 2.5초 / 약 2.5 MB");
 presetRange = { start: 10, end: 19 };
 presetFunctions.updateSplitPresetButtons();
-assert.equal(presetElements.splitEstimate.textContent, "예상 4개 · 약 2.5초씩 · 마지막 약 1.5초");
+assert.equal(presetElements.splitEstimate.textContent, "예상 4개 · 파일당 약 2.5초 / 약 2.5 MB · 마지막 약 1.5초 / 약 1.5 MB");
 presetRange = { start: 0, end: 180 };
 presetElements.splitValueInput.value = "60";
 presetFunctions.updateSplitPresetButtons();
-assert.equal(presetElements.splitEstimate.textContent, "예상 3개 · 약 1:00씩");
-for (const [mode, value] of [["size", "40"], ["duration", ""], ["duration", "NaN"], ["duration", "180"], ["duration", "200"]]) {
+assert.equal(presetElements.splitEstimate.textContent, "예상 3개 · 파일당 약 1:00 / 약 60 MB");
+presetElements.splitModeSelect.value = "size";
+presetElements.splitValueInput.value = "40";
+presetFunctions.updateSplitPresetButtons();
+assert.equal(presetElements.splitEstimate.textContent, "예상 5개 · 파일당 약 40.0초 / 약 40 MB · 마지막 약 20.0초 / 약 20 MB");
+for (const [mode, value] of [["size", "180"], ["duration", ""], ["duration", "NaN"], ["duration", "180"], ["duration", "200"]]) {
   presetElements.splitModeSelect.value = mode;
   presetElements.splitValueInput.value = value;
   presetFunctions.updateSplitPresetButtons();
