@@ -13,7 +13,7 @@ export const RECORDING_FORMAT = {
 } as const satisfies Record<RecordingFormat, RecordingFormat>;
 
 export const RECORDING_MIME_CANDIDATES: Record<RecordingFormat, readonly string[]> = {
-  mp4: ['video/mp4;codecs="avc1.42E01E,mp4a.40.2"', 'video/mp4;codecs="avc1,mp4a.40.2"', "video/mp4"],
+  mp4: ['video/mp4;codecs="avc1.42E01E,mp4a.40.2"', 'video/mp4;codecs="avc1,mp4a.40.2"', 'video/mp4;codecs="avc1,opus"', "video/mp4"],
   webm: ["video/webm;codecs=avc1", "video/webm;codecs=vp8,opus", "video/webm;codecs=vp9,opus", "video/webm"],
 };
 

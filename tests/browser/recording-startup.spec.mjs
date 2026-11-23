@@ -1,6 +1,26 @@
 import { test, expect, prepareVideo, decodeDownloads, interceptDownloads } from './fixtures.mjs';
 import fs from 'node:fs/promises';
 
+// Reproduce runners that can record H.264 but cannot encode AAC.
+test.beforeEach(async ({ extension }) => {
+  if (!process.env.CROPCLIP_TEST_WITHOUT_AAC) return;
+  const { worker } = extension;
+  await worker.evaluate(async () => {
+    const [tab] = await chrome.tabs.query({ url: 'https://chzzk.naver.com/extension-test' });
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => {
+      const Recorder = MediaRecorder;
+      const supports = Recorder.isTypeSupported.bind(Recorder);
+      Recorder.isTypeSupported = type => !type.includes('mp4a') && supports(type);
+      window.MediaRecorder = class extends Recorder {
+        constructor(stream, options) {
+          super(stream, options);
+          document.documentElement.dataset.testRecorderMime = options.mimeType;
+        }
+      };
+    } });
+  });
+});
+
 async function observeRecordingStartup(worker) {
   await worker.evaluate(async () => {
     const [tab] = await chrome.tabs.query({ url: 'https://chzzk.naver.com/extension-test' });
@@ -141,6 +161,9 @@ for (const [format, label] of [['webm', 'WebM'], ['mp4', 'MP4']]) test(`${label}
   });
   await page.keyboard.press('e');
   await expect(page.locator('#crop-clip-chzzk-record-button')).toHaveAttribute('data-recording', '');
+  if (format === 'mp4' && process.env.CROPCLIP_TEST_WITHOUT_AAC) {
+    await expect(page.locator('html')).toHaveAttribute('data-test-recorder-mime', /avc1,opus/);
+  }
   const playbackClock = () => page.locator('video').evaluate(video => ({
     time: video.currentTime, wall: performance.now() / 1000, frames: window.testSourceFrames ?? 0,
   }));
@@ -165,17 +188,19 @@ for (const [format, label] of [['webm', 'WebM'], ['mp4', 'MP4']]) test(`${label}
     try {
       const filename = `recording.${format}`;
       await ffmpeg.writeFile(filename, bytes);
-      await ffmpeg.ffprobe(['-v', 'error', '-show_streams', '-show_packets', '-show_entries',
-        'stream=index,codec_type:packet=stream_index,pts_time,duration_time', '-of', 'json', '-o', 'packets.json', filename], 4000);
-      const { streams, packets } = JSON.parse(await ffmpeg.readFile('packets.json', 'utf8'));
-      const videoIndex = streams.find(stream => stream.codec_type === 'video').index;
-      const audioIndex = streams.find(stream => stream.codec_type === 'audio').index;
-      const video = packets.filter(packet => packet.stream_index === videoIndex).map(packet => Number(packet.pts_time)).sort((a, b) => a - b);
-      const audio = packets.filter(packet => packet.stream_index === audioIndex).map(packet => {
-        const start = Number(packet.pts_time);
-        return { start, end: start + Number(packet.duration_time) };
-      }).sort((a, b) => a.start - b.start);
-      const decodeResult = await ffmpeg.exec(['-v', 'error', '-xerror', '-i', filename, '-map', '0:v:0', '-map', '0:a:0',
+      await ffmpeg.ffprobe(['-v', 'error', '-select_streams', 'v:0', '-show_packets', '-show_entries',
+        'packet=pts_time', '-of', 'json', '-o', 'packets.json', filename], 4000);
+      const { packets } = JSON.parse(await ffmpeg.readFile('packets.json', 'utf8'));
+      const video = packets.map(packet => Number(packet.pts_time)).sort((a, b) => a - b);
+      const audio = [];
+      ffmpeg.on('log', ({ message }) => {
+        const frame = /\bpts_time:([\d.eE+-]+).*\brate:(\d+)\s+nb_samples:(\d+)/.exec(message);
+        if (!frame) return;
+        const start = Number(frame[1]);
+        audio.push({ start, end: start + Number(frame[3]) / Number(frame[2]) });
+      });
+      const decodeResult = await ffmpeg.exec(['-v', 'info', '-xerror', '-copyts', '-i', filename, '-map', '0:v:0', '-map', '0:a:0',
+        '-af', 'ashowinfo',
         '-vf', 'freezedetect=n=-60dB:d=0.18,metadata=mode=print:key=lavfi.freezedetect.freeze_start:file=freezes.txt',
         '-f', 'null', '-'], 10_000);
       const freezeReport = decodeResult === 0 ? await ffmpeg.readFile('freezes.txt', 'utf8') : '';
@@ -491,9 +516,10 @@ for (const format of ['webm', 'mp4']) test(`full H.264 ${format} recordings excl
   test.setTimeout(120_000);
   const { worker, page, context } = extension;
   await prepareVideo(page);
-  test.skip(!await page.evaluate(format => MediaRecorder.isTypeSupported(format === 'webm'
-    ? 'video/webm;codecs=avc1'
-    : 'video/mp4;codecs="avc1,mp4a.40.2"'), format), 'Requires H.264 recording support');
+  const supported = format === 'webm' ? ['video/webm;codecs=avc1']
+    : ['video/mp4;codecs="avc1.42E01E,mp4a.40.2"', 'video/mp4;codecs="avc1,mp4a.40.2"', 'video/mp4;codecs="avc1,opus"'];
+  expect(await page.evaluate(types => types.some(type => MediaRecorder.isTypeSupported(type)), supported),
+    `The release browser must support H.264 recording in ${format}`).toBe(true);
   await worker.evaluate(async outputFormat => {
     const { settings } = await chrome.storage.local.get('settings');
     await chrome.storage.local.set({ settings: { ...settings, outputFormat: outputFormat === 'webm' ? 'mp4' : 'webm', enableOriginalStreamRecording: false } });
