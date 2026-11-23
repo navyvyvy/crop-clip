@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { HEVC_MP4_MIME_TYPES, RECORDING_MIME_CANDIDATES } from "../dist/shared/types.js";
 import { getRegionLimit } from "../dist/shared/normalize.js";
+import { getNextRecordingFrameDeadline } from "../dist/content/frame_capture.js";
 
 if (!global.gc) {
   const result = spawnSync(process.execPath, ["--expose-gc", fileURLToPath(import.meta.url)], { stdio: "inherit" });
@@ -411,7 +412,7 @@ console.log("recording border timer cleanup checks passed");
 
 // Exercise the real startup scope: clearing session fields alone cannot detect
 // a pending Promise handler that still retains the drawing closure.
-const createStartup = new Function("getRegionLimit", "playerState", "mimeType", "nativeCapture", `
+const createStartup = new Function("getRegionLimit", "getNextRecordingFrameDeadline", "playerState", "mimeType", "nativeCapture", `
   let directSession = null, recordingEncoderCheck, savedFirstScreenRecording = false;
   const timers = new Map(), refs = {};
   const window = { setInterval(fn) { timers.set(1, fn); return 1; }, clearInterval(id) { timers.delete(id); } };
@@ -420,7 +421,8 @@ const createStartup = new Function("getRegionLimit", "playerState", "mimeType", 
   }
   const document = { createElement() {
     const canvas = { remove() {}, captureStream: () => new MediaStream(),
-      getContext() { refs.canvasContexts = (refs.canvasContexts ?? 0) + 1; return { canvas: this, fillRect() {}, drawImage() {} }; } };
+      getContext() { refs.canvasContexts = (refs.canvasContexts ?? 0) + 1; return { canvas: this,
+        fillRect() { refs.paints = (refs.paints ?? 0) + 1; }, drawImage() {} }; } };
     refs.canvas = new WeakRef(canvas); return canvas;
   } };
   const findPrimaryVideoElement = () => {
@@ -451,7 +453,7 @@ const createStartup = new Function("getRegionLimit", "playerState", "mimeType", 
   return { start: startDirectRecording, refs, timers,
     stop() { releaseDirectRecordingCapture(directSession); },
     finish() { directSession.resolveFinish(); } };
-`).bind(null, getRegionLimit);
+`).bind(null, getRegionLimit, getNextRecordingFrameDeadline);
 for (const allowMutedRecording of [undefined, false, true]) {
   for (const playerState of [{ muted: false, volume: 1 }, { muted: true, volume: 1 }, { muted: false, volume: 0 }]) {
     const recording = createStartup(playerState);
@@ -487,6 +489,25 @@ stableRegions.refs.video.deref().videoWidth = 1280;
 stableRegions.timers.get(1)();
 assert.equal(stableRegions.refs.cropReads, 4, 'a resolution change must rebuild video-relative crops');
 stableRegions.stop(); stableRegions.finish();
+for (const playbackRate of [0.5, 1, 2]) {
+  let onFrame;
+  const recording = createStartup({ muted: false, volume: 1, readyState: 4, videoWidth: 1920, videoHeight: 1080,
+    playbackRate, requestVideoFrameCallback(callback) { onFrame = callback; return 1; }, cancelVideoFrameCallback() {} });
+  await recording.start({ recordingId: 'frame-clock', region: {}, settings: {} });
+  const initialPaint = recording.refs.paints;
+  for (let index = 0; index < 90; index++) {
+    const expectedDisplayTime = 40 + Math.floor((index * 100 / 3) / 10) * 10;
+    onFrame(expectedDisplayTime, { expectedDisplayTime, mediaTime: 12 + index * playbackRate / 30 });
+  }
+  assert.equal(recording.refs.paints - initialPaint, 90,
+    `a 30fps picture must survive a quantized display clock at ${playbackRate}x playback`);
+  recording.refs.video.deref().playbackRate = playbackRate * 2;
+  onFrame(3040, { expectedDisplayTime: 3040, mediaTime: 12 + 90 * playbackRate / 30 });
+  assert.equal(recording.refs.paints - initialPaint, 91, 'a playback-rate change restarts the frame schedule');
+  onFrame(3080, { expectedDisplayTime: 3080, mediaTime: 1 });
+  assert.equal(recording.refs.paints - initialPaint, 92, 'a rewind restarts the frame schedule');
+  recording.stop(); recording.finish();
+}
 const croppedMp4 = createStartup({ muted: false, volume: 1 }, 'video/mp4', true);
 await croppedMp4.start({ recordingId: 'cropped-mp4', fullPlayer: false, region: {}, settings: {} });
 assert.equal(croppedMp4.refs.canvasContexts, 1, 'cropped MP4 must use the native canvas track');

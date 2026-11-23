@@ -592,7 +592,7 @@ test('missing and malformed settings recover in the popup and player', async ({ 
   await expect(page.locator('#crop-clip-chzzk-record-button')).toBeVisible();
   await expect.poll(() => worker.evaluate(() => chrome.storage.local.get(['region', 'regions'])))
     .toEqual({ region: null, regions: [] });
-  await expect(popup.locator('#custom-video-bitrate-input')).toHaveValue('6');
+  await expect(popup.locator('#custom-video-bitrate-input')).toHaveValue('8');
 });
 
 test('settings updates preserve an unfinished bitrate edit and other preferences', async ({ extension }) => {
@@ -600,7 +600,7 @@ test('settings updates preserve an unfinished bitrate edit and other preferences
   const popup = await context.newPage();
   await popup.goto(`chrome-extension://${new URL(worker.url()).host}/popup/popup.html`);
   const bitrate = popup.locator('#custom-video-bitrate-input');
-  await expect(bitrate).toHaveValue('6');
+  await expect(bitrate).toHaveValue('8');
   await bitrate.fill('0.');
   const screenshotToggle = popup.locator('input[name="full-screenshot-mode"][value="on"]');
   await worker.evaluate(async () => {
@@ -615,17 +615,18 @@ test('settings updates preserve an unfinished bitrate edit and other preferences
   await expect.poll(() => worker.evaluate(async () => {
     const { settings } = await chrome.storage.local.get('settings');
     return { seek: settings.enableSeek, screenshot: settings.enableFullScreenshotButton, bitrate: settings.videoBitsPerSecond };
-  })).toEqual({ seek: true, screenshot: true, bitrate: 6_000_000 });
+  })).toEqual({ seek: true, screenshot: true, bitrate: 8_000_000 });
 
   const secondPopup = await context.newPage();
   await secondPopup.goto(popup.url());
   const replies = await Promise.all([
-    popup.evaluate(() => chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', patch: { enable60fps: true } })),
+    popup.evaluate(() => chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', patch: { enable60fps: true, videoBitsPerSecond: 9_500_000 } })),
     secondPopup.evaluate(() => chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', patch: { autoSplitAfterSeconds: 52 } })),
   ]);
   expect(replies).toEqual([{ ok: true }, { ok: true }]);
   await expect(popup.locator('input[name="fps-mode"][value="on"]')).toBeChecked();
   await expect(secondPopup.locator('#auto-split-threshold')).toHaveValue('52');
+  await expect(secondPopup.locator('#custom-video-bitrate-input')).toHaveValue('9.5');
   await expect(secondPopup.locator('input[name="full-screenshot-mode"][value="on"]')).toBeChecked();
 
   const reset = secondPopup.getByRole('button', { name: '전체 초기화' });
@@ -636,6 +637,7 @@ test('settings updates preserve an unfinished bitrate edit and other preferences
   await reset.click();
   await confirmReset.getByRole('button', { name: '초기화', exact: true }).click();
   await expect(secondPopup.locator('#auto-split-threshold')).toHaveValue('35');
+  await expect(secondPopup.locator('#custom-video-bitrate-input')).toHaveValue('8');
   await expect(popup.locator('input[name="fps-mode"][value="off"]')).toBeChecked();
   await expect(page.locator('#crop-clip-chzzk-screenshot-button')).toHaveCount(0);
 });
@@ -646,11 +648,11 @@ test('rapid bitrate increases keep the latest value while storage catches up', a
   await popup.goto(`chrome-extension://${new URL(worker.url()).host}/popup/popup.html`);
   const bitrate = popup.locator('#custom-video-bitrate-input');
   const increase = popup.getByRole('button', { name: '비트레이트 증가' });
-  await expect(bitrate).toHaveValue('6');
+  await expect(bitrate).toHaveValue('8');
   await worker.evaluate(() => {
     const set = chrome.storage.local.set.bind(chrome.storage.local);
     chrome.storage.local.set = async items => {
-      if (items.settings?.videoBitsPerSecond === 7_000_000) {
+      if (items.settings?.videoBitsPerSecond === 9_000_000) {
         chrome.storage.local.set = set;
         await new Promise(resolve => { globalThis.releaseBitrateStep = resolve; });
       }
@@ -660,15 +662,15 @@ test('rapid bitrate increases keep the latest value while storage catches up', a
   await increase.evaluate(button => { button.click(); button.click(); });
   await expect.poll(() => worker.evaluate(() => Boolean(globalThis.releaseBitrateStep))).toBe(true);
   try {
-    await expect(bitrate).toHaveValue('7');
+    await expect(bitrate).toHaveValue('9');
     await increase.click();
-    await expect(bitrate).toHaveValue('7.5');
+    await expect(bitrate).toHaveValue('9.5');
   } finally {
     await worker.evaluate(() => globalThis.releaseBitrateStep());
   }
-  await expect.poll(() => worker.evaluate(async () => (await chrome.storage.local.get('settings')).settings.videoBitsPerSecond)).toBe(7_500_000);
+  await expect.poll(() => worker.evaluate(async () => (await chrome.storage.local.get('settings')).settings.videoBitsPerSecond)).toBe(9_500_000);
   await popup.reload();
-  await expect(bitrate).toHaveValue('7.5');
+  await expect(bitrate).toHaveValue('9.5');
 });
 
 test('failed bitrate saves restore the value shown in the focused input', async ({ extension }) => {
@@ -683,11 +685,11 @@ test('failed bitrate saves restore the value shown in the focused input', async 
     };
   });
   const bitrate = popup.locator('#custom-video-bitrate-input');
-  await expect(bitrate).toHaveValue('6');
+  await expect(bitrate).toHaveValue('8');
   await bitrate.fill('16');
   await expect(popup.locator('#popup-error')).toContainText('Injected bitrate write failure');
   await expect(bitrate).toBeFocused();
-  await expect(bitrate).toHaveValue('6');
+  await expect(bitrate).toHaveValue('8');
 });
 
 test('rapid automatic split threshold steps keep the latest value', async ({ extension }) => {

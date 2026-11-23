@@ -21,6 +21,8 @@ assert.equal(repaired.enableShortcuts, false);
 assert.equal(repaired.seekSeconds, 60);
 assert.equal(repaired.multiRegionMaxCount, 2);
 assert.equal(repaired.videoBitsPerSecond, DEFAULT_SETTINGS.videoBitsPerSecond);
+assert.equal(normalizeSettings({}).videoBitsPerSecond, 8_000_000);
+assert.equal(normalizeSettings({ videoBitsPerSecond: 6_000_000 }).videoBitsPerSecond, 6_000_000);
 assert.equal(normalizeSettings({ customVideoBitsPerSecond: 2_000_000, enableSeekButtons: true }).videoBitsPerSecond, 2_000_000);
 assert.equal(normalizeSettings({ enableSeekButtons: true }).enableSeek, true);
 assert.equal(normalizeSettings({ enableSeek: false, enableSeekButtons: true }).enableSeek, false);

@@ -47,11 +47,14 @@ const requiredChecks = {
     "lost deletion alarms are restored across a real browser restart",
   ],
   "recording-startup.spec.mjs": [
+    "recording keeps the opening frames when the display clock is rounded",
     "WebM recording keeps middle frames when timer sampling is delayed",
     "MP4 recording keeps middle frames when timer sampling is delayed",
     "MP4 recording uses H.265 only for a confirmed H.265 source",
     "webm download inspects opening timestamps even without a capture stall marker",
     "mp4 download inspects opening timestamps even without a capture stall marker",
+    "full H.264 webm recordings exclude a stalled opening and keep short originals",
+    "full H.264 mp4 recordings exclude a stalled opening and keep short originals",
   ],
   "recording-tabs.spec.mjs": [
     "other tabs lock all recording controls and unlock after the owner stops",

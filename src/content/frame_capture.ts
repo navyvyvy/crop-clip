@@ -4,8 +4,8 @@ import type { DirectCropPlacement } from "./crop_layout.js";
 type FrameTrack = MediaStreamTrack & { writable: WritableStream<VideoFrame> };
 type FrameTrackConstructor = new (options: { kind: "video" }) => FrameTrack;
 
-export function getNextRecordingFrameDeadline(displayTime: number, deadline: number, interval: number): number | undefined {
-  const elapsed = displayTime - deadline + interval / 8;
+export function getNextRecordingFrameDeadline(frameTime: number, deadline: number, interval: number): number | undefined {
+  const elapsed = frameTime - deadline + interval / 8;
   if (elapsed < 0) return undefined;
   // Keep the sampling phase when an input frame arrives between two deadlines.
   return deadline + (Math.floor(elapsed / interval) + 1) * interval;

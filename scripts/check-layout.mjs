@@ -86,7 +86,7 @@ assert.match(resultText, /querySelectorAll<HTMLButtonElement>\("\[data-split-mod
 assert.match(resultText, /빠른 변환을 지원하지 않아 실시간으로 처리 중입니다/);
 assert.match(settingsText, /enableAutoDownloadRecording: false/);
 assert.match(settingsText, /enableAutoDownloadSplit: false/);
-assert.match(settingsText, /const DEFAULT_VIDEO_BITS_PER_SECOND = 6_000_000/);
+assert.match(settingsText, /const DEFAULT_VIDEO_BITS_PER_SECOND = 8_000_000/);
 assert.match(serviceWorkerText, /autoDownload=1/);
 assert.match(serviceWorkerText, /active: settings\.autoFocusResult/);
 assert.match(messagesText, /AUTO_DOWNLOAD_HANDLED/);

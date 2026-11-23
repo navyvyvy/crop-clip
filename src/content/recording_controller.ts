@@ -698,11 +698,19 @@ export function createRecordingController({
       const useVideoCallbacks = typeof video.requestVideoFrameCallback === "function";
       let lastVideoCallbackAt = performance.now();
       let nextDrawAt: number | undefined;
-      const drawOnVideoFrame: VideoFrameRequestCallback = (now, { expectedDisplayTime }) => {
+      let previousMediaTime = -Infinity;
+      let previousPlaybackRate = 0;
+      const drawOnVideoFrame: VideoFrameRequestCallback = (now, { mediaTime }) => {
         session.drawFrameCallbackId = undefined;
         lastVideoCallbackAt = now;
         if (!document.hidden) {
-          const next = getNextRecordingFrameDeadline(expectedDisplayTime, nextDrawAt ?? expectedDisplayTime, frameInterval);
+          const playbackRate = Math.abs(video.playbackRate) || 1;
+          if (mediaTime < previousMediaTime || playbackRate !== previousPlaybackRate) nextDrawAt = undefined;
+          previousMediaTime = mediaTime;
+          previousPlaybackRate = playbackRate;
+          // Display refresh can round consecutive 30fps frames to 30ms and 40ms.
+          const frameTime = mediaTime * MILLISECONDS_PER_SECOND / playbackRate;
+          const next = getNextRecordingFrameDeadline(frameTime, nextDrawAt ?? frameTime, frameInterval);
           if (next !== undefined) {
             nextDrawAt = next;
             drawFrame();

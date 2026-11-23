@@ -37,6 +37,48 @@ async function readRecordingStartup(worker) {
   });
 }
 
+test('recording keeps the opening frames when the display clock is rounded', async ({ extension }) => {
+  const { worker, page } = extension;
+  await prepareVideo(page, 320, 180, 4500);
+  await worker.evaluate(async () => {
+    const [tab] = await chrome.tabs.query({ url: 'https://chzzk.naver.com/extension-test' });
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => {
+      // The canvas path makes each selected frame observable without encoder timing jitter.
+      globalThis.MediaStreamTrackGenerator = undefined;
+      const sampleCount = 30;
+      let observed = 0;
+      let painted = 0;
+      let sampling = false;
+      const fill = CanvasRenderingContext2D.prototype.fillRect;
+      CanvasRenderingContext2D.prototype.fillRect = function (...args) {
+        if (sampling) painted++;
+        return fill.apply(this, args);
+      };
+      const request = HTMLVideoElement.prototype.requestVideoFrameCallback;
+      HTMLVideoElement.prototype.requestVideoFrameCallback = function (callback) {
+        return request.call(this, (now, metadata) => {
+          if (observed >= sampleCount) return callback(now, metadata);
+          const index = observed++;
+          const expectedDisplayTime = 40 + Math.floor((index * 100 / 3) / 10) * 10;
+          sampling = true;
+          try {
+            callback(now, { ...metadata, expectedDisplayTime, mediaTime: 12 + index / 30 });
+          } finally {
+            sampling = false;
+          }
+          if (observed === sampleCount) document.documentElement.dataset.openingFramesPainted = String(painted);
+        });
+      };
+    } });
+  });
+  const recordButton = page.locator('#crop-clip-chzzk-record-button');
+  await page.keyboard.press('e');
+  await expect(recordButton).toHaveAttribute('data-recording', '');
+  await expect(page.locator('html')).toHaveAttribute('data-opening-frames-painted', '30');
+  await page.keyboard.press('c');
+  await expect(recordButton).not.toHaveAttribute('data-recording', '');
+});
+
 for (const [format, label] of [['webm', 'WebM'], ['mp4', 'MP4']]) test(`${label} recording keeps middle frames when timer sampling is delayed`, async ({ extension }) => {
   const { context, worker, page } = extension;
   await prepareVideo(page, 320, 180, 12000);
@@ -469,6 +511,7 @@ for (const format of ['webm', 'mp4']) test(`full H.264 ${format} recordings excl
       `화면 녹화 중 · ${format === 'webm' ? 'WebM' : 'MP4'} 지원하는 라이브 재생이 아닙니다.`,
     );
     await page.waitForTimeout(duration);
+    await expect(button).toHaveAttribute('data-recording', '');
     const opened = context.waitForEvent('page');
     await page.keyboard.press('e');
     const result = await opened;
