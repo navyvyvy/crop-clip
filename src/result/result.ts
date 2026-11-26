@@ -5,7 +5,7 @@ import { capMp4PlaybackDuration } from "./mp4_duration.js";
 import { readMp4VideoCodec } from "../shared/mp4_boxes.js";
 import { loadFfmpeg, releaseFfmpeg, deleteFfmpegFile, clearFfmpegOutputs, readFfmpegBlob, type FfmpegLike } from "./ffmpeg.js";
 import { getPart, getPartsByRecordingId, getRecording, putPart, putRecording } from "../shared/idb.js";
-import { buildGapRepairFilter, findRepairableVideoGaps, getRemovedGapSeconds } from "./webm_gap_repair.js";
+import { buildGapRepairAudioFilter, buildGapRepairVideoTimestamps, findRepairableVideoGaps, getRemovedGapSeconds } from "./webm_gap_repair.js";
 import { openEditOutputs } from "../shared/temporary_outputs.js";
 import type { AutoDownloadHandledMessage, DeletionScheduleRequest, MessageResponse } from "../shared/messages.js";
 import { getShortcutKey, isEditableShortcutTarget } from "../shared/shortcuts.js";
@@ -550,9 +550,25 @@ async function trimRecordingStartup(part: LoadedPart, trimSeconds: number, disk?
     const format = part.extension === RECORDING_FORMAT.webm ? "matroska" : "mp4";
     const list = "output-startup.csv";
     const name = `output-startup-1.${part.extension}`;
-    const validStart = async (path: string) => await ffmpeg.exec([
-      "-xerror", "-i", path, "-map", "0:v:0", "-frames:v", "1", "-abort_on", "empty_output", "-f", "null", "-",
-    ]) === 0;
+    const validStart = async (path: string) => {
+      if (await ffmpeg.exec([
+        "-xerror", "-i", path, "-map", "0:v:0", "-frames:v", "1", "-abort_on", "empty_output", "-f", "null", "-",
+      ]) !== 0) return false;
+      if (format !== "matroska") return true;
+      const probeName = "output-startup-video-duration.json";
+      await deleteFfmpegFile(ffmpeg, probeName, true);
+      await ffmpeg.ffprobe(["-v", "error", "-select_streams", "v:0", "-read_intervals", "%+0.1", "-show_entries",
+        "stream=start_time,duration:stream_tags=DURATION", "-of", "json", "-o", probeName, path], 4_000);
+      const data = await ffmpeg.readFile(probeName);
+      const { streams } = JSON.parse(typeof data === "string" ? data : new TextDecoder().decode(data)) as {
+        streams?: { start_time?: string; duration?: string; tags?: { DURATION?: string } }[];
+      };
+      const video = streams?.[0];
+      const duration = Number(video?.duration);
+      const taggedEnd = parseTimeInput(video?.tags?.DURATION ?? "");
+      const playableSeconds = duration > 0 ? duration : taggedEnd - (Number(video?.start_time) || 0);
+      return playableSeconds >= STARTUP_MIN_PLAYABLE_SECONDS;
+    };
     const mimeType = getConvertedMimeType(part.extension);
     if (disk) await mountEditOutput(ffmpeg, disk, `output-startup-0.${part.extension}`);
     const output = disk && await mountEditOutput(ffmpeg, disk, name);
@@ -614,9 +630,9 @@ async function repairWebmGaps(part: LoadedPart): Promise<LoadedPart | undefined>
       const name = "output-gap-repaired.webm";
       const output = workspace && await mountEditOutput(ffmpeg, workspace.disk, name);
       const hasAudio = probe.streams?.some(stream => stream.codec_type === "audio") === true;
-      const code = await ffmpeg.exec(["-i", inputName, "-filter_complex", buildGapRepairFilter(gaps, hasAudio),
-        "-map", "[v]", ...(hasAudio ? ["-map", "[a]", "-c:a", "libvorbis"] : []), "-fps_mode", "vfr",
-        "-c:v", "libx264", "-preset", "veryfast", ...getWebmVideoQualityArgs(part), "-cues_to_front", "1", "-f", "matroska", name]);
+      const code = await ffmpeg.exec(["-i", inputName, "-map", "0:v:0", "-c:v", "copy", "-bsf:v", buildGapRepairVideoTimestamps(gaps),
+        ...(hasAudio ? ["-filter_complex", buildGapRepairAudioFilter(gaps), "-map", "[a]", "-c:a", "libvorbis"] : []),
+        "-cues_to_front", "1", "-f", "matroska", name]);
       if (code !== 0 || await ffmpeg.exec(["-xerror", "-i", name, "-map", "0:v:0", "-frames:v", "1",
         "-abort_on", "empty_output", "-f", "null", "-"]) !== 0) return;
       const blob = await readEditOutput(ffmpeg, name, "video/webm", output);

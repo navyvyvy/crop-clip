@@ -390,14 +390,14 @@ for (const [format, label] of [['webm', 'WebM'], ['mp4', 'MP4']]) test(`${label}
   expect(audioMaxGap, 'the downloaded sound must stay continuous from start to end').toBeLessThan(0.08);
 });
 
-async function makeContinuitySource(context, worker, duration = 45) {
+async function makeContinuitySource(context, worker, duration = 45, videoFilter = 'testsrc2=size=320x180:rate=30') {
   const generator = await context.newPage();
   await generator.goto(`chrome-extension://${new URL(worker.url()).host}/result/result.html`);
-  try { return await generator.evaluate(async duration => {
+  try { return await generator.evaluate(async ({ duration, videoFilter }) => {
     const { loadFfmpeg, releaseFfmpeg } = await import('/result/ffmpeg.js');
     const ffmpeg = await loadFfmpeg(() => {});
     try {
-      const code = await ffmpeg.exec(['-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30',
+      const code = await ffmpeg.exec(['-f', 'lavfi', '-i', videoFilter,
         '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', String(duration),
         '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', '-movflags', '+faststart', 'source.mp4']);
       if (code !== 0) throw new Error('Continuity fixture encoding failed');
@@ -406,8 +406,69 @@ async function makeContinuitySource(context, worker, duration = 45) {
       for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
       return btoa(binary);
     } finally { await releaseFfmpeg(); }
-  }, duration); } finally { await generator.close(); }
+  }, { duration, videoFilter }); } finally { await generator.close(); }
 }
+
+function sampleColorBars(video) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 160;
+  canvas.height = 90;
+  const context = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
+  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const { data } = context.getImageData(0, 0, canvas.width, canvas.height);
+  const samples = [];
+  for (const y of [25, 80]) {
+    for (const x of [8, 30, 50, 65, 80, 95, 110, 130, 150]) {
+      const offset = (y * canvas.width + x) * 4;
+      samples.push(data[offset], data[offset + 1], data[offset + 2]);
+    }
+  }
+  return samples;
+}
+
+for (const [format, label] of [['webm', 'WebM'], ['mp4', 'MP4']]) test(`${label} download preserves the source playback colors`, async ({ extension }) => {
+  const { context, page, worker } = extension;
+  const source = await makeContinuitySource(context, worker, 4, 'smptehdbars=size=1920x1080:rate=30');
+  await worker.evaluate(async outputFormat => {
+    const { settings } = await chrome.storage.local.get('settings');
+    await chrome.storage.local.set({ settings: { ...settings, outputFormat, enableOriginalStreamRecording: false } });
+  }, format);
+  await page.getByRole('button', { name: 'Native', exact: true }).click();
+  const video = page.locator('video');
+  await video.evaluate(async (element, encoded) => {
+    const bytes = Uint8Array.from(atob(encoded), byte => byte.charCodeAt(0));
+    element.src = URL.createObjectURL(new Blob([bytes], { type: 'video/mp4' }));
+    element.loop = true;
+    await element.play();
+  }, source);
+  const expected = await video.evaluate(sampleColorBars);
+  await page.keyboard.press('e');
+  const button = page.locator('#crop-clip-chzzk-record-button');
+  await expect(button).toHaveAttribute('data-recording', '');
+  await expect(button).toHaveAttribute('aria-busy', 'false');
+  await page.waitForTimeout(2000);
+  const opened = context.waitForEvent('page');
+  await page.keyboard.press('e');
+  const result = await opened;
+  await expect(result.locator('#result-loading')).toBeHidden({ timeout: 30_000 });
+  const downloading = result.waitForEvent('download');
+  await result.locator('#download-current-button').click();
+  const bytes = await fs.readFile(await (await downloading).path());
+  await result.evaluate(async ({ format, encoded }) => {
+    const clip = document.createElement('video');
+    clip.id = 'test-saved-clip';
+    clip.muted = true;
+    clip.style.cssText = 'position:fixed;top:0;left:0;width:160px;height:90px';
+    document.body.append(clip);
+    const bytes = Uint8Array.from(atob(encoded), byte => byte.charCodeAt(0));
+    clip.src = URL.createObjectURL(new Blob([bytes], { type: `video/${format}` }));
+    await clip.play();
+    await new Promise(resolve => clip.requestVideoFrameCallback(resolve));
+  }, { format, encoded: bytes.toString('base64') });
+  const actual = await result.locator('#test-saved-clip').evaluate(sampleColorBars);
+  const differences = actual.map((channel, index) => Math.abs(channel - expected[index]));
+  expect(Math.max(...differences), `downloaded color bars ${actual} should match ${expected}`).toBeLessThanOrEqual(8);
+});
 
 async function inspectContinuityDownload(result, bytes, format) {
   return result.evaluate(async ({ base64, format }) => {
@@ -513,16 +574,42 @@ for (const blockRenderer of [false, true]) test(blockRenderer
   await result.locator('#download-current-button').click();
   const bytes = await fs.readFile(await (await downloaded).path());
   const { video, audio, decodeResult, freezeReport } = await inspectContinuityDownload(result, bytes, 'webm');
+  let removedSeconds = 0;
   if (blockRenderer) {
     const saved = await result.evaluate(async () => {
       const { getPartsByRecordingId } = await import('/shared/idb.js');
       const [part] = await getPartsByRecordingId(new URLSearchParams(location.search).get('id'));
-      return { originalSize: part.originalBlob?.size, removed: part.removedVideoGapSeconds, size: part.blob.size };
+      const { loadFfmpeg, releaseFfmpeg } = await import('/result/ffmpeg.js');
+      const ffmpeg = await loadFfmpeg(() => {});
+      try {
+        const inspectFrames = async (blob, name) => {
+          if (!blob) throw Error('Missing video before or after gap repair');
+          await ffmpeg.writeFile(name, new Uint8Array(await blob.arrayBuffer()));
+          const output = `${name}.frames`;
+          const code = await ffmpeg.exec(['-v', 'error', '-xerror', '-i', name, '-map', '0:v:0', '-fps_mode', 'passthrough',
+            '-enc_time_base', '-1', '-f', 'framemd5', output]);
+          if (code !== 0) throw Error('Unable to hash decoded video frames');
+          const report = await ffmpeg.readFile(output, 'utf8');
+          const [, timeBaseNumerator, timeBaseDenominator] = /^#tb 0:\s*(\d+)\/(\d+)/m.exec(report);
+          const rows = report.split('\n').filter(line => /^\s*\d\s*,/.test(line)).map(line => line.split(','));
+          const span = (Number(rows.at(-1)[2]) - Number(rows[0][2])) * Number(timeBaseNumerator) / Number(timeBaseDenominator);
+          return { span, hashes: rows.map(row => row.at(-1).trim()) };
+        };
+        const originalVideo = await inspectFrames(part.originalBlob, 'raw.webm');
+        const repairedVideo = await inspectFrames(part.blob, 'repaired.webm');
+        return { originalSize: part.originalBlob?.size, removed: part.removedVideoGapSeconds, size: part.blob.size,
+          frames: originalVideo.hashes.length, repairedFrames: repairedVideo.hashes.length, removedFromTimeline: originalVideo.span - repairedVideo.span,
+          sameVideo: originalVideo.hashes.length === repairedVideo.hashes.length
+            && originalVideo.hashes.every((hash, index) => hash === repairedVideo.hashes[index]) };
+      } finally { await releaseFfmpeg(); }
     });
     expect(saved.originalSize).toBeGreaterThan(0);
     expect(saved.removed).toBeGreaterThan(0.7);
-    expect(saved.removed).toBeLessThan(1.1);
+    expect(Math.abs(saved.removed - saved.removedFromTimeline)).toBeLessThan(0.08);
+    removedSeconds = saved.removed;
     expect(saved.size).toBe(bytes.length);
+    expect(saved.frames).toBeGreaterThan(200);
+    expect(saved.sameVideo, `automatic repair must preserve decoded frames (${saved.frames} → ${saved.repairedFrames})`).toBe(true);
     expect(Math.abs(video.at(-1) - audio.at(-1).end)).toBeLessThan(0.15);
   }
   const gaps = video.slice(1).map((time, index) => ({ at: video[index] - video[0], gap: time - video[index] }));
@@ -533,8 +620,8 @@ for (const blockRenderer of [false, true]) test(blockRenderer
   await testInfo.attach('middle-frame-gaps.json', { path: timingPath, contentType: 'application/json' });
   expect(decodeResult).toBe(0);
   expect(freezeReport).toBe('');
-  expect(video.at(-1) - video[0]).toBeGreaterThan(10);
-  expect(maxGap).toBeLessThan(0.085);
+  expect(video.at(-1) - video[0] + removedSeconds).toBeGreaterThan(10);
+  expect(maxGap).toBeLessThan(blockRenderer ? 0.18 : 0.085);
 });
 
 test('MP4 recording uses H.265 only for a confirmed H.265 source', async ({ extension }, testInfo) => {
@@ -818,10 +905,11 @@ test('a recording with audio before its first video frame opens on video', async
   expect(Math.abs(start.video - start.audio)).toBeLessThan(0.04);
 });
 
-for (const [format, scenario] of [['webm', 'early'], ['webm', 'late'], ['mp4', 'early'], ['webm', 'continuous']]) test({
+for (const [format, scenario] of [['webm', 'early'], ['webm', 'late'], ['mp4', 'early'], ['webm', 'continuous'], ['webm', 'short-video']]) test({
   early: `${format} download inspects opening timestamps even without a capture stall marker`,
   late: 'WebM download detects a single startup gap after half a second',
   continuous: 'WebM download preserves a continuous opening despite a capture stall marker',
+  'short-video': 'WebM startup trim preserves the source when only the audio has enough duration',
 }[scenario], async ({ extension }) => {
   const { worker, context } = extension;
   const result = await context.newPage();
@@ -833,14 +921,16 @@ for (const [format, scenario] of [['webm', 'early'], ['webm', 'late'], ['mp4', '
     const ffmpeg = await loadFfmpeg(() => {});
     const filename = `startup_20261126_123456.${format}`;
     const continuous = scenario === 'continuous';
-    const openingDuration = continuous ? 1.4 : scenario === 'late' ? 0.7 : format === 'webm' ? 0.16 : 1;
-    const keepFrames = continuous ? '1' : scenario === 'late' ? 'not(between(n,18,20))'
+    const shortVideo = scenario === 'short-video';
+    const openingDuration = continuous || shortVideo ? 1.4 : scenario === 'late' ? 0.7 : format === 'webm' ? 0.16 : 1;
+    const keepFrames = continuous || shortVideo ? '1' : scenario === 'late' ? 'not(between(n,18,20))'
       : format === 'webm' ? 'not(between(n,1,2)+eq(n,4))' : 'if(lt(t,1),not(mod(n,3)),1)';
     let blob;
     try {
       const code = await ffmpeg.exec([
         '-f', 'lavfi', '-i', `color=red:size=160x90:rate=30:duration=${openingDuration}`,
-        '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=30:duration=1.3',
+        '-f', 'lavfi', '-i', `testsrc2=size=160x90:rate=30:duration=${shortVideo ? 0.4 : 1.3}`,
+        ...(shortVideo ? ['-f', 'lavfi', '-i', 'sine=duration=2.7', '-map', '2:a:0', '-c:a', 'libvorbis'] : []),
         '-filter_complex', `[0:v][1:v]concat=n=2:v=1:a=0[joined];[joined]select='${keepFrames}'[v]`, '-map', '[v]', '-fps_mode', 'vfr',
         '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '240', '-sc_threshold', '0',
         '-f', format === 'webm' ? 'matroska' : 'mp4', filename,
@@ -851,8 +941,8 @@ for (const [format, scenario] of [['webm', 'early'], ['webm', 'late'], ['mp4', '
     const id = crypto.randomUUID(), createdAt = Date.now();
     await putRecording({ id, createdAt, endedAt: createdAt + openingDuration * 1000 + 1300, totalSize: blob.size, actualExtension: format });
     await putPart({ id: `${id}:part:001`, recordingId: id, index: 1, filename, extension: format,
-      mimeType: blob.type, size: blob.size, blob, createdAt, videoBitsPerSecond: 8_500_000, inspectStartup: true,
-      startupTrimSeconds: continuous ? 1.4 : undefined, seekMetadataVersion: 1 });
+      mimeType: blob.type, size: blob.size, blob, createdAt, videoBitsPerSecond: 8_500_000, inspectStartup: shortVideo ? undefined : true,
+      startupTrimSeconds: continuous || shortVideo ? 1.4 : undefined, seekMetadataVersion: 1 });
     return id;
   }, { format, scenario });
   if (format === 'webm' && scenario !== 'continuous') {
@@ -872,6 +962,12 @@ for (const [format, scenario] of [['webm', 'early'], ['webm', 'late'], ['mp4', '
   }
   await result.goto(`${base}?id=${id}`);
   await expect(result.locator('#result-loading')).toBeHidden({ timeout: 30000 });
+  if (scenario === 'short-video') {
+    await expect(result.locator('#split-status')).toHaveText('초반 구간을 정리할 수 없어 원본을 유지했습니다.');
+    await expect.poll(() => result.locator('#preview-video').evaluate(video => video.duration)).toBeCloseTo(2.7, 1);
+    await expect(result.locator('#download-current-button')).toBeEnabled();
+    return;
+  }
   if (scenario === 'continuous') {
     await expect(result.locator('#split-status')).toBeEmpty();
     await expect.poll(() => result.locator('#preview-video').evaluate(video => video.duration)).toBeCloseTo(2.7, 1);

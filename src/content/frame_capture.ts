@@ -1,5 +1,3 @@
-import type { DirectCropPlacement } from "./crop_layout.js";
-
 // Chrome/Edge expose this API outside lib.dom; unsupported browsers use canvas.
 type FrameTrack = MediaStreamTrack & { writable: WritableStream<VideoFrame> };
 type FrameTrackConstructor = new (options: { kind: "video" }) => FrameTrack;
@@ -11,7 +9,7 @@ export function getNextRecordingFrameDeadline(frameTime: number, deadline: numbe
   return deadline + (Math.floor(elapsed / interval) + 1) * interval;
 }
 
-export function createVideoFrameCapture(video: HTMLVideoElement, width: number, height: number, onError: (error: Error) => void, allowDirectCrop = true) {
+export function createVideoFrameCapture(video: HTMLVideoElement, onError: (error: Error) => void) {
   const Generator = (globalThis as typeof globalThis & { MediaStreamTrackGenerator?: FrameTrackConstructor }).MediaStreamTrackGenerator;
   if (!Generator || typeof VideoFrame === "undefined") return null;
   let track: FrameTrack | undefined;
@@ -30,39 +28,20 @@ export function createVideoFrameCapture(video: HTMLVideoElement, width: number, 
   let writing = false;
   return {
     stream: new MediaStream([track]),
-    paint(placement: DirectCropPlacement, fallback: () => HTMLCanvasElement, frameReported = true): boolean {
+    paint(drawFrame: () => HTMLCanvasElement, frameReported = true): boolean {
       if (closed || writing || !source) return false;
       const timestamp = Math.round(performance.now() * 1000);
-      let frame: VideoFrame | undefined;
       let sourceTimestamp: number | undefined;
       try {
         const original = new VideoFrame(source);
-        try {
-          sourceTimestamp = original.timestamp;
-          if (!frameReported && sourceTimestamp === lastSourceTimestamp) return false;
-          if (placement.dx === 0 && placement.dy === 0 && placement.dw === width && placement.dh === height) {
-            const rect = original.visibleRect;
-            const unchanged = rect?.x === placement.crop.x && rect.y === placement.crop.y
-              && rect.width === placement.crop.width && rect.height === placement.crop.height
-              && original.displayWidth === width && original.displayHeight === height;
-            // Cropped native frames can crash Chromium's Linux MP4 encoder.
-            if (unchanged) frame = new VideoFrame(original, { timestamp });
-            else if (allowDirectCrop) frame = new VideoFrame(original, { timestamp, visibleRect: placement.crop, displayWidth: width, displayHeight: height });
-          }
-        } finally {
-          original.close();
-        }
-        const rect = frame?.visibleRect;
-        if (frame && (!rect || rect.x !== placement.crop.x || rect.y !== placement.crop.y || rect.width !== placement.crop.width || rect.height !== placement.crop.height)) {
-          frame?.close();
-          frame = undefined;
-        }
+        sourceTimestamp = original.timestamp;
+        original.close();
       } catch {
-        frame?.close();
-        frame = undefined;
+        // The playback callback can still report a fresh frame when this timestamp is unavailable.
       }
-      if (!frameReported && sourceTimestamp === undefined) return false;
-      const outputFrame = frame ?? new VideoFrame(fallback(), { timestamp });
+      if (!frameReported && (sourceTimestamp === undefined || sourceTimestamp === lastSourceTimestamp)) return false;
+      // MediaRecorder can lose the source color matrix when fed decoded YUV frames directly.
+      const outputFrame = new VideoFrame(drawFrame(), { timestamp });
       lastSourceTimestamp = sourceTimestamp;
       pendingFrame = outputFrame;
       writing = true;

@@ -54,7 +54,7 @@
 <details open>
 <summary><strong>v0.4.2</strong></summary>
 
-- WebM 끊김 자동 보정
+- 화면 녹화 색상 개선 및 WebM 중간 끊김 보정 시 영상 재압축 제거
 - 방송 원본 저장 호환성 개선
 - 결과창 음소거 단축키 추가 (M·ㅡ)
 

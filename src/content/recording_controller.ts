@@ -639,10 +639,10 @@ export function createRecordingController({
 
     let context: CanvasRenderingContext2D | null = null;
 
-    // Feed cropped MP4 through canvas capture to keep Chromium's fallback encoder on a native track.
+    // Keep cropped MP4 on a canvas track for Chromium's fallback encoder.
     const useFrameCapture = crops.length === 1 && (mime.extension !== RECORDING_FORMAT.mp4 || command.fullPlayer);
     const frameCapture = useFrameCapture
-      ? createVideoFrameCapture(video, output.width, output.height, handleVideoFrameError.bind(null, command.recordingId), mime.extension !== "mp4")
+      ? createVideoFrameCapture(video, handleVideoFrameError.bind(null, command.recordingId))
       : null;
     const paintCanvas = (placements: DirectCropPlacement[]) => {
       context ??= canvas.getContext("2d", { alpha: false, desynchronized: true });
@@ -652,10 +652,11 @@ export function createRecordingController({
       for (const placement of placements) {
         context.drawImage(video, placement.crop.x, placement.crop.y, placement.crop.width, placement.crop.height, placement.dx, placement.dy, placement.dw, placement.dh);
       }
+      return canvas;
     };
     const paintPlacements = (placements: DirectCropPlacement[], frameReported = true) => {
       if (frameCapture) {
-        return frameCapture.paint(placements[0], () => { paintCanvas(placements); return canvas; }, frameReported);
+        return frameCapture.paint(() => paintCanvas(placements), frameReported);
       }
       canvasTrack?.requestFrame();
       paintCanvas(placements);

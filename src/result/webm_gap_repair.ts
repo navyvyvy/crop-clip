@@ -25,11 +25,16 @@ export function getRemovedGapSeconds(gaps: readonly VideoGap[]): number {
   return gaps.reduce((seconds, gap) => seconds + gap.end - gap.start, 0);
 }
 
-export function buildGapRepairFilter(gaps: readonly VideoGap[], hasAudio: boolean): string {
-  const removed = gaps.map(({ start, end }) => `gte(T\\,${(end - 0.0005).toFixed(6)})*${(end - start).toFixed(6)}`).join("+");
-  const video = `[0:v:0]setpts=PTS-(${removed})/TB[v]`;
-  if (!hasAudio) return video;
+export function buildGapRepairVideoTimestamps(gaps: readonly VideoGap[]): string {
+  const shift = (timestamp: "PTS" | "DTS") => {
+    const removed = gaps.map(({ start, end }) =>
+      `gte(${timestamp}*TB,${(end - 0.0005).toFixed(6)})*${(end - start).toFixed(6)}`).join("+");
+    return `${timestamp}-(${removed})/TB`;
+  };
+  return `setts=pts='${shift("PTS")}':dts='if(eq(DTS,NOPTS),DTS,${shift("DTS")})'`;
+}
 
+export function buildGapRepairAudioFilter(gaps: readonly VideoGap[]): string {
   const boundaries = [...gaps.map(({ start }) => start), undefined];
   const inputLabels = boundaries.map((_end, index) => `[a${index}]`).join("");
   const audio = boundaries.map((end, index) => {
@@ -38,6 +43,6 @@ export function buildGapRepairFilter(gaps: readonly VideoGap[], hasAudio: boolea
     return `[a${index}]${trim},asetpts=PTS-STARTPTS[audio${index}]`;
   });
   const outputLabels = audio.map((_filter, index) => `[audio${index}]`).join("");
-  return [video, `[0:a:0]asplit=${audio.length}${inputLabels}`, ...audio,
+  return [`[0:a:0]asplit=${audio.length}${inputLabels}`, ...audio,
     `${outputLabels}concat=n=${audio.length}:v=0:a=1[a]`].join(";");
 }

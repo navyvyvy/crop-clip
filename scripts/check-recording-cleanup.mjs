@@ -463,9 +463,9 @@ const createStartup = new Function("getRegionLimit", "getNextRecordingFrameDeadl
   const getVideoStream = () => new MediaStream(), handleDetachedPlayer = () => {};
   const createVideoFrameCapture = () => nativeCapture ? {
     stream: new MediaStream(), close() {},
-    paint(_placement, fallback) {
+    paint(drawFrame) {
       if (typeof nativeCapture === 'function') return nativeCapture();
-      if (nativeCapture === 'fallback') fallback();
+      if (nativeCapture === 'fallback') drawFrame();
       return true;
     },
   } : null;
