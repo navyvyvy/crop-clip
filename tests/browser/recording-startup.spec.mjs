@@ -932,7 +932,7 @@ for (const [format, scenario] of [['webm', 'early'], ['webm', 'late'], ['mp4', '
         '-f', 'lavfi', '-i', `testsrc2=size=160x90:rate=30:duration=${shortVideo ? 0.4 : 1.3}`,
         ...(shortVideo ? ['-f', 'lavfi', '-i', 'sine=duration=2.7', '-map', '2:a:0', '-c:a', 'libvorbis'] : []),
         '-filter_complex', `[0:v][1:v]concat=n=2:v=1:a=0[joined];[joined]select='${keepFrames}'[v]`, '-map', '[v]', '-fps_mode', 'vfr',
-        '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '240', '-sc_threshold', '0',
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-g', scenario === 'late' ? '30' : '240', '-sc_threshold', '0',
         '-f', format === 'webm' ? 'matroska' : 'mp4', filename,
       ]);
       if (code !== 0) throw Error('Startup fixture encoding failed');
@@ -1021,6 +1021,9 @@ for (const [format, scenario] of [['webm', 'early'], ['webm', 'late'], ['mp4', '
   expect(frames.changedShare).toBeGreaterThan(0.025);
   expect(frames.duration).toBeGreaterThan(0.9);
   expect(frames.duration).toBeLessThan(1.5);
+  if (scenario === 'late') {
+    expect(Math.abs(frames.duration - 1.3), 'startup trimming must keep frames before the next keyframe').toBeLessThan(0.08);
+  }
   if (format === 'mp4') {
     await result.evaluate(async id => {
       const { getPartsByRecordingId, putPart } = await import('/shared/idb.js');

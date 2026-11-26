@@ -584,7 +584,8 @@ async function trimRecordingStartup(part: LoadedPart, trimSeconds: number, disk?
       const rows = (typeof data === "string" ? data : new TextDecoder().decode(data)).trim().split("\n");
       const [, start, end] = rows.find(row => row.startsWith(`${name},`))?.split(",") ?? [];
       const cutSeconds = Number(start);
-      if (cutSeconds >= trimSeconds - 0.05 && cutSeconds <= trimSeconds + 1.25
+      // A later keyframe can discard valid footage after playback has already resumed.
+      if (Math.abs(cutSeconds - trimSeconds) <= 0.05
         && Number(end) - cutSeconds >= STARTUP_MIN_PLAYABLE_SECONDS && await validStart(name)) {
         const blob = await readEditOutput(ffmpeg, name, mimeType, output);
         if (blob.size > 0) return { blob, cutSeconds };
