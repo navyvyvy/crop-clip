@@ -1043,6 +1043,23 @@ for (const [format, scenario] of [['webm', 'early'], ['webm', 'late'], ['mp4', '
   }
 });
 
+async function verifyTrimmedStartupDownload(page, bytes, format, capture) {
+  const saved = await page.evaluate(async recordingId => {
+    const { getPartsByRecordingId, getRecording } = await import('/shared/idb.js');
+    const [recording, [part]] = await Promise.all([getRecording(recordingId), getPartsByRecordingId(recordingId)]);
+    const hash = await crypto.subtle.digest('SHA-256', await part.blob.arrayBuffer());
+    return { startedAt: recording.createdAt, hash: Array.from(new Uint8Array(hash)) };
+  }, capture.recordingId);
+  expect(saved.startedAt - capture.startedAt, 'the download must trim the injected opening stall').toBeGreaterThan(150);
+  expect(createHash('sha256').update(bytes).digest()).toEqual(Buffer.from(saved.hash));
+  const { video, decodeResult } = await inspectContinuityDownload(page, bytes, format);
+  expect(decodeResult, 'the download must decode through the end').toBe(0);
+  expect(video.at(-1) - video[0], 'the download must retain the playable part of the recording').toBeGreaterThan(2);
+  const opening = video.filter(time => time - video[0] < 1);
+  expect(opening.length).toBeGreaterThan(10);
+  expect(Math.max(...opening.slice(1).map((time, index) => time - opening[index]))).toBeLessThan(0.18);
+}
+
 for (const format of ['webm', 'mp4']) test(`full H.264 ${format} recordings exclude a stalled opening and keep short originals`, async ({ extension }, testInfo) => {
   test.setTimeout(120_000);
   const { worker, page, context } = extension;
@@ -1086,11 +1103,11 @@ for (const format of ['webm', 'mp4']) test(`full H.264 ${format} recordings excl
     };
   });
   const cases = [
-    { duration: 5000, status: /끊긴 구간을 제외/, min: 2, max: 4.85 },
-    { duration: 450, min: 0.3, max: 1.5, original: true },
+    { duration: 5000, status: /끊긴 구간을 제외/ },
+    { duration: 450, original: true },
   ];
   cases.push({ duration: 5000, automatic: true, original: true });
-  for (const { duration, status, min, max, automatic, original = false } of cases) {
+  for (const { duration, status, automatic, original = false } of cases) {
     await worker.evaluate(async enableOriginalStreamRecording => {
       const { settings } = await chrome.storage.local.get('settings');
       await chrome.storage.local.set({ settings: { ...settings, enableOriginalStreamRecording } });
@@ -1136,7 +1153,7 @@ for (const format of ['webm', 'mp4']) test(`full H.264 ${format} recordings excl
     }
     await page.waitForTimeout(duration);
     await expect(button).toHaveAttribute('data-recording', '');
-    const capture = automatic ? await worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState) : undefined;
+    const capture = automatic || status ? await worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState) : undefined;
     const opened = context.waitForEvent('page');
     await page.keyboard.press('e');
     const result = await opened;
@@ -1151,20 +1168,7 @@ for (const format of ['webm', 'mp4']) test(`full H.264 ${format} recordings excl
       const inspection = await context.newPage();
       try {
         await inspection.goto(`chrome-extension://${new URL(worker.url()).host}/popup/popup.html`);
-        const saved = await inspection.evaluate(async recordingId => {
-          const { getPartsByRecordingId, getRecording } = await import('/shared/idb.js');
-          const [recording, [part]] = await Promise.all([getRecording(recordingId), getPartsByRecordingId(recordingId)]);
-          const hash = await crypto.subtle.digest('SHA-256', await part.blob.arrayBuffer());
-          return { startedAt: recording.createdAt, hash: Array.from(new Uint8Array(hash)) };
-        }, capture.recordingId);
-        expect(saved.startedAt - capture.startedAt, 'the automatic download must trim the injected opening stall').toBeGreaterThan(150);
-        expect(createHash('sha256').update(bytes).digest()).toEqual(Buffer.from(saved.hash));
-        const { video, decodeResult } = await inspectContinuityDownload(inspection, bytes, format);
-        expect(decodeResult, 'the automatic download must decode through the end').toBe(0);
-        expect(video.at(-1) - video[0], 'the download must retain the playable part of the recording').toBeGreaterThan(2);
-        const opening = video.filter(time => time - video[0] < 1);
-        expect(opening.length).toBeGreaterThan(10);
-        expect(Math.max(...opening.slice(1).map((time, index) => time - opening[index]))).toBeLessThan(0.18);
+        await verifyTrimmedStartupDownload(inspection, bytes, format, capture);
       } finally {
         await inspection.close();
       }
@@ -1178,12 +1182,15 @@ for (const format of ['webm', 'mp4']) test(`full H.264 ${format} recordings excl
     await expect.poll(() => video.evaluate(element => element.videoWidth)).toBeGreaterThan(0);
     expect(await result.evaluate(() => window.startupInspections)).toBe(status ? 1 : 0);
     const saved = await video.evaluate(element => element.duration);
-    expect(saved).toBeGreaterThan(min);
-    expect(saved).toBeLessThan(max);
+    if (!status) {
+      expect(saved).toBeGreaterThan(0.3);
+      expect(saved).toBeLessThan(1.5);
+    }
     const downloadPromise = result.waitForEvent('download');
     await result.locator('#download-current-button').click();
     const download = await downloadPromise;
     expect(download.suggestedFilename().endsWith(`_${Math.max(1, Math.round(saved))}s.${format}`)).toBe(true);
+    if (status) await verifyTrimmedStartupDownload(result, await fs.readFile(await download.path()), format, capture);
     await result.close();
   }
 });
