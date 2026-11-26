@@ -1,5 +1,5 @@
 import { deleteRecording, deleteRecordingChunks, getChunksByRecordingId, getRecording, getRecordingDeletionCandidates, putChunk, putPart, putRecording } from "../shared/idb.js";
-import { fail, ok, UNSUPPORTED_RUNTIME_MESSAGE, type AutoDownloadHandledMessage, type ContentCommand, type MessageResponse, type PlaybackSource, type PopupCommand, type RecordingErrorMessage, type RuntimeMessage, type StoreRecordingChunkMessage } from "../shared/messages.js";
+import { fail, ok, UNSUPPORTED_RUNTIME_MESSAGE, type AutoDownloadHandledMessage, type ContentCommand, type FinalizeRecordingMessage, type MessageResponse, type PlaybackSource, type PopupCommand, type RecordingErrorMessage, type RuntimeMessage, type StoreRecordingChunkMessage } from "../shared/messages.js";
 import { loadAppState, loadRecordingState, saveRecordingState, updateStoredSettings, waitForSettingsWrites } from "../shared/storage.js";
 import { removeEditOutputs } from "../shared/temporary_outputs.js";
 import { getRegionLimit, normalizeRegion, normalizeRegions } from "../shared/normalize.js";
@@ -623,7 +623,10 @@ function storeRecordingChunk(message: StoreRecordingChunkMessage): Promise<Messa
     });
 }
 
-async function finalizeRecordingFromChunksUnlocked(recordingId: string, endedAt: number, recoverPartial = false, startupTrimSeconds?: number, originalStreamEnd?: number, inspectStartup?: true): Promise<MessageResponse<boolean>> {
+type FinalizationMetadata = Omit<FinalizeRecordingMessage, "type" | "recordingId" | "endedAt">;
+
+async function finalizeRecordingFromChunksUnlocked(recordingId: string, endedAt: number, recoverPartial = false, metadata: FinalizationMetadata = {}): Promise<MessageResponse<boolean>> {
+  const { startupTrimSeconds, originalStreamEnd, inspectStartup, repairVideoGaps } = metadata;
   const state = await loadRecordingState();
   if ((state.status !== RECORDING_STATUS.recording && !(recoverPartial && state.status === RECORDING_STATUS.error)) || state.recordingId !== recordingId) {
     return ok(false);
@@ -676,6 +679,8 @@ async function finalizeRecordingFromChunksUnlocked(recordingId: string, endedAt:
     videoBitsPerSecond: originalStreamStart === undefined ? first.videoBitsPerSecond : undefined,
     inspectStartup: state.mode === RECORDING_MODE.full && originalStreamStart === undefined
       && (first.inspectStartup === true || inspectStartup === true) ? true : undefined,
+    repairVideoGaps: first.extension === "webm" && (repairVideoGaps === true || chunks.some(chunk => chunk.repairVideoGaps === true))
+      ? true : undefined,
     startupTrimSeconds: state.mode === RECORDING_MODE.full && typeof startupTrimSeconds === "number"
       && startupTrimSeconds >= STARTUP_TRIM_MIN_SECONDS && startupTrimSeconds <= STARTUP_TRIM_MAX_SECONDS ? startupTrimSeconds : undefined,
     originalStreamStart,
@@ -695,8 +700,8 @@ async function finalizeRecordingFromChunksUnlocked(recordingId: string, endedAt:
   return response.ok ? ok(true) : response;
 }
 
-function finalizeRecordingFromChunks(recordingId: string, endedAt: number, startupTrimSeconds?: number, originalStreamEnd?: number, inspectStartup?: true): Promise<MessageResponse<boolean>> {
-  return runRecordingTerminalOperation(recordingId, () => finalizeRecordingFromChunksUnlocked(recordingId, endedAt, false, startupTrimSeconds, originalStreamEnd, inspectStartup));
+function finalizeRecordingFromChunks(recordingId: string, endedAt: number, metadata?: FinalizationMetadata): Promise<MessageResponse<boolean>> {
+  return runRecordingTerminalOperation(recordingId, () => finalizeRecordingFromChunksUnlocked(recordingId, endedAt, false, metadata));
 }
 
 async function recoverRecording(recordingId: string, endedAt: number): Promise<boolean> {
@@ -911,7 +916,7 @@ chrome.runtime.onMessage.addListener((message: RuntimeMessage, sender, sendRespo
     }
 
     if (message.type === "FINALIZE_RECORDING") {
-      sendResponse(await finalizeRecordingFromChunks(message.recordingId, message.endedAt, message.startupTrimSeconds, message.originalStreamEnd, message.inspectStartup));
+      sendResponse(await finalizeRecordingFromChunks(message.recordingId, message.endedAt, message));
       return;
     }
 

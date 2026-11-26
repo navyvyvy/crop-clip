@@ -246,7 +246,7 @@ for (const [format, label] of [['webm', 'WebM'], ['mp4', 'MP4']]) test(`${label}
   const sourcePath = process.env.CROPCLIP_CONTINUITY_SOURCE;
   const originalEnabled = Boolean(sourcePath) && process.env.CROPCLIP_STARTUP_ORIGINAL === 'on';
   const softwareExpected = Boolean(sourcePath) && process.env.CROPCLIP_SOFTWARE_CAPTURE === '1';
-  const source = sourcePath ? (await fs.readFile(sourcePath)).toString('base64') : await makeContinuitySource(context, worker);
+  const source = sourcePath ? (await fs.readFile(sourcePath)).toString('base64') : await makeContinuitySource(context, worker, 60);
   if (softwareExpected) await observeRecordingStartup(worker);
   if (originalEnabled) await page.evaluate(() => history.pushState({}, '', '/live/continuity-fixture'));
   await page.getByRole('button', { name: 'Native', exact: true }).click();
@@ -311,10 +311,10 @@ for (const [format, label] of [['webm', 'WebM'], ['mp4', 'MP4']]) test(`${label}
   }));
   const clicked = await playbackClock();
   await page.keyboard.press('e');
-  await expect(page.locator('#crop-clip-chzzk-record-button')).toHaveAttribute('data-recording', '');
   const recordingStartedAt = () => worker.evaluate(async () =>
     (await chrome.storage.local.get('recordingState')).recordingState?.startedAt ?? 0);
   await expect.poll(recordingStartedAt, { timeout: 20_000 }).toBeGreaterThan(0);
+  await expect(page.locator('#crop-clip-chzzk-record-button')).toHaveAttribute('data-recording', '');
   const startedAt = await recordingStartedAt();
   if (softwareExpected) {
     expect((await readRecordingStartup(worker, page.url())).starts.map(sample => sample.engine)).toEqual(['software']);
@@ -390,15 +390,15 @@ for (const [format, label] of [['webm', 'WebM'], ['mp4', 'MP4']]) test(`${label}
   expect(audioMaxGap, 'the downloaded sound must stay continuous from start to end').toBeLessThan(0.08);
 });
 
-async function makeContinuitySource(context, worker) {
+async function makeContinuitySource(context, worker, duration = 45) {
   const generator = await context.newPage();
   await generator.goto(`chrome-extension://${new URL(worker.url()).host}/result/result.html`);
-  try { return await generator.evaluate(async () => {
+  try { return await generator.evaluate(async duration => {
     const { loadFfmpeg, releaseFfmpeg } = await import('/result/ffmpeg.js');
     const ffmpeg = await loadFfmpeg(() => {});
     try {
       const code = await ffmpeg.exec(['-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30',
-        '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '45',
+        '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', String(duration),
         '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', '-movflags', '+faststart', 'source.mp4']);
       if (code !== 0) throw new Error('Continuity fixture encoding failed');
       const bytes = await ffmpeg.readFile('source.mp4');
@@ -406,7 +406,7 @@ async function makeContinuitySource(context, worker) {
       for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
       return btoa(binary);
     } finally { await releaseFfmpeg(); }
-  }); } finally { await generator.close(); }
+  }, duration); } finally { await generator.close(); }
 }
 
 async function inspectContinuityDownload(result, bytes, format) {
@@ -417,12 +417,12 @@ async function inspectContinuityDownload(result, bytes, format) {
     try {
       const filename = `recording.${format}`;
       await ffmpeg.writeFile(filename, bytes);
-      await ffmpeg.ffprobe(['-v', 'error', '-select_streams', 'v:0', '-show_packets', '-show_entries',
-        'packet=pts_time', '-of', 'json', '-o', 'packets.json', filename], 4000);
-      const { packets } = JSON.parse(await ffmpeg.readFile('packets.json', 'utf8'));
-      const video = packets.map(packet => Number(packet.pts_time)).sort((a, b) => a - b);
+      const video = [];
       const audio = [];
       ffmpeg.on('log', ({ message }) => {
+        // MP4 edit lists can retain negative-time packets that the player decodes but never displays.
+        const picture = /Parsed_showinfo_.*\bn:\s*\d+.*\bpts_time:\s*([\d.eE+-]+)/.exec(message);
+        if (picture) video.push(Number(picture[1]));
         const frame = /\bpts_time:([\d.eE+-]+).*\brate:(\d+)\s+nb_samples:(\d+)/.exec(message);
         if (!frame) return;
         const start = Number(frame[1]);
@@ -430,7 +430,7 @@ async function inspectContinuityDownload(result, bytes, format) {
       });
       const decodeResult = await ffmpeg.exec(['-v', 'info', '-xerror', '-copyts', '-i', filename, '-map', '0:v:0', '-map', '0:a:0',
         '-af', 'ashowinfo',
-        '-vf', 'freezedetect=n=-60dB:d=0.18,metadata=mode=print:key=lavfi.freezedetect.freeze_start:file=freezes.txt',
+        '-vf', 'showinfo,freezedetect=n=-60dB:d=0.18,metadata=mode=print:key=lavfi.freezedetect.freeze_start:file=freezes.txt',
         '-f', 'null', '-'], 45_000);
       const freezeReport = decodeResult === 0 ? await ffmpeg.readFile('freezes.txt', 'utf8') : '';
       return { video, audio, decodeResult, freezeReport };
@@ -438,19 +438,41 @@ async function inspectContinuityDownload(result, bytes, format) {
   }, { base64: bytes.toString('base64'), format });
 }
 
-test('WebM keeps recording when foreground frame callbacks are delayed', async ({ extension }, testInfo) => {
+for (const blockRenderer of [false, true]) test(blockRenderer
+  ? 'WebM download repairs a dropped interval and preserves the recorded file'
+  : 'WebM keeps recording when foreground frame callbacks are delayed', async ({ extension }, testInfo) => {
+  test.setTimeout(100_000);
   const { context, worker, page } = extension;
   const source = await makeContinuitySource(context, worker);
-  await worker.evaluate(async () => {
+  await worker.evaluate(async blockRenderer => {
     const { settings } = await chrome.storage.local.get('settings');
     await chrome.storage.local.set({ settings: { ...settings, outputFormat: 'webm', enableOriginalStreamRecording: false } });
     const [tab] = await chrome.tabs.query({ url: 'https://chzzk.naver.com/extension-test' });
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => {
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, args: [blockRenderer], func: blockRenderer => {
       let startedAt = Infinity;
       const start = MediaRecorder.prototype.start;
       MediaRecorder.prototype.start = function (...args) {
-        this.addEventListener('start', () => { startedAt = performance.now(); }, { once: true });
+        this.addEventListener('start', () => {
+          startedAt = performance.now();
+          if (blockRenderer) setTimeout(() => {
+            const deadline = performance.now() + 800;
+            while (performance.now() < deadline) { /* Block both capture callbacks and the fallback timer. */ }
+            document.documentElement.dataset.recordingThreadStall = 'true';
+          }, 6700);
+        }, { once: true });
         return start.apply(this, args);
+      };
+      const playbackQuality = HTMLVideoElement.prototype.getVideoPlaybackQuality;
+      let lastReportedFrames = 0;
+      HTMLVideoElement.prototype.getVideoPlaybackQuality = function () {
+        const quality = playbackQuality.call(this);
+        const elapsed = performance.now() - startedAt;
+        if (elapsed >= 5000 && elapsed < 9500) {
+          document.documentElement.dataset.staleRecordingCounter = 'true';
+          return { totalVideoFrames: lastReportedFrames };
+        }
+        lastReportedFrames = quality.totalVideoFrames;
+        return quality;
       };
       const request = HTMLVideoElement.prototype.requestVideoFrameCallback;
       HTMLVideoElement.prototype.requestVideoFrameCallback = function (callback) {
@@ -467,7 +489,7 @@ test('WebM keeps recording when foreground frame callbacks are delayed', async (
         return request.call(this, deliver);
       };
     } });
-  });
+  }, blockRenderer);
   await page.getByRole('button', { name: 'Native', exact: true }).click();
   await page.locator('video').evaluate(async (video, base64) => {
     const bytes = Uint8Array.from(atob(base64), byte => byte.charCodeAt(0));
@@ -481,6 +503,8 @@ test('WebM keeps recording when foreground frame callbacks are delayed', async (
   await page.waitForTimeout(11_000);
   expect(await page.locator('video').evaluate(video => video.currentTime)).toBeGreaterThan(playbackStart + 10);
   expect(Number(await page.locator('html').getAttribute('data-withheld-recording-frames'))).toBeGreaterThan(40);
+  await expect(page.locator('html')).toHaveAttribute('data-stale-recording-counter', 'true');
+  if (blockRenderer) await expect(page.locator('html')).toHaveAttribute('data-recording-thread-stall', 'true');
   const opened = context.waitForEvent('page');
   await page.keyboard.press('e');
   const result = await opened;
@@ -488,7 +512,19 @@ test('WebM keeps recording when foreground frame callbacks are delayed', async (
   const downloaded = result.waitForEvent('download');
   await result.locator('#download-current-button').click();
   const bytes = await fs.readFile(await (await downloaded).path());
-  const { video, decodeResult, freezeReport } = await inspectContinuityDownload(result, bytes, 'webm');
+  const { video, audio, decodeResult, freezeReport } = await inspectContinuityDownload(result, bytes, 'webm');
+  if (blockRenderer) {
+    const saved = await result.evaluate(async () => {
+      const { getPartsByRecordingId } = await import('/shared/idb.js');
+      const [part] = await getPartsByRecordingId(new URLSearchParams(location.search).get('id'));
+      return { originalSize: part.originalBlob?.size, removed: part.removedVideoGapSeconds, size: part.blob.size };
+    });
+    expect(saved.originalSize).toBeGreaterThan(0);
+    expect(saved.removed).toBeGreaterThan(0.7);
+    expect(saved.removed).toBeLessThan(1.1);
+    expect(saved.size).toBe(bytes.length);
+    expect(Math.abs(video.at(-1) - audio.at(-1).end)).toBeLessThan(0.15);
+  }
   const gaps = video.slice(1).map((time, index) => ({ at: video[index] - video[0], gap: time - video[index] }));
   const middleGaps = gaps.filter(({ at }) => at >= 3 && at < 9.5);
   const maxGap = Math.max(...middleGaps.map(({ gap }) => gap));
@@ -782,20 +818,23 @@ test('a recording with audio before its first video frame opens on video', async
   expect(Math.abs(start.video - start.audio)).toBeLessThan(0.04);
 });
 
-for (const [format, lateGap] of [['webm', false], ['webm', true], ['mp4', false]]) test(lateGap
-  ? 'WebM download detects a single startup gap after half a second'
-  : `${format} download inspects opening timestamps even without a capture stall marker`, async ({ extension }) => {
+for (const [format, scenario] of [['webm', 'early'], ['webm', 'late'], ['mp4', 'early'], ['webm', 'continuous']]) test({
+  early: `${format} download inspects opening timestamps even without a capture stall marker`,
+  late: 'WebM download detects a single startup gap after half a second',
+  continuous: 'WebM download preserves a continuous opening despite a capture stall marker',
+}[scenario], async ({ extension }) => {
   const { worker, context } = extension;
   const result = await context.newPage();
   const base = `chrome-extension://${new URL(worker.url()).host}/result/result.html`;
   await result.goto(base);
-  const id = await result.evaluate(async ({ format, lateGap }) => {
+  const id = await result.evaluate(async ({ format, scenario }) => {
     const { loadFfmpeg, readFfmpegBlob, releaseFfmpeg } = await import('/result/ffmpeg.js');
     const { putRecording, putPart } = await import('/shared/idb.js');
     const ffmpeg = await loadFfmpeg(() => {});
-    const filename = `startup.${format}`;
-    const openingDuration = lateGap ? 0.7 : format === 'webm' ? 0.16 : 1;
-    const keepFrames = lateGap ? 'not(between(n,18,20))'
+    const filename = `startup_20261126_123456.${format}`;
+    const continuous = scenario === 'continuous';
+    const openingDuration = continuous ? 1.4 : scenario === 'late' ? 0.7 : format === 'webm' ? 0.16 : 1;
+    const keepFrames = continuous ? '1' : scenario === 'late' ? 'not(between(n,18,20))'
       : format === 'webm' ? 'not(between(n,1,2)+eq(n,4))' : 'if(lt(t,1),not(mod(n,3)),1)';
     let blob;
     try {
@@ -812,10 +851,11 @@ for (const [format, lateGap] of [['webm', false], ['webm', true], ['mp4', false]
     const id = crypto.randomUUID(), createdAt = Date.now();
     await putRecording({ id, createdAt, endedAt: createdAt + openingDuration * 1000 + 1300, totalSize: blob.size, actualExtension: format });
     await putPart({ id: `${id}:part:001`, recordingId: id, index: 1, filename, extension: format,
-      mimeType: blob.type, size: blob.size, blob, createdAt, videoBitsPerSecond: 8_500_000, inspectStartup: true, seekMetadataVersion: 1 });
+      mimeType: blob.type, size: blob.size, blob, createdAt, videoBitsPerSecond: 8_500_000, inspectStartup: true,
+      startupTrimSeconds: continuous ? 1.4 : undefined, seekMetadataVersion: 1 });
     return id;
-  }, { format, lateGap });
-  if (format === 'webm') {
+  }, { format, scenario });
+  if (format === 'webm' && scenario !== 'continuous') {
     await context.addInitScript(() => {
       const post = Worker.prototype.postMessage;
       Worker.prototype.postMessage = function (message, ...args) {
@@ -832,6 +872,14 @@ for (const [format, lateGap] of [['webm', false], ['webm', true], ['mp4', false]
   }
   await result.goto(`${base}?id=${id}`);
   await expect(result.locator('#result-loading')).toBeHidden({ timeout: 30000 });
+  if (scenario === 'continuous') {
+    await expect(result.locator('#split-status')).toBeEmpty();
+    await expect.poll(() => result.locator('#preview-video').evaluate(video => video.duration)).toBeCloseTo(2.7, 1);
+    const download = result.waitForEvent('download');
+    await result.locator('#download-current-button').click();
+    expect((await download).suggestedFilename()).toMatch(/_3s\.webm$/);
+    return;
+  }
   if (format === 'webm') {
     expect(await result.evaluate(() => window.testStartupTrimEncoding)).toEqual({ bitrate: '8500000', preset: 'veryfast' });
   }
@@ -933,7 +981,7 @@ for (const format of ['webm', 'mp4']) test(`full H.264 ${format} recordings excl
     window.startupInspections = 0;
     const post = Worker.prototype.postMessage;
     Worker.prototype.postMessage = function (message, ...args) {
-      if (message.type === 'FFPROBE') window.startupInspections++;
+      if (message.type === 'FFPROBE' && message.data?.args?.includes('output-startup-probe.json')) window.startupInspections++;
       return post.call(this, message, ...args);
     };
   });

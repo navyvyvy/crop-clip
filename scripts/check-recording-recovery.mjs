@@ -88,7 +88,7 @@ test('only a valid full-recording startup marker reaches the saved file', async 
     const f = fixture();
     f.state = { ...f.state, mode };
     f.chunks[0].inspectStartup = true;
-    assert.equal((await f.api.finalizeRecordingFromChunks('clip', 2000, marker)).ok, true);
+    assert.equal((await f.api.finalizeRecordingFromChunks('clip', 2000, { startupTrimSeconds: marker })).ok, true);
     assert.equal(f.parts[0].startupTrimSeconds, expected);
     assert.equal(f.parts[0].inspectStartup, mode === 'full' ? true : undefined);
     assert.equal(await f.parts[0].blob.text(), 'savedsaved');
@@ -100,7 +100,7 @@ test('startup inspection detected after the first checkpoint reaches the saved s
     const f = fixture();
     f.state = { ...f.state, mode };
     assert.equal(f.chunks[0].inspectStartup, undefined);
-    assert.equal((await f.api.finalizeRecordingFromChunks('clip', 2000, undefined, undefined, true)).ok, true);
+    assert.equal((await f.api.finalizeRecordingFromChunks('clip', 2000, { inspectStartup: true })).ok, true);
     assert.equal(f.parts[0].inspectStartup, mode === 'full' ? true : undefined);
   }
 });

@@ -7,7 +7,7 @@ import { computeDirectLayout, scaleLayout, type DirectCrop, type DirectCropPlace
 import type { PlayerRecordingState } from "./player_state.js";
 import { getRegionLimit } from "../shared/normalize.js";
 import { MAX_ORIGINAL_STREAM_SECONDS, MILLISECONDS_PER_SECOND, SECONDS_PER_MINUTE } from "../shared/time_range.js";
-import { HEVC_MP4_MIME_TYPES, RECORDING_FORMAT, RECORDING_MIME_CANDIDATES, STANDARD_RECORDING_FRAME_RATE, HIGH_RECORDING_FRAME_RATE, STARTUP_SHORT_STALL_SECONDS, STARTUP_SHORT_STALL_WINDOW_SECONDS, STARTUP_STALL_WINDOW_SECONDS, STARTUP_TRIM_MIN_SECONDS, STARTUP_TRIM_MAX_SECONDS, type RegionSelection, type Settings } from "../shared/types.js";
+import { HEVC_MP4_MIME_TYPES, RECORDING_FORMAT, RECORDING_MIME_CANDIDATES, STANDARD_RECORDING_FRAME_RATE, HIGH_RECORDING_FRAME_RATE, STARTUP_SHORT_STALL_SECONDS, STARTUP_SHORT_STALL_WINDOW_SECONDS, STARTUP_STALL_WINDOW_SECONDS, STARTUP_TRIM_MIN_SECONDS, STARTUP_TRIM_MAX_SECONDS, WEBM_REPAIR_MIN_GAP_SECONDS, WEBM_REPAIR_MIN_OPENING_SECONDS, type RegionSelection, type Settings } from "../shared/types.js";
 import type { ContentCommand, MessageResponse, RuntimeMessage } from "../shared/messages.js";
 
 const CHUNK_INDEX_DIGITS = 6;
@@ -195,6 +195,7 @@ export function createRecordingController({
                 : undefined,
               videoBitsPerSecond: firstScreenChunk ? session.settings.videoBitsPerSecond : undefined,
               inspectStartup: firstChunk ? session.inspectStartup : undefined,
+              repairVideoGaps: session.repairVideoGaps,
               originalStreamStart: firstChunk ? session.originalStreamStart : undefined,
               originalStreamFallback: firstChunk ? session.originalStreamFallback : undefined,
               dataUrl,
@@ -236,6 +237,7 @@ export function createRecordingController({
       endedAt: session.endedAt ?? Date.now(),
       startupTrimSeconds: session.startupTrimSeconds,
       inspectStartup: session.inspectStartup,
+      repairVideoGaps: session.repairVideoGaps,
       originalStreamEnd: session.originalStreamEnd,
     }, AbortSignal.any([session.checkpointAbort.signal, AbortSignal.timeout(FINALIZE_REPLY_TIMEOUT_MS)]));
     if (!response.ok) {
@@ -651,9 +653,9 @@ export function createRecordingController({
         context.drawImage(video, placement.crop.x, placement.crop.y, placement.crop.width, placement.crop.height, placement.dx, placement.dy, placement.dw, placement.dh);
       }
     };
-    const paintPlacements = (placements: DirectCropPlacement[]) => {
+    const paintPlacements = (placements: DirectCropPlacement[], frameReported = true) => {
       if (frameCapture) {
-        return frameCapture.paint(placements[0], () => { paintCanvas(placements); return canvas; });
+        return frameCapture.paint(placements[0], () => { paintCanvas(placements); return canvas; }, frameReported);
       }
       canvasTrack?.requestFrame();
       paintCanvas(placements);
@@ -712,8 +714,9 @@ export function createRecordingController({
       if (startupStartedAt !== undefined && (video.paused || video.seeking)) startupStartedAt = undefined;
       if (video.paused || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return false;
       const frame = video.getVideoPlaybackQuality?.().totalVideoFrames;
-      // The quality counter can lag behind frames already delivered by the video callback.
-      if (!fromVideoCallback && frame !== undefined && frame === lastPaintedFrame) return false;
+      const frameReported = fromVideoCallback || frame === undefined || frame !== lastPaintedFrame;
+      // Native capture can check the actual frame when the display counter lags.
+      if (!frameCapture && !frameReported) return false;
       if (!layoutDependsOnlyOnVideoSize || layoutVideoWidth !== video.videoWidth || layoutVideoHeight !== video.videoHeight) {
         layoutVideoWidth = video.videoWidth;
         layoutVideoHeight = video.videoHeight;
@@ -731,7 +734,7 @@ export function createRecordingController({
         }
       }
       try {
-        if (!paintPlacements(session.placements)) return false;
+        if (!paintPlacements(session.placements, frameReported)) return false;
       } catch (error) {
         failDirectRecordingSession(session, error instanceof Error ? error : new Error("녹화 프레임을 준비하지 못했습니다."));
         return false;
@@ -742,6 +745,7 @@ export function createRecordingController({
         const elapsedSeconds = (now - startupStartedAt) / MILLISECONDS_PER_SECOND;
         const gapMs = now - lastStartupFrameAt;
         if (elapsedSeconds <= STARTUP_TRIM_MAX_SECONDS && gapMs >= STARTUP_FRAME_GAP_MS && video.currentTime >= lastStartupMediaTime) {
+          session.inspectStartup = true;
           session.startupTrimSeconds = Math.max(STARTUP_TRIM_MIN_SECONDS, elapsedSeconds);
         } else if (elapsedSeconds <= STARTUP_SHORT_STALL_WINDOW_SECONDS && gapMs >= STARTUP_SHORT_STALL_SECONDS * MILLISECONDS_PER_SECOND) {
           session.inspectStartup = true;
@@ -773,11 +777,19 @@ export function createRecordingController({
     try {
       if (stabilizeStartup) startupStartedAt = lastStartupFrameAt = performance.now();
       const useVideoCallbacks = typeof video.requestVideoFrameCallback === "function";
-      let lastVideoCallbackAt = performance.now();
+      const drawingStartedAt = performance.now();
+      let lastVideoCallbackAt = drawingStartedAt;
       let lastPaintAt = lastVideoCallbackAt;
       let nextDrawAt: number | undefined;
       let previousMediaTime = -Infinity;
       let previousPlaybackRate = 0;
+      const recordFrame = (now: number) => {
+        if (session.extension === RECORDING_FORMAT.webm && now - lastPaintAt >= WEBM_REPAIR_MIN_GAP_SECONDS * MILLISECONDS_PER_SECOND
+          && lastPaintAt - drawingStartedAt >= WEBM_REPAIR_MIN_OPENING_SECONDS * MILLISECONDS_PER_SECOND) {
+          session.repairVideoGaps = true;
+        }
+        lastPaintAt = now;
+      };
       const drawOnVideoFrame: VideoFrameRequestCallback = (now, { mediaTime }) => {
         session.drawFrameCallbackId = undefined;
         lastVideoCallbackAt = now;
@@ -790,7 +802,7 @@ export function createRecordingController({
           const frameTime = mediaTime * MILLISECONDS_PER_SECOND / playbackRate;
           const next = getNextRecordingFrameDeadline(frameTime, nextDrawAt ?? frameTime, frameInterval);
           if (next !== undefined && drawFrame(true)) {
-            lastPaintAt = now;
+            recordFrame(now);
             nextDrawAt = next;
           }
         }
@@ -802,7 +814,7 @@ export function createRecordingController({
         const withoutPresentation = !useVideoCallbacks || document.hidden;
         if (now - lastPaintAt < frameInterval / 2) return;
         if ((withoutPresentation || now - lastVideoCallbackAt >= frameInterval) && drawFrame()) {
-          lastPaintAt = now;
+          recordFrame(now);
         }
       }, Math.round(frameInterval));
       await startDirectPart(session, mime.hevc, originalProbe ? () => tryOriginalRecording(command, video, session, originalProbe) : undefined, preferSoftware);

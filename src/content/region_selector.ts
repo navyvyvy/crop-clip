@@ -5,6 +5,7 @@ import { getPlayerRecordingState, type PlayerRecordingState } from "./player_sta
 import { canvasToBlob } from "../shared/canvas.js";
 import type { ContentCommand, MessageResponse, RecordingControlMessage, RuntimeMessage } from "../shared/messages.js";
 import { getRegionLimit, normalizeRecordingState, normalizeRegion, normalizeRegions, normalizeSettings } from "../shared/normalize.js";
+import { getShortcutKey, isEditableShortcutTarget } from "../shared/shortcuts.js";
 import { loadAppState } from "../shared/storage.js";
 import { formatRecordingTimer, MILLISECONDS_PER_SECOND } from "../shared/time_range.js";
 import { RECORDING_STATUS, RECORDING_MODE, DEFAULT_MULTI_REGION_COUNT, DEFAULT_SEEK_SECONDS, DEFAULT_SETTINGS, DEFAULT_SHORTCUT_KEYS as DEFAULT_CONTENT_SHORTCUT_KEYS, type AppState, type RegionSelection, type Settings, type ShortcutAction, type ShortcutKeys } from "../shared/types.js";
@@ -2362,13 +2363,6 @@ function activateRegionAtPoint(x: number, y: number): void {
   }
 }
 
-function isEditableShortcutTarget(target: EventTarget | null): boolean {
-  return target instanceof HTMLInputElement
-    || target instanceof HTMLTextAreaElement
-    || target instanceof HTMLSelectElement
-    || (target instanceof HTMLElement && target.isContentEditable);
-}
-
 function handleShortcut(event: KeyboardEvent): void {
   if (isChzzkClipEditorPage()) {
     return;
@@ -2388,9 +2382,7 @@ function handleShortcut(event: KeyboardEvent): void {
     return;
   }
 
-  const key = /^[a-z0-9]$/i.test(event.key) || !/^(Key[A-Z]|Digit[0-9])$/.test(event.code)
-    ? event.key.toLowerCase()
-    : event.code.slice(-1).toLowerCase();
+  const key = getShortcutKey(event);
   if (multiRegionEnabled && /^[1-4]$/.test(key) && !Object.values(shortcutKeys).includes(key)) {
     const nextIndex = Number(key) - 1;
     if (nextIndex < getActiveRegionLimit() && currentRegions[nextIndex]) {

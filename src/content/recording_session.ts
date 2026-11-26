@@ -18,6 +18,7 @@ export interface DirectRecordingSession {
   mimeType: string;
   stabilizeStartup?: boolean;
   inspectStartup?: true;
+  repairVideoGaps?: true;
   startupTrimSeconds?: number;
   originalStreamStart?: number;
   originalStreamEnd?: number;

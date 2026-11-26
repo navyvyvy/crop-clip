@@ -304,6 +304,7 @@ let paints = 0;
 let cropChecks = 0;
 const draw = new Function("video", "paintPlacements", "computeDirectCropFromSelection", `
   let lastPaintedFrame = -1, cropLayoutKey = 'fixed';
+  const frameCapture = null;
   let layoutVideoWidth = video.videoWidth, layoutVideoHeight = video.videoHeight;
   const layoutDependsOnlyOnVideoSize = true;
   let startupStartedAt;
@@ -338,6 +339,7 @@ const checkStartupGap = new Function("video", "clock", "STARTUP_SHORT_STALL_WIND
   const layoutDependsOnlyOnVideoSize = true;
   let layoutVideoWidth = video.videoWidth, layoutVideoHeight = video.videoHeight;
   let startupStartedAt = 0, lastStartupFrameAt = 0, lastStartupMediaTime = 0;
+  const frameCapture = null;
   const STARTUP_FRAME_GAP_MS = 150, STARTUP_TRIM_MIN_SECONDS = 0.15, STARTUP_STALL_WINDOW_SECONDS = 2.5, STARTUP_TRIM_MAX_SECONDS = 5;
   const STARTUP_SHORT_STALL_SECONDS = 0.09;
   const MILLISECONDS_PER_SECOND = 1000, performance = { now: () => clock.now };
@@ -368,6 +370,7 @@ for (const gap of [33, 350]) {
   source.currentTime = end / 1000;
   draw();
   assert.equal(session.startupTrimSeconds, gap === 33 ? undefined : end / 1000, "a stall crossing the startup deadline should be trimmed through recovery");
+  assert.equal(session.inspectStartup, gap === 33 ? undefined : true, "confirm a long startup gap against the saved frames");
 }
 for (const [beforeGap, expectedInspection] of [[33, true], [495, true], [957, undefined]]) {
   const clock = { now: 0 };
@@ -472,7 +475,9 @@ const createStartup = new Function("getRegionLimit", "getNextRecordingFrameDeadl
   const watchDirectRecordingSource = () => {}, renderRecordingState = () => {};
   const loadState = async () => ({ recordingState: {} });
   const HIGH_RECORDING_FRAME_RATE = 60, STANDARD_RECORDING_FRAME_RATE = 30, MILLISECONDS_PER_SECOND = 1000;
-  const RECORDING_FORMAT = { mp4: "mp4" };
+  const RECORDING_FORMAT = { mp4: "mp4", webm: "webm" };
+  const WEBM_REPAIR_MIN_GAP_SECONDS = 0.18;
+  const WEBM_REPAIR_MIN_OPENING_SECONDS = 0.75;
   const HTMLMediaElement = { HAVE_CURRENT_DATA: 2 };
   ${ts.transpile(startupFunctions.join("\n"), { target: ts.ScriptTarget.ES2022 })}
   return { start: startDirectRecording, refs, timers,

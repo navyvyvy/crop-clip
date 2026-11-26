@@ -371,17 +371,44 @@ test('MP4 recording, splitting, speed, GIF and frame exports work', async ({ ext
   const { context, worker, page } = extension;
   await prepareVideo(page);
   await worker.evaluate(() => chrome.storage.local.set({ settings: {
-    enableShortcuts: true, enableFullRecordButton: true, outputFormat: 'mp4',
+    enableShortcuts: true, enableFullRecordButton: true, outputFormat: 'mp4', shortcutKeys: { fullRecord: 'm' },
   } }));
-  await page.keyboard.press('e');
+  await page.keyboard.press('m');
   await expect.poll(() => worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState?.status)).toBe('recording');
   await page.waitForTimeout(8000); // Leave enough media after startup trimming and keyframe alignment.
   const opened = context.waitForEvent('page');
-  await page.keyboard.press('e');
+  await page.keyboard.press('m');
   const result = await opened;
   await expect(result.locator('#split-button')).toBeEnabled({ timeout: 30_000 });
-  await expect.poll(() => result.locator('#preview-video').evaluate(video => video.readyState >= 2 && video.duration > 3)).toBe(true);
-  const sourceDuration = await result.locator('#preview-video').evaluate(video => video.duration);
+  const preview = result.locator('#preview-video');
+  await expect.poll(() => preview.evaluate(video => video.readyState >= 2 && video.duration > 3)).toBe(true);
+  const sourceDuration = await preview.evaluate(video => video.duration);
+  await expect(preview).toHaveJSProperty('muted', true);
+  await result.keyboard.press('m');
+  await expect(preview).toHaveJSProperty('muted', false);
+  await preview.focus();
+  await result.keyboard.press('Shift+m');
+  await expect(preview).toHaveJSProperty('muted', true);
+  await preview.dispatchEvent('keydown', { key: 'ㅡ', code: 'KeyM', bubbles: true });
+  await expect(preview).toHaveJSProperty('muted', false);
+  await preview.dispatchEvent('keydown', { key: 'Process', code: 'KeyM', isComposing: true, bubbles: true });
+  await expect(preview).toHaveJSProperty('muted', true);
+  await result.keyboard.press('Control+m');
+  await preview.dispatchEvent('keydown', { key: 'm', code: 'KeyM', repeat: true, bubbles: true });
+  await expect(preview).toHaveJSProperty('muted', true);
+  await expect(preview).toBeFocused();
+  await result.keyboard.press('Space');
+  await expect(preview).toHaveJSProperty('paused', false);
+  await result.keyboard.press('Space');
+  await expect(preview).toHaveJSProperty('paused', true);
+  await expect(preview).toHaveJSProperty('muted', true);
+  const splitValue = result.getByRole('spinbutton', { name: '나누기 값' });
+  await splitValue.focus();
+  await result.keyboard.press('m');
+  await splitValue.dispatchEvent('keydown', { key: 'ㅡ', code: 'KeyM', isComposing: true, bubbles: true });
+  await expect(splitValue).toBeFocused();
+  await expect(preview).toHaveJSProperty('muted', true);
+  expect(await worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState?.status)).toBe('idle');
   await expect(result.locator('#trim-thumbnails')).not.toHaveAttribute('data-loading');
   const retainedUrls = await result.evaluate(() => window.testObjectUrls.size);
   await interceptDownloads(result);

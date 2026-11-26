@@ -104,6 +104,7 @@ export interface RecordingPartRecord {
   extension: RecordingFormat;
   size: number;
   blob?: Blob;
+  originalBlob?: Blob;
   dataUrl?: string;
   objectUrl?: string;
   seekMetadataVersion?: number;
@@ -111,6 +112,8 @@ export interface RecordingPartRecord {
   videoBitsPerSecond?: number;
   startupTrimSeconds?: number;
   inspectStartup?: true;
+  repairVideoGaps?: true;
+  removedVideoGapSeconds?: number;
   originalStreamStart?: number;
   originalStreamEnd?: number;
   captureMethod?: "original" | "screen";
@@ -130,6 +133,7 @@ export interface RecordingChunkRecord {
   frameRate?: number;
   videoBitsPerSecond?: number;
   inspectStartup?: true;
+  repairVideoGaps?: true;
   originalStreamStart?: number;
   originalStreamFallback?: true;
   blob: Blob;
@@ -153,6 +157,8 @@ export const STARTUP_SHORT_STALL_SECONDS = 0.09;
 export const STARTUP_SHORT_STALL_WINDOW_SECONDS = 1;
 export const STARTUP_STALL_WINDOW_SECONDS = 2.5;
 export const STARTUP_TRIM_MAX_SECONDS = 5;
+export const WEBM_REPAIR_MIN_GAP_SECONDS = 0.18;
+export const WEBM_REPAIR_MIN_OPENING_SECONDS = 0.75;
 export const MIN_MULTI_REGION_COUNT = 2;
 export const MAX_MULTI_REGION_COUNT = 4;
 export const DEFAULT_MULTI_REGION_COUNT = 2;

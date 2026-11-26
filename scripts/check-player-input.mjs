@@ -1,5 +1,6 @@
 import { loadAppState } from "../dist/shared/storage.js";
 import { getPlayerRecordingState } from "../dist/content/player_state.js";
+import { getShortcutKey } from "../dist/shared/shortcuts.js";
 import { formatRecordingTimer } from "../dist/shared/time_range.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -115,7 +116,7 @@ assert.equal(freshState.recordingState.status, 'recording');
 delete globalThis.chrome;
 
 const actions = [];
-const makeShortcutHandler = new Function("actions", "multiRegionEnabled = false", "recordKey = 'r'", `
+const makeShortcutHandler = new Function("actions", "getShortcutKey", "multiRegionEnabled = false", "recordKey = 'r'", `
   const isChzzkClipEditorPage = () => false, isEditableShortcutTarget = target => target === 'input';
   const seekEnabled = false, shortcutsEnabled = true, fullRecordButtonEnabled = true, fullScreenshotButtonEnabled = true;
   const shortcutKeys = { regionRecord: recordKey, fullRecord: 'e', cancelRecording: 'c', fullScreenshot: 'd' };
@@ -126,7 +127,7 @@ const makeShortcutHandler = new Function("actions", "multiRegionEnabled = false"
   ${compile('handleShortcut')}
   return handleShortcut;
 `);
-const handleShortcut = makeShortcutHandler(actions);
+const handleShortcut = makeShortcutHandler(actions, getShortcutKey);
 for (const [key, code, action] of [['r','KeyR','region'], ['ㄱ','KeyR','region'], ['Process','KeyE','full'], ['ㅊ','KeyC','cancel'], ['ㅇ','KeyD','screenshot']]) {
   actions.length = 0;
   const event = { key, code, preventDefault() {} };
@@ -140,10 +141,10 @@ for (const [key, code, action] of [['r','KeyR','region'], ['ㄱ','KeyR','region'
 }
 
 actions.length = 0;
-makeShortcutHandler(actions, true, '1')({ key: '1', code: 'Digit1', preventDefault() {} });
+makeShortcutHandler(actions, getShortcutKey, true, '1')({ key: '1', code: 'Digit1', preventDefault() {} });
 assert.deepEqual(actions, ['region'], 'a configured recording shortcut must take priority over implicit region selection');
 actions.length = 0;
-makeShortcutHandler(actions, true)({ key: '2', code: 'Digit2', preventDefault() {} });
+makeShortcutHandler(actions, getShortcutKey, true)({ key: '2', code: 'Digit2', preventDefault() {} });
 assert.deepEqual(actions, [1], 'unassigned number keys must still select a region');
 
 let captures = 0, now = 1000;

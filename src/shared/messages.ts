@@ -61,6 +61,7 @@ export type FinalizeRecordingMessage = {
   endedAt: number;
   startupTrimSeconds?: number;
   inspectStartup?: true;
+  repairVideoGaps?: true;
   originalStreamEnd?: number;
 };
 

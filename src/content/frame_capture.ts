@@ -26,38 +26,44 @@ export function createVideoFrameCapture(video: HTMLVideoElement, width: number, 
   let source: HTMLVideoElement | null = video;
   let closed = false;
   let pendingFrame: VideoFrame | null = null;
+  let lastSourceTimestamp: number | undefined;
   let writing = false;
   return {
     stream: new MediaStream([track]),
-    paint(placement: DirectCropPlacement, fallback: () => HTMLCanvasElement): boolean {
+    paint(placement: DirectCropPlacement, fallback: () => HTMLCanvasElement, frameReported = true): boolean {
       if (closed || writing || !source) return false;
       const timestamp = Math.round(performance.now() * 1000);
       let frame: VideoFrame | undefined;
-      if (placement.dx === 0 && placement.dy === 0 && placement.dw === width && placement.dh === height) {
+      let sourceTimestamp: number | undefined;
+      try {
+        const original = new VideoFrame(source);
         try {
-          const original = new VideoFrame(source, { timestamp });
-          try {
+          sourceTimestamp = original.timestamp;
+          if (!frameReported && sourceTimestamp === lastSourceTimestamp) return false;
+          if (placement.dx === 0 && placement.dy === 0 && placement.dw === width && placement.dh === height) {
             const rect = original.visibleRect;
             const unchanged = rect?.x === placement.crop.x && rect.y === placement.crop.y
               && rect.width === placement.crop.width && rect.height === placement.crop.height
               && original.displayWidth === width && original.displayHeight === height;
             // Cropped native frames can crash Chromium's Linux MP4 encoder.
-            if (unchanged) frame = original;
-            else if (allowDirectCrop) frame = new VideoFrame(original, { visibleRect: placement.crop, displayWidth: width, displayHeight: height });
-          } finally {
-            if (frame !== original) original.close();
+            if (unchanged) frame = new VideoFrame(original, { timestamp });
+            else if (allowDirectCrop) frame = new VideoFrame(original, { timestamp, visibleRect: placement.crop, displayWidth: width, displayHeight: height });
           }
-          const rect = frame?.visibleRect;
-          if (frame && (!rect || rect.x !== placement.crop.x || rect.y !== placement.crop.y || rect.width !== placement.crop.width || rect.height !== placement.crop.height)) {
-            frame.close();
-            frame = undefined;
-          }
-        } catch {
+        } finally {
+          original.close();
+        }
+        const rect = frame?.visibleRect;
+        if (frame && (!rect || rect.x !== placement.crop.x || rect.y !== placement.crop.y || rect.width !== placement.crop.width || rect.height !== placement.crop.height)) {
           frame?.close();
           frame = undefined;
         }
+      } catch {
+        frame?.close();
+        frame = undefined;
       }
+      if (!frameReported && sourceTimestamp === undefined) return false;
       const outputFrame = frame ?? new VideoFrame(fallback(), { timestamp });
+      lastSourceTimestamp = sourceTimestamp;
       pendingFrame = outputFrame;
       writing = true;
       void writer.write(outputFrame).catch((error: unknown) => {
