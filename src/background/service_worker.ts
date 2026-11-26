@@ -623,7 +623,7 @@ function storeRecordingChunk(message: StoreRecordingChunkMessage): Promise<Messa
     });
 }
 
-async function finalizeRecordingFromChunksUnlocked(recordingId: string, endedAt: number, recoverPartial = false, startupTrimSeconds?: number, originalStreamEnd?: number): Promise<MessageResponse<boolean>> {
+async function finalizeRecordingFromChunksUnlocked(recordingId: string, endedAt: number, recoverPartial = false, startupTrimSeconds?: number, originalStreamEnd?: number, inspectStartup?: true): Promise<MessageResponse<boolean>> {
   const state = await loadRecordingState();
   if ((state.status !== RECORDING_STATUS.recording && !(recoverPartial && state.status === RECORDING_STATUS.error)) || state.recordingId !== recordingId) {
     return ok(false);
@@ -674,7 +674,8 @@ async function finalizeRecordingFromChunksUnlocked(recordingId: string, endedAt:
     createdAt: actualEndedAt,
     frameRate: first.frameRate,
     videoBitsPerSecond: originalStreamStart === undefined ? first.videoBitsPerSecond : undefined,
-    inspectStartup: state.mode === RECORDING_MODE.full && originalStreamStart === undefined && first.inspectStartup === true ? true : undefined,
+    inspectStartup: state.mode === RECORDING_MODE.full && originalStreamStart === undefined
+      && (first.inspectStartup === true || inspectStartup === true) ? true : undefined,
     startupTrimSeconds: state.mode === RECORDING_MODE.full && typeof startupTrimSeconds === "number"
       && startupTrimSeconds >= STARTUP_TRIM_MIN_SECONDS && startupTrimSeconds <= STARTUP_TRIM_MAX_SECONDS ? startupTrimSeconds : undefined,
     originalStreamStart,
@@ -694,8 +695,8 @@ async function finalizeRecordingFromChunksUnlocked(recordingId: string, endedAt:
   return response.ok ? ok(true) : response;
 }
 
-function finalizeRecordingFromChunks(recordingId: string, endedAt: number, startupTrimSeconds?: number, originalStreamEnd?: number): Promise<MessageResponse<boolean>> {
-  return runRecordingTerminalOperation(recordingId, () => finalizeRecordingFromChunksUnlocked(recordingId, endedAt, false, startupTrimSeconds, originalStreamEnd));
+function finalizeRecordingFromChunks(recordingId: string, endedAt: number, startupTrimSeconds?: number, originalStreamEnd?: number, inspectStartup?: true): Promise<MessageResponse<boolean>> {
+  return runRecordingTerminalOperation(recordingId, () => finalizeRecordingFromChunksUnlocked(recordingId, endedAt, false, startupTrimSeconds, originalStreamEnd, inspectStartup));
 }
 
 async function recoverRecording(recordingId: string, endedAt: number): Promise<boolean> {
@@ -862,7 +863,7 @@ chrome.runtime.onMessage.addListener((message: RuntimeMessage, sender, sendRespo
       const [{ result }] = await chrome.scripting.executeScript({
         target: { tabId: sourceTab.id },
         world: "MAIN",
-        args: [message.src, ORIGINAL_STREAM_PREFIXES],
+        args: [message.src, ORIGINAL_STREAM_PREFIXES, message.bufferedOnly === true],
         func: probeOriginalStream,
       });
       sendResponse(result ?? fail("방송 재생 정보를 읽지 못했습니다."));
@@ -910,7 +911,7 @@ chrome.runtime.onMessage.addListener((message: RuntimeMessage, sender, sendRespo
     }
 
     if (message.type === "FINALIZE_RECORDING") {
-      sendResponse(await finalizeRecordingFromChunks(message.recordingId, message.endedAt, message.startupTrimSeconds, message.originalStreamEnd));
+      sendResponse(await finalizeRecordingFromChunks(message.recordingId, message.endedAt, message.startupTrimSeconds, message.originalStreamEnd, message.inspectStartup));
       return;
     }
 

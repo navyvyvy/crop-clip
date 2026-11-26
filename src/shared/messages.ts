@@ -41,7 +41,7 @@ export type ContentCommand =
   | { type: "CANCEL_DIRECT_RECORDING"; recordingId?: string };
 export type DeletionScheduleRequest = { type: "SCHEDULE_RECORDING_DELETION"; recordingId: string };
 export type AutoDownloadHandledMessage = { type: "AUTO_DOWNLOAD_HANDLED"; recordingId: string };
-export type StreamOffsetRequest = { type: "READ_STREAM_OFFSET"; src: string };
+export type StreamOffsetRequest = { type: "READ_STREAM_OFFSET"; src: string; bufferedOnly?: true };
 export type RecordingStartedMessage = { type: "RECORDING_STARTED"; recordingId: string; startedAt: number };
 
 export type RecordingErrorMessage = {
@@ -60,6 +60,7 @@ export type FinalizeRecordingMessage = {
   recordingId: string;
   endedAt: number;
   startupTrimSeconds?: number;
+  inspectStartup?: true;
   originalStreamEnd?: number;
 };
 

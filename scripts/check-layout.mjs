@@ -95,7 +95,7 @@ assert.match(resultText, /function waitForDownloadCompletion\(/);
 assert.match(resultText, /await downloadSourcesAndConfirm\([\s\S]*?await markAutoDownloadHandled\(\);\s*allowRecordingDeletion = true;\s*if \(!showResult\) \{[\s\S]*?if \(latestSettings\?\.autoFocusResult === false\) \{\s*window\.close\(\)/);
 assert.match(resultText, /let restoreSourceTabOnClose = showResult/);
 assert.match(resultText, /function restoreSourceTab\(\): void \{\s*if \(!restoreSourceTabOnClose \|\| !resultTab\?\.active\) \{\s*return;/);
-assert.match(resultText, /if \(autoDownloadRecording && parts\.length === 0\) \{\s*throw new Error/);
+assert.match(resultText, /if \(autoDownloadRecording && parts\.length === 0\) \{\s*throw new ResultError/);
 assert.match(resultText, /async function revealAutoDownloadFailure\(\): Promise<void>/);
 assert.match(resultText, /restoreSourceTabOnClose = true/);
 assert.match(resultText, /await markAutoDownloadHandled\(\);\s*allowRecordingDeletion = true;\s*startDeletionKeepalive\(\)/);

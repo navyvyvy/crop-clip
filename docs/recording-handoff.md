@@ -26,6 +26,10 @@ Edge에서 저장 실패와 결과창 종료를 재현하는 검사는 `npx play
 
 `npx playwright test tests/browser/recording-startup.spec.mjs`는 실제 저장 파일과 짧은 녹화 보존을 검사한다. 방송 재생 프레임 간격도 측정하려면 녹화 프로파일로 1080p 샘플을 만든 뒤 `CROPCLIP_STARTUP_REPORT`에 JSON 저장 경로를 지정한다. 같은 소스에서 브라우저 실행을 나누고 `CROPCLIP_STARTUP_CAPTURE`에 `canvas` 또는 `vp8`을 지정하면 캡처 경로와 코덱을 각각 비교한다. 실제 MIME 형식, 첫 데이터 조각이 도착한 시각, 최대 프레임 간격이 끝난 시각을 함께 기록한다. 첫 조각을 받지 못한 실행은 통과로 보지 않는다.
 
+`CROPCLIP_STARTUP_FORMAT`에 `webm` 또는 `mp4`를 지정한다. `CROPCLIP_STARTUP_ORIGINAL=on`은 원본 주소를 찾는 동안 화면 녹화로 전환하는 경로를, `off`는 일반 녹화를 검사한다. 보고서에는 화면에 표시된 최대 프레임 간격과 그 구간의 영상 타임스탬프 간격이 함께 기록된다. 첫 시작의 화면 프레임 간격이 100ms 이상이면 이 진단은 실패한다.
+
+1080p·30fps H.264 전체 녹화의 워커 인코딩 시험은 `CROPCLIP_SOFTWARE_CAPTURE=1`로 빌드한다. 시험 확장은 `dist-software`에 생성된다. 진단 실행 시 `CROPCLIP_TEST_EXTENSION_DIR=dist-software`와 동일한 `CROPCLIP_SOFTWARE_CAPTURE` 값을 지정하면 실제로 워커 경로를 실행했는지도 확인한다. 지원하지 않는 입력과 준비 중 오류에는 기본 녹화기를 사용한다.
+
 일반 녹화 반복 측정은 기존 프로파일을 사용한다.
 
 ```powershell

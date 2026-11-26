@@ -1,7 +1,7 @@
 {
   "name": "crop-clip",
   "private": true,
-  "version": "0.4.1",
+  "version": "0.4.2",
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@ffmpeg/core": "^0.12.10",
-    "@ffmpeg/ffmpeg": "^0.12.15"
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "mediabunny": "1.63.0"
   }
 }

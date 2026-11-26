@@ -261,9 +261,15 @@ test('recording timers wait for capture and keep size visible after original fal
     chrome.scripting.executeScript = options => {
       if (options.world !== 'MAIN') return execute(options);
       return new Promise(resolve => {
+        if (options.args?.[2] === true) {
+          globalThis.resolveLateOriginalStart = () => resolve([{ result: { ok: true, data: {
+            offset: 0, playlist: 'https://livecloud.pstatic.net/fixture/stale.m3u8',
+          } } }]);
+          return;
+        }
         globalThis.failOriginalProbe = () => {
           chrome.scripting.executeScript = execute;
-          resolve([{ result: { ok: false, error: 'Injected original lookup failure' } }]);
+          resolve([{ result: { ok: false, error: 'https://debug.example.test/stream.m3u8?signature=fixture' } }]);
         };
       });
     };
@@ -301,13 +307,14 @@ test('recording timers wait for capture and keep size visible after original fal
   await expect(page.locator('html')).toHaveAttribute('data-screen-recorders', '1');
   await expect(page.locator('html')).toHaveAttribute('data-fallback-chunks', /^(?:[2-9]|\d{2,})$/);
   const startedAt = await worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState.startedAt);
-  await worker.evaluate(() => { globalThis.failOriginalProbe(); });
+  await worker.evaluate(() => {
+    globalThis.resolveLateOriginalStart();
+    globalThis.failOriginalProbe();
+  });
   const feedback = page.locator('#crop-clip-seek-feedback');
-  await expect(feedback).toHaveText(/화면 녹화 중 · WebM\s+Injected original lookup failure/);
+  await expect(feedback).toHaveText('원본을 찾지 못해 화면 녹화 중입니다 · WebM');
   await expect(page.locator('html')).toHaveAttribute('data-screen-recorders', '1');
   await expect(page.locator('html')).toHaveAttribute('data-fallback-video-bitrate', '8500000/8500000');
-  expect((await feedback.textContent()).split('\n')).toHaveLength(2);
-  await expect(feedback).toHaveCSS('white-space', 'pre-line');
   expect(await worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState.startedAt)).toBe(startedAt);
   expect(await playerTime.evaluate(el => getComputedStyle(el).color)).toBe(
     await playerTime.evaluate(el => getComputedStyle(el.parentElement).color));
@@ -1032,13 +1039,13 @@ test('failed automatic download keeps the recorded video available in the result
           window.testConversionWorkers = (window.testConversionWorkers ?? 0) + 1;
         }
       };
-      chrome.downloads.download = async () => { throw new Error('테스트 다운로드 실패'); };
+      chrome.downloads.download = async () => { throw new Error('https://debug.example.test/stream.m3u8?signature=fixture'); };
     }
   });
   const opened = context.waitForEvent('page');
   await worker.evaluate(() => chrome.alarms.create('open-recording-result', { when: Date.now() }));
   const result = await opened;
-  await expect(result.locator('#split-status')).toHaveText('테스트 다운로드 실패');
+  await expect(result.locator('#split-status')).toHaveText('자동 다운로드를 완료하지 못했습니다. 결과창에서 다시 시도해 주세요.');
   await expect(result.locator('#preview-recovery')).toBeHidden();
   await expect.poll(() => result.locator('#preview-video').evaluate(video => video.videoWidth)).toBeGreaterThan(0);
   await expect(result.locator('#download-current-button')).toBeEnabled();

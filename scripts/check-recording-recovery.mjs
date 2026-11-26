@@ -95,6 +95,16 @@ test('only a valid full-recording startup marker reaches the saved file', async 
   }
 });
 
+test('startup inspection detected after the first checkpoint reaches the saved screen recording', async () => {
+  for (const mode of ['full', 'region']) {
+    const f = fixture();
+    f.state = { ...f.state, mode };
+    assert.equal(f.chunks[0].inspectStartup, undefined);
+    assert.equal((await f.api.finalizeRecordingFromChunks('clip', 2000, undefined, undefined, true)).ok, true);
+    assert.equal(f.parts[0].inspectStartup, mode === 'full' ? true : undefined);
+  }
+});
+
 test('a delayed stop must not finalize a newer recording', async () => {
   const f = fixture();
   assert.equal((await f.api.stopRecording('older-clip')).ok, true);

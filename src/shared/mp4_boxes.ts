@@ -31,3 +31,23 @@ export function readMp4Tracks(data: DataView): { kind: number; codec: string; he
   }
   return tracks;
 }
+
+export async function readMp4VideoCodec(blob: Blob): Promise<string | undefined> {
+  const maxMetadataBytes = 4 * 1024 * 1024;
+  let offset = 0;
+  for (let index = 0; index < 64 && offset + 8 <= blob.size; index++) {
+    const header = new DataView(await blob.slice(offset, offset + 16).arrayBuffer());
+    const shortSize = header.getUint32(0);
+    const headerSize = shortSize === 1 ? 16 : 8;
+    if (header.byteLength < headerSize) return;
+    const size = shortSize === 1 ? Number(header.getBigUint64(8)) : shortSize || blob.size - offset;
+    if (size < headerSize || size > blob.size - offset) return;
+    if (header.getUint32(4) === 0x6d6f6f76) {
+      if (headerSize !== 8 || size > maxMetadataBytes) return;
+      const data = new DataView(await blob.slice(offset, offset + size).arrayBuffer());
+      return readMp4Tracks(data).find(track => track.kind === 0x76696465)?.codec;
+    }
+    offset += size;
+  }
+  return undefined;
+}

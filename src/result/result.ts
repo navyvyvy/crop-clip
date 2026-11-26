@@ -2,6 +2,7 @@ import { canvasToBlob } from "../shared/canvas.js";
 import { MEDIA_SEEK_TOLERANCE_SECONDS, MediaEventTimeoutError, createObjectUrlSource, releaseVideoSource, getPartSource, pickRecorderMimeType, waitForMediaEvent, hydratePart, loadVideoForPart, seekVideo, recordVideoRange, type LoadedPart } from "./media.js";
 import { downloadSource, downloadSourcesSequentially, downloadSourcesAndConfirm } from "./downloads.js";
 import { capMp4PlaybackDuration } from "./mp4_duration.js";
+import { readMp4VideoCodec } from "../shared/mp4_boxes.js";
 import { loadFfmpeg, releaseFfmpeg, deleteFfmpegFile, clearFfmpegOutputs, readFfmpegBlob, type FfmpegLike } from "./ffmpeg.js";
 import { getPart, getPartsByRecordingId, getRecording, putPart, putRecording } from "../shared/idb.js";
 import { openEditOutputs } from "../shared/temporary_outputs.js";
@@ -59,6 +60,7 @@ const elements = {
   title: document.getElementById("title") as HTMLHeadingElement,
   formatChip: document.getElementById("format-chip") as HTMLDivElement,
   formatSummary: document.getElementById("format-summary") as HTMLSpanElement,
+  videoCodec: document.getElementById("video-codec") as HTMLSpanElement,
   captureFallback: document.getElementById("capture-fallback") as HTMLSpanElement,
   captureFallbackMessage: document.getElementById("capture-fallback-message") as HTMLSpanElement,
   previewVideo: document.getElementById("preview-video") as HTMLVideoElement,
@@ -165,6 +167,9 @@ const DISPLAY_SIZE_UNIT = 1_000;
 const MEDIA_SEEK_EPSILON_SECONDS = 0.001;
 const TRIM_PREVIEW_OFFSET_SECONDS = 0.01;
 const DEFAULT_PLAYBACK_SPEED = 1;
+const MP4_VIDEO_CODEC_LABELS = new Map([
+  ["hvc1", "H.265"], ["hev1", "H.265"], ["avc1", "H.264"], ["avc3", "H.264"], ["vp09", "VP9"], ["av01", "AV1"],
+]);
 const TIME_DECIMAL_PLACES = 1;
 const TIME_STEPS_PER_MINUTE = SECONDS_PER_MINUTE / TIME_STEP_SECONDS;
 const TIME_STEPS_PER_HOUR = SECONDS_PER_HOUR / TIME_STEP_SECONDS;
@@ -329,7 +334,7 @@ async function withFfmpegInput<T>(part: LoadedPart, operation: (ffmpeg: FfmpegLi
     const source = getPartSource(part);
     const blob = typeof source === "string" ? await (await fetch(source)).blob() : source;
     mounted = await ffmpeg.mount("WORKERFS", { blobs: [{ name: inputName, data: blob }] }, "/source");
-    if (!mounted) throw new Error("원본 파일을 변환 엔진에 연결하지 못했습니다.");
+    if (!mounted) throw new ResultError("원본 파일을 변환 엔진에 연결하지 못했습니다.");
     setFfmpegProgressBase(FFMPEG_TRANSCODE_START_PERCENT);
     return await operation(ffmpeg, `/source/${inputName}`);
   } finally {
@@ -338,7 +343,9 @@ async function withFfmpegInput<T>(part: LoadedPart, operation: (ffmpeg: FfmpegLi
   }
 }
 
-class EditStorageError extends Error {
+class ResultError extends Error {}
+
+class EditStorageError extends ResultError {
   constructor(cause: unknown) {
     super("편집 파일에 필요한 임시 저장 공간을 열거나 읽을 수 없습니다.", { cause });
   }
@@ -379,7 +386,7 @@ async function finishConversion(
   setWorkStatus("파일을 마무리하는 중입니다.");
   setProgressPercent(FFMPEG_OUTPUT_READ_PERCENT);
   const blob = await readEditOutput(ffmpeg, name, mimeType, output);
-  if (!blob.size) throw new Error(emptyFileMessage);
+  if (!blob.size) throw new ResultError(emptyFileMessage);
   setProgressPercent(PROGRESS_FINALIZING_PERCENT);
   return blob;
 }
@@ -414,7 +421,7 @@ async function convertPartWithFfmpeg(part: LoadedPart, outputFormat: ConvertForm
     const output = disk && await mountEditOutput(ffmpeg, disk, outputName, crypto.randomUUID());
     const code = await ffmpeg.exec(args);
     if (code !== 0) {
-      throw new Error("빠른 변환에 실패했습니다.");
+      throw new ResultError("빠른 변환에 실패했습니다.");
     }
     const blob = await finishConversion(ffmpeg, outputName, getConvertedMimeType(outputFormat), output, "변환한 파일이 비어 있습니다.");
     return { source: blob, filename: getRangeFilename(part, outputFormat, range) };
@@ -446,7 +453,7 @@ async function convertPartAtSpeed(part: LoadedPart, speed: number, range?: TimeR
       outputName,
     ]);
     if (code !== 0) {
-      throw new Error("배속 변환에 실패했습니다.");
+      throw new ResultError("배속 변환에 실패했습니다.");
     }
     const blob = await finishConversion(ffmpeg, outputName, "video/mp4", output, "배속 파일이 비어 있습니다.");
     return { source: blob, filename: getSpeedFilename(part, speed, range) };
@@ -500,7 +507,7 @@ async function savePreparedPart(part: LoadedPart, diskBacked: boolean): Promise<
   if (!diskBacked) return part;
   // The temporary file snapshot becomes unreadable when the workspace is removed.
   const saved = await getPart(part.id);
-  if (!saved?.blob) throw new Error("저장한 영상을 다시 읽지 못했습니다.");
+  if (!saved?.blob) throw new ResultError("저장한 영상을 다시 읽지 못했습니다.");
   return { ...saved, blob: saved.blob };
 }
 
@@ -569,7 +576,8 @@ async function trimRecordingStartup(part: LoadedPart, trimSeconds: number, disk?
       "-ss", String(trimSeconds), "-i", inputName, "-map", "0:v:0", "-map", "0:a:0?",
       // MP4 can hide decoder preroll in its edit list. Matroska needs a new opening keyframe.
       ...(format === "mp4" ? ["-c", "copy", "-use_editlist", "1", "-avoid_negative_ts", "disabled", "-movflags", "+faststart"]
-        : ["-c:v", "libx264", "-preset", "ultrafast", ...webmRate, "-fps_mode", "vfr", "-c:a", "libvorbis", "-cues_to_front", "1", "-f", format]),
+        : ["-c:v", "libx264", "-preset", "veryfast", ...webmRate, "-fps_mode", "vfr",
+          "-c:a", "libvorbis", "-cues_to_front", "1", "-f", format]),
       preciseName,
     ]);
     if (preciseCode !== 0 || !await validStart(preciseName)) return null;
@@ -599,7 +607,7 @@ async function prepareOriginalStream(part: LoadedPart): Promise<LoadedPart> {
         "-avoid_negative_ts", "disabled", "-movflags", "+faststart", name,
       ]);
       if (code !== 0 || await ffmpeg.exec(["-xerror", "-i", name, "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-"]) !== 0) {
-        throw new Error("원본 방송을 MP4로 묶지 못했습니다.");
+        throw new ResultError("원본 방송을 MP4로 묶지 못했습니다.");
       }
     };
     if (!useDisk) {
@@ -617,7 +625,7 @@ async function prepareOriginalStream(part: LoadedPart): Promise<LoadedPart> {
           await convert();
           return await save(await readEditOutput(ffmpeg, name, "video/mp4", file));
         } catch (error) {
-          throw new Error("원본 MP4 저장을 마치지 못했습니다. 저장 공간을 확인한 뒤 다시 시도하거나 방송 조각을 백업하세요.", { cause: error });
+          throw new ResultError("원본 MP4 저장을 마치지 못했습니다. 저장 공간을 확인한 뒤 다시 시도하거나 방송 조각을 백업하세요.", { cause: error });
         }
       } finally {
         await deleteFfmpegFile(ffmpeg, name, true);
@@ -717,8 +725,8 @@ async function inspectRecordedStartup(part: LoadedPart): Promise<number | undefi
     let recovery: number | undefined;
     for (const [index, time] of frames.entries()) {
       if ((frames[index - 1] ?? 0) > STARTUP_STALL_WINDOW_SECONDS) break;
-      if (index > 0 && time <= STARTUP_SHORT_STALL_WINDOW_SECONDS
-        && (index === 1 || gaps[index - 1] <= stableFrameGapSeconds) && gaps[index] >= STARTUP_SHORT_STALL_SECONDS) {
+      if (time <= STARTUP_SHORT_STALL_WINDOW_SECONDS
+        && (index <= 1 || gaps[index - 1] <= stableFrameGapSeconds) && gaps[index] >= STARTUP_SHORT_STALL_SECONDS) {
         waitingForOpeningRecovery = true;
       }
       const following = gaps.slice(index + 1, index + 4);
@@ -908,7 +916,7 @@ async function runResultJob(operation: () => Promise<void>, failureMessage: stri
       setWorkStatus(failureMessage);
       return;
     }
-    const message = error instanceof Error ? error.message : failureMessage;
+    const message = error instanceof ResultError ? error.message : failureMessage;
     setWorkStatus(message);
     window.alert(message);
   } finally {
@@ -1166,7 +1174,7 @@ async function createDurationSplitWithFfmpeg(
   const selectedRange = range ? normalizeTimeRange(range.start, range.end, duration) : { start: 0, end: duration };
   const selectedDuration = selectedRange.end - selectedRange.start;
   if (segmentSeconds >= selectedDuration) {
-    throw new Error("나누기 시간은 선택 구간보다 짧아야 합니다.");
+    throw new ResultError("나누기 시간은 선택 구간보다 짧아야 합니다.");
   }
   const expectedCount = getExpectedSplitCount(selectedDuration, segmentSeconds);
 
@@ -1208,7 +1216,7 @@ async function createDurationSplitWithFfmpeg(
         pattern,
       ]);
       if (code !== 0) {
-        throw new Error("WebM 파일을 나누지 못했습니다.");
+        throw new ResultError("WebM 파일을 나누지 못했습니다.");
       }
     }
 
@@ -1217,17 +1225,17 @@ async function createDurationSplitWithFfmpeg(
       .filter((file) => !file.isDir && file.name.startsWith("output") && file.name.endsWith(`.${outputFormat}`))
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
     if (files.length === 0) {
-      throw new Error("나눈 파일이 생성되지 않았습니다.");
+      throw new ResultError("나눈 파일이 생성되지 않았습니다.");
     }
     if (files.length !== expectedCount) {
-      throw new Error(`파일 나누기 결과가 올바르지 않습니다. ${expectedCount}개가 필요하지만 ${files.length}개가 생성되었습니다.`);
+      throw new ResultError(`파일 나누기 결과가 올바르지 않습니다. ${expectedCount}개가 필요하지만 ${files.length}개가 생성되었습니다.`);
     }
     let actualTimes = mp4Ranges;
     if (!actualTimes) {
       const segmentListData = await ffmpeg.readFile(segmentListName);
       actualTimes = parseSegmentTimeList(typeof segmentListData === "string" ? segmentListData : new TextDecoder().decode(segmentListData));
       await deleteFfmpegFile(ffmpeg, segmentListName, true);
-      if (disk && actualTimes.length !== expectedCount) throw new Error("WebM 분할 구간 수가 올바르지 않습니다.");
+      if (disk && actualTimes.length !== expectedCount) throw new ResultError("WebM 분할 구간 수가 올바르지 않습니다.");
     }
     const segments: SplitSegment[] = [];
     const progressStart = mp4Ranges ? FFMPEG_TRANSCODE_START_PERCENT : FFMPEG_EXEC_PROGRESS_MAX;
@@ -1247,10 +1255,10 @@ async function createDurationSplitWithFfmpeg(
           "-map", "0", "-c", "copy", "-use_editlist", "1", "-avoid_negative_ts", "disabled",
           "-movflags", "+faststart", name,
         ]);
-        if (code !== 0) throw new Error("빠른 파일 나누기에 실패했습니다.");
+        if (code !== 0) throw new ResultError("빠른 파일 나누기에 실패했습니다.");
       }
       const blob = await readEditOutput(ffmpeg, name, `video/${outputFormat}`, output);
-      if (!blob.size) throw new Error("나눈 파일이 비어 있습니다.");
+      if (!blob.size) throw new ResultError("나눈 파일이 비어 있습니다.");
       segments.push({
         blob,
         filename: `${getFilenameBase(getRecordingFilename(part.filename))}_${String(index + 1).padStart(SPLIT_FILE_INDEX_DIGITS, "0")}.${outputFormat}`,
@@ -1270,7 +1278,7 @@ async function createSizeSplit(part: LoadedPart, duration: number, maxMegabytes:
   const selectedRange = range ? normalizeTimeRange(range.start, range.end, duration) : { start: 0, end: duration };
   const selectedSize = estimateRangeSize(part.size, selectedRange, duration);
   if (maxBytes >= selectedSize) {
-    throw new Error("파일별 최대 용량은 선택 구간의 전체 용량보다 작아야 합니다.");
+    throw new ResultError("파일별 최대 용량은 선택 구간의 전체 용량보다 작아야 합니다.");
   }
 
   let segmentSeconds = getSizeSplitInterval(part.size, duration, maxBytes);
@@ -1297,7 +1305,7 @@ async function createSizeSplit(part: LoadedPart, duration: number, maxMegabytes:
       segmentSeconds = nextSeconds;
     }
 
-    throw new Error("각 파일을 설정한 최대 용량 이하로 만들지 못했습니다. 최대 용량을 높여 주세요.");
+    throw new ResultError("각 파일을 설정한 최대 용량 이하로 만들지 못했습니다. 최대 용량을 높여 주세요.");
   });
 }
 
@@ -1333,7 +1341,7 @@ async function convertPart(part: LoadedPart, outputFormat: ConvertFormat, range?
     resultLifetime.signal.throwIfAborted();
     if (error instanceof EditStorageError) throw error;
     if (outputFormat === "gif") {
-      throw new Error(`${outputFormat.toUpperCase()} 변환에 실패했습니다.`);
+      throw new ResultError(`${outputFormat.toUpperCase()} 변환에 실패했습니다.`);
     }
     await releaseFfmpeg();
     setWorkStatus("빠른 변환을 지원하지 않아 실시간으로 처리 중입니다.");
@@ -1481,8 +1489,19 @@ function renderParts(): void {
     setSourceDuration(fallbackDuration);
   }
   renderSplitMode();
-  setPreviewFromPart(parts[0]);
-  updateSplitDefaultValues(parts[0]);
+  const part = parts[0];
+  elements.videoCodec.hidden = true;
+  if (part.extension === RECORDING_FORMAT.mp4 && part.blob) {
+    void readMp4VideoCodec(part.blob).then(codec => {
+      if (resultLifetime.signal.aborted || parts[0] !== part || !codec) return;
+      const label = MP4_VIDEO_CODEC_LABELS.get(codec);
+      if (!label) return;
+      elements.videoCodec.textContent = `· ${label}`;
+      elements.videoCodec.hidden = false;
+    }).catch(() => {});
+  }
+  setPreviewFromPart(part);
+  updateSplitDefaultValues(part);
   renderSplitDownloads();
 }
 
@@ -1606,7 +1625,7 @@ async function tryAutomaticSplit(settings: Settings | undefined): Promise<boolea
   if (splitBySize && part.size <= megabytesToBytes(settings.autoSplitMaxMegabytes)) return false;
   const duration = await readSplitSourceDuration(part, 0).catch(error => {
     resultLifetime.signal.throwIfAborted();
-    throw new Error("영상 길이를 확인하지 못해 자동 분할을 완료하지 못했습니다. 녹화 파일은 다운로드할 수 있습니다.", { cause: error });
+    throw new ResultError("영상 길이를 확인하지 못해 자동 분할을 완료하지 못했습니다. 녹화 파일은 다운로드할 수 있습니다.", { cause: error });
   });
   if (duration <= 0 || (!splitBySize && duration <= settings.autoSplitAfterSeconds)) return false;
   const options = getAutomaticSplitOptions(settings, duration);
@@ -1634,7 +1653,7 @@ async function boot(): Promise<void> {
   restoreSourceTabOnClose = showResult;
   if (settings?.enableAutoSplitRecording) autoSplitSettings = settings;
   if (!recordingId) {
-    throw new Error("녹화 ID가 없습니다.");
+    throw new ResultError("녹화 ID가 없습니다.");
   }
 
   for (let attempt = 0; attempt < RESULT_LOAD_MAX_ATTEMPTS; attempt += 1) {
@@ -1654,10 +1673,10 @@ async function boot(): Promise<void> {
   if (recordedFrameRate && Number.isFinite(recordedFrameRate) && recordedFrameRate > 0) frameStepSeconds = 1 / recordedFrameRate;
 
   if (!recording) {
-    throw new Error("녹화 데이터를 찾지 못했습니다.");
+    throw new ResultError("녹화 데이터를 찾지 못했습니다.");
   }
   if (autoDownloadRecording && parts.length === 0) {
-    throw new Error("자동 다운로드할 녹화 파일을 찾지 못했습니다.");
+    throw new ResultError("자동 다운로드할 녹화 파일을 찾지 못했습니다.");
   }
 
   if (showResult) renderHeader();
@@ -1682,10 +1701,10 @@ async function boot(): Promise<void> {
   if (showResult) renderParts();
   if (autoDownloadRecording) {
     if (parts.some(part => part.originalStreamStart !== undefined)) {
-      throw new Error("원본 조각을 정리하지 못했습니다. 결과창에서 녹화 데이터를 확인하세요.");
+      throw new ResultError("원본 조각을 정리하지 못했습니다. 결과창에서 녹화 데이터를 확인하세요.");
     }
     if (parts.some(part => part.startupTrimSeconds)) {
-      throw new Error("초반 끊김을 정리하지 못했습니다. 결과창에서 원본을 확인하고 다운로드할 수 있습니다.");
+      throw new ResultError("초반 끊김을 정리하지 못했습니다. 결과창에서 원본을 확인하고 다운로드할 수 있습니다.");
     }
   }
   const automaticSplit = await tryAutomaticSplit(autoSplitSettings);
@@ -2146,7 +2165,7 @@ elements.splitButton.addEventListener("click", () => {
     const range = getActiveTimeRange();
     const selectedRange = getSelectedTimeRange();
     if (mode === "duration" && splitValue >= roundTrimTime(selectedRange.end - selectedRange.start)) {
-      throw new Error("나누기 시간은 선택 구간보다 짧아야 합니다.");
+      throw new ResultError("나누기 시간은 선택 구간보다 짧아야 합니다.");
     }
     const duration = await readSplitSourceDuration(part);
     await splitRecordingPart(part, duration, { mode, value: splitValue, format: outputFormat, range });
@@ -2184,10 +2203,9 @@ window.addEventListener("pageshow", () => {
 });
 
 setSplitBusy(true);
-void boot().catch(async (error: Error) => {
+void boot().catch(async (error: unknown) => {
   if (resultLifetime.signal.aborted) return;
   hideSplitProgress();
-  const message = error instanceof Error ? error.message : String(error);
   const fragments = parts.filter(part => part.originalStreamStart !== undefined);
   if (fragments.length) {
     setSplitBusy(true);
@@ -2207,14 +2225,16 @@ void boot().catch(async (error: Error) => {
     if (autoSplitRecording) clearAutomaticResultActions();
     renderHeader();
     if (!elements.previewVideo.hasAttribute("src")) renderParts();
-    setWorkStatus(message);
+    setWorkStatus(error instanceof ResultError ? error.message : autoDownloadRecording
+      ? "자동 다운로드를 완료하지 못했습니다. 결과창에서 다시 시도해 주세요."
+      : "자동 분할을 완료하지 못했습니다. 결과창에서 다시 시도해 주세요.");
     await finishQueuedDownload();
     setSplitBusy(false);
   } else {
     canQueueDownload = false;
     downloadWhenReady = false;
     setSplitBusy(false);
-    showPreviewError(message);
+    showPreviewError(error instanceof ResultError ? error.message : "녹화 파일을 준비하지 못했습니다. 다시 시도해 주세요.");
   }
   await revealAutoDownloadFailure();
 }).finally(() => {

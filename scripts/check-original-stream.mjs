@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import { getOriginalPlaylist, openOriginalStream, ORIGINAL_STREAM_PREFIXES, probeOriginalStream } from "../dist/content/original_stream.js";
 import { MAX_ORIGINAL_STREAM_SECONDS } from "../dist/shared/time_range.js";
+import { readMp4VideoCodec } from "../dist/shared/mp4_boxes.js";
 
 function u32(...values) {
   const bytes = Buffer.alloc(values.length * 4);
@@ -22,6 +23,14 @@ const track = (id, kind, codec) => box("trak", box("tkhd", u32(0, 0, 0, id)),
   box("mdia", box("mdhd", u32(0, 0, 0, 1_000)), box("hdlr", u32(0, 0), Buffer.from(kind)),
     box("minf", box("stbl", box("stsd", u32(0, 1), box(codec))))));
 const init = box("moov", track(1, "vide", "avc1"), track(2, "soun", "mp4a"));
+
+for (const codec of ["hvc1", "hev1", "avc1"]) {
+  const moov = box("moov", track(2, "soun", "mp4a"), track(1, "vide", codec));
+  const output = new Blob([box("ftyp"), box("mdat", Buffer.alloc(64 * 1024)), moov], { type: "video/mp4" });
+  assert.equal(await readMp4VideoCodec(output), codec, "read the video track from file metadata independently of MIME type");
+}
+assert.equal(await readMp4VideoCodec(new Blob([box("moov", track(2, "soun", "mp4a"))])), undefined);
+assert.equal(await readMp4VideoCodec(new Blob([u32(50_000), Buffer.from("moov")])), undefined);
 
 // A generic MP4 MIME type can omit the video track's sample-entry code.
 {
@@ -178,6 +187,9 @@ try {
     if (name === "live.m3u8") return new Response(++playlistReads === 1 ? manifest : manifest + "#EXTINF:2,\nnewest.m4v\n");
     return new Response({ "init.mp4": init, "last.m4v": last, "newest.m4v": newest }[name]);
   };
+  await assert.rejects(() => openOriginalStream(url, 124.3, new AbortController().signal, { waitForLiveFragment: false }), /원본 조각이 아직 준비되지 않았습니다/);
+  assert.equal(playlistReads, 1, "an immediate original start must not wait for another playlist");
+  playlistReads = 0;
   const liveEdge = await openOriginalStream(url, 124.3, new AbortController().signal);
   const liveEdgeChunks = [];
   assert.equal(await liveEdge.record(async blob => { liveEdgeChunks.push(Buffer.from(await blob.arrayBuffer())); }, () => 125, () => 125), 125);
@@ -307,7 +319,7 @@ try {
   emitResources([{ ...latest, name: "https://alternate.example.test:8443/fixture/chunklist.m3u8?signature=fixture" }]);
   assert.deepEqual(await unrecognized, {
     ok: false,
-    error: "원본 목록을 찾지 못했습니다.\n감지한 호스트 · alternate.example.test:8443",
+    error: "이 재생 방식의 원본 목록을 찾지 못했습니다.",
   });
   assert.equal(TestSourceBuffer.prototype.appendBuffer, originalAppend);
 
@@ -331,6 +343,14 @@ console.log("original stream observes fresh playlist requests when the browser's
 
 const connectorPlaylist = "http://localhost:17080/chzzk/kr/fixture/1080p/live.m3u8?channel_id=fixture&stream_id=1";
 assert.equal(getOriginalPlaylist(`${connectorPlaylist}&_HLS_msn=11&_HLS_part=0`).href, connectorPlaylist);
+const macCdn = "nvelop-slight-slit.pstatic.net";
+for (const scheme of ["http", "https"]) {
+  const macPlaylist = `${scheme}://${macCdn}/fixture/chunklist.m3u8?signature=a%20b~&_HLS_msn=11&_HLS_part=0`;
+  assert.ok(ORIGINAL_STREAM_PREFIXES.some(prefix => macPlaylist.startsWith(prefix)));
+  assert.equal(getOriginalPlaylist(macPlaylist).href, `https://${macCdn}/fixture/chunklist.m3u8?signature=a%20b~`);
+}
+assert.throws(() => getOriginalPlaylist(`http://${macCdn}.invalid/chunklist.m3u8`), /지원하지 않는/);
+assert.throws(() => getOriginalPlaylist(`http://${macCdn}:8080/chunklist.m3u8`), /지원하지 않는/);
 assert.throws(() => getOriginalPlaylist("http://localhost:17080/other/live.m3u8"), /지원하지 않는/);
 assert.throws(() => getOriginalPlaylist("http://localhost:17081/chzzk/live.m3u8"), /지원하지 않는/);
 assert.throws(() => getOriginalPlaylist("https://livecloud.pstatic.net.invalid/live.m3u8"), /지원하지 않는/);

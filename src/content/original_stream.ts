@@ -3,10 +3,13 @@ import type { MessageResponse } from "../shared/messages.js";
 import { boxes, readMp4Tracks } from "../shared/mp4_boxes.js";
 
 const CONNECTOR_STREAM_PREFIX = "http://localhost:17080/chzzk/";
+const SLIGHT_SLIT_HOST = "nvelop-slight-slit.pstatic.net";
 export const ORIGINAL_STREAM_PREFIXES = [
   "https://ex-nlive-streaming.navercdn.com/",
   "https://nvelop-livecloud.pstatic.net/",
   "https://livecloud.pstatic.net/",
+  `https://${SLIGHT_SLIT_HOST}/`,
+  `http://${SLIGHT_SLIT_HOST}/`,
   CONNECTOR_STREAM_PREFIX,
 ];
 const FETCH_TIMEOUT_MS = 4_000;
@@ -20,7 +23,7 @@ const TIMELINE_TOLERANCE_SECONDS = 0.15;
 export type OriginalStreamProbe = { offset: number; playlist: string };
 
 // Injected into the player page after clicking record. Keep this function self-contained.
-export function probeOriginalStream(src: string, prefixes: string[]): Promise<MessageResponse<OriginalStreamProbe>> {
+export function probeOriginalStream(src: string, prefixes: string[], bufferedOnly = false): Promise<MessageResponse<OriginalStreamProbe>> {
   return new Promise(resolve => {
     let video = Array.from(document.querySelectorAll("video")).find(item => item.currentSrc === src && !item.paused);
     if (!video || typeof SourceBuffer === "undefined") {
@@ -28,18 +31,30 @@ export function probeOriginalStream(src: string, prefixes: string[]): Promise<Me
       return;
     }
     type ProbeHook = SourceBuffer["appendBuffer"] & { cancelCropClipProbe?: () => void };
-    (SourceBuffer.prototype.appendBuffer as ProbeHook).cancelCropClipProbe?.();
-    const original = SourceBuffer.prototype.appendBuffer;
-    let unrecognizedPlaylistHost: string | undefined;
     const choosePlaylist = (entries: PerformanceEntry[]): PerformanceEntry | undefined => {
       const playlists = entries.filter(entry => /^https?:\/\/[^?]+\.m3u8(?:\?|$)/.test(entry.name)).reverse();
       const candidates = playlists.filter(entry => prefixes.some(prefix => entry.name.startsWith(prefix)));
-      if (!candidates.length && playlists[0]) unrecognizedPlaylistHost = new URL(playlists[0].name).host;
       return candidates.find(entry => new URL(entry.name).searchParams.has("_HLS_msn")) ?? candidates[0];
     };
     let playlist = choosePlaylist(performance.getEntriesByType("resource")
       .filter(entry => performance.now() - (entry.startTime + entry.duration) <= 6_000));
     let offset: number | undefined;
+    if (playlist && bufferedOnly) {
+      const receive = (event: Event) => { offset = (event as CustomEvent<number>).detail; };
+      video.addEventListener("cropclip-playback-offset", receive, { once: true });
+      video.dispatchEvent(new Event("cropclip-read-playback-offset", { bubbles: true }));
+      video.removeEventListener("cropclip-playback-offset", receive);
+      if (offset !== undefined && Number.isFinite(offset)) {
+        resolve({ ok: true, data: { offset, playlist: playlist.name } });
+        return;
+      }
+    }
+    if (bufferedOnly) {
+      resolve({ ok: false, error: "재생 중인 원본 위치를 바로 확인하지 못했습니다." });
+      return;
+    }
+    (SourceBuffer.prototype.appendBuffer as ProbeHook).cancelCropClipProbe?.();
+    const original = SourceBuffer.prototype.appendBuffer;
     let finished = false;
     const listeners = new Map<SourceBuffer, () => void>();
     const finish = (result: MessageResponse<OriginalStreamProbe>) => {
@@ -84,10 +99,7 @@ export function probeOriginalStream(src: string, prefixes: string[]): Promise<Me
       tryFinish();
     });
     const timer = setTimeout(() => {
-      let error = "이 재생 방식의 원본 목록을 찾지 못했습니다.";
-      if (playlist) error = "방송의 재생 시각을 원본과 맞추지 못했습니다.";
-      else if (unrecognizedPlaylistHost) error = `원본 목록을 찾지 못했습니다.\n감지한 호스트 · ${unrecognizedPlaylistHost}`;
-      finish({ ok: false, error });
+      finish({ ok: false, error: playlist ? "방송의 재생 시각을 원본과 맞추지 못했습니다." : "이 재생 방식의 원본 목록을 찾지 못했습니다." });
     }, 3_000);
     (sample as ProbeHook).cancelCropClipProbe = () => finish({ ok: false, error: "새 원본 탐색을 시작했습니다." });
     SourceBuffer.prototype.appendBuffer = sample;
@@ -144,8 +156,14 @@ async function readFragmentStart(fragment: Blob, track: Track): Promise<number> 
   }
 }
 
-function mediaUrl(value: string, base: URL): string {
+function originalUrl(value: string, base?: URL): URL {
   const url = new URL(value, base);
+  if (url.protocol === "http:" && url.host === SLIGHT_SLIT_HOST) url.protocol = "https:";
+  return url;
+}
+
+function mediaUrl(value: string, base: URL): string {
+  const url = originalUrl(value, base);
   if (url.origin !== base.origin || !ORIGINAL_STREAM_PREFIXES.some(prefix => url.href.startsWith(prefix)) || url.username || url.password) {
     throw new OriginalStreamError("지원하지 않는 방송 주소입니다.");
   }
@@ -176,12 +194,15 @@ function parsePlaylist(text: string, url: URL): { init: string; sequence: number
 }
 
 export function getOriginalPlaylist(value: string): URL {
-  const url = new URL(value);
+  const url = originalUrl(value);
   if (!ORIGINAL_STREAM_PREFIXES.some(prefix => url.href.startsWith(prefix)) || !url.pathname.endsWith(".m3u8") || url.username || url.password) {
     throw new OriginalStreamError("지원하지 않는 원본 재생 목록 주소입니다.");
   }
-  url.searchParams.delete("_HLS_msn");
-  url.searchParams.delete("_HLS_part");
+  // Keep the original encoding of CDN signatures while removing the live-edge polling position.
+  url.search = url.search.slice(1).split("&").filter(part => {
+    const parameter = new URLSearchParams(part);
+    return !parameter.has("_HLS_msn") && !parameter.has("_HLS_part");
+  }).join("&");
   return url;
 }
 
@@ -227,7 +248,7 @@ async function fetchFragment(url: string, signal: AbortSignal): Promise<Blob> {
   return readOriginalBody(await fetchOriginal(url, signal));
 }
 
-export async function openOriginalStream(url: URL, startSeconds: number, signal: AbortSignal) {
+export async function openOriginalStream(url: URL, startSeconds: number, signal: AbortSignal, { waitForLiveFragment = true } = {}) {
   const loadPlaylist = async (requestSignal = signal) =>
     parsePlaylist(await (await readOriginalBody(await fetchOriginal(url, requestSignal))).text(), url);
   let playlist = await loadPlaylist();
@@ -256,7 +277,7 @@ export async function openOriginalStream(url: URL, startSeconds: number, signal:
   let tail = await readTail(lastUrl);
   // Low-latency playback can reach a fragment before it is listed as complete.
   for (let retry = 0; startSeconds >= tail.start + playlist.segments[lastIndex].duration; retry++) {
-    if (retry === 3) throw new OriginalStreamError("클릭한 위치의 원본 조각이 아직 준비되지 않았습니다.");
+    if (!waitForLiveFragment || retry === 3) throw new OriginalStreamError("클릭한 위치의 원본 조각이 아직 준비되지 않았습니다.");
     await new Promise(resolve => setTimeout(resolve, POLL_MS));
     playlist = await loadPlaylist();
     if (playlist.init !== initUrl) throw new OriginalStreamError("원본 방송 재생 경로가 바뀌었습니다.");

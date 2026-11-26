@@ -181,6 +181,11 @@ h2 {
   white-space: nowrap;
 }
 
+#video-codec {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .capture-fallback[hidden] {
   display: none;
 }

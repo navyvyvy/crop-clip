@@ -69,4 +69,19 @@ import { readMp4Tracks } from "../shared/mp4_boxes.js";
       video.dispatchEvent(new Event("cropclip-playback-hevc"));
     }
   });
+
+  document.addEventListener("cropclip-read-playback-offset", event => {
+    const video = event.target;
+    if (!(video instanceof HTMLVideoElement) || video.paused || !video.buffered.length) return;
+    const source = sources.get(video.currentSrc)?.deref();
+    if (!source) return;
+    const end = video.buffered.end(video.buffered.length - 1);
+    for (const buffer of source.activeSourceBuffers) {
+      if (buffer.mode !== "segments" || !buffer.buffered.length || !Number.isFinite(buffer.timestampOffset)) continue;
+      if (Math.abs(buffer.buffered.end(buffer.buffered.length - 1) - end) < 0.15) {
+        video.dispatchEvent(new CustomEvent("cropclip-playback-offset", { detail: buffer.timestampOffset }));
+        return;
+      }
+    }
+  });
 })();

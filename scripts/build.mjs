@@ -7,7 +7,8 @@ import { build } from "esbuild";
 
 const root = process.cwd();
 const srcDir = path.join(root, "src");
-const distDir = path.join(root, "dist");
+const softwareRecordingTest = process.env.CROPCLIP_SOFTWARE_CAPTURE === "1";
+const distDir = path.join(root, softwareRecordingTest ? "dist-software" : "dist");
 const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
 const buildVersion = process.env.BUILD_VERSION?.trim() || packageJson.version;
 const sourceManifest = JSON.parse(await readFile(path.join(root, "manifest.json"), "utf8"));
@@ -21,7 +22,11 @@ await mkdir(distDir, { recursive: true });
 
 const tscBin = path.join(root, "node_modules", "typescript", "bin", "tsc");
 
-execFileSync(process.execPath, [tscBin, "-p", "tsconfig.json"], { stdio: "inherit" });
+execFileSync(process.execPath, [tscBin, "-p", "tsconfig.json", "--outDir", distDir], { stdio: "inherit" });
+const softwareRecordingSource = softwareRecordingTest ? (await build({
+  entryPoints: [path.join(srcDir, "content", "software_recording_worker.ts")],
+  bundle: true, format: "iife", platform: "browser", target: "chrome116", minify: true, write: false,
+})).outputFiles[0].text : "";
 await build({
   entryPoints: ["region_selector", "playback_codec"].map(name => path.join(srcDir, "content", `${name}.ts`)),
   outdir: path.join(distDir, "content"),
@@ -29,7 +34,9 @@ await build({
   format: "iife",
   platform: "browser",
   target: "chrome116",
+  define: { CROPCLIP_SOFTWARE_RECORDING_SOURCE: JSON.stringify(softwareRecordingSource) },
 });
+await rm(path.join(distDir, "content", "software_recording_worker.js"), { force: true });
 
 async function copyStaticFiles(fromDir, toDir) {
   const entries = await readdir(fromDir, { withFileTypes: true });
@@ -55,6 +62,7 @@ async function copyStaticFiles(fromDir, toDir) {
 }
 
 await copyStaticFiles(srcDir, distDir);
+if (softwareRecordingSource) await copyFile(path.join(root, "node_modules", "mediabunny", "LICENSE"), path.join(distDir, "MEDIABUNNY-LICENSE"));
 const manifestPath = path.join(distDir, "manifest.json");
 await writeFile(manifestPath, `${JSON.stringify({ ...sourceManifest, version: buildVersion }, null, 2)}\n`);
 
@@ -230,4 +238,4 @@ async function writeZip(sourceDir, zipPath) {
   await writeFile(zipPath, Buffer.concat([...localParts, ...centralParts, end]));
 }
 
-await writeZip(distDir, path.join(distDir, `${packageJson.name}-${buildVersion}.zip`));
+if (!softwareRecordingTest) await writeZip(distDir, path.join(distDir, `${packageJson.name}-${buildVersion}.zip`));

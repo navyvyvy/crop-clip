@@ -1,6 +1,7 @@
 import type { Settings } from "../shared/types.js";
 import type { DirectCropPlacement } from "./crop_layout.js";
 import type { createVideoFrameCapture } from "./frame_capture.js";
+import type { SoftwareRecorder } from "./software_recording.js";
 
 const RECORDER_STOP_EVENT_TIMEOUT_MS = 5_000;
 
@@ -11,7 +12,7 @@ export interface DirectRecordingSession {
   sourceStream?: MediaStream;
   outputStream?: MediaStream;
   canvas: HTMLCanvasElement | null;
-  recorder?: MediaRecorder;
+  recorder?: MediaRecorder | SoftwareRecorder;
   finishAfterStop?: (timedOut?: boolean) => void;
   stopEventTimer?: number;
   mimeType: string;
@@ -95,6 +96,7 @@ export function releaseDirectRecordingRecorder(session: DirectRecordingSession):
   session.recorder.onstart = null;
   session.recorder.onerror = null;
   session.recorder.onstop = null;
+  if ("dispose" in session.recorder) session.recorder.dispose();
   session.recorder = undefined;
 }
 

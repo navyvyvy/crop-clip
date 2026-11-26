@@ -47,9 +47,10 @@ for (const block of cleanupBlocks) {
 }
 
 const jobSource = file.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'runResultJob');
+const resultErrorSource = file.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'ResultError');
 assert.ok(jobSource, 'result operations must share their job lifecycle');
 const jobState = { busy: false, releases: 0, hidden: 0, alerts: [], statuses: [] };
-const runJob = new Function('state', 'MediaEventTimeoutError', `
+const { runResultJob: runJob, ResultError } = new Function('state', 'MediaEventTimeoutError', `
   const resultLifetime = new AbortController();
   let workBusy = false;
   const setSplitBusy = busy => { workBusy = busy; state.busy = busy; };
@@ -57,17 +58,17 @@ const runJob = new Function('state', 'MediaEventTimeoutError', `
   const hideSplitProgress = () => { state.hidden++; };
   const setWorkStatus = message => { state.statuses.push(message); };
   const window = { alert: message => state.alerts.push(message) };
-  ${compile(jobSource.getText(file))}
-  return runResultJob;
+  ${compile(resultErrorSource.getText(file) + '\n' + jobSource.getText(file))}
+  return { runResultJob, ResultError };
 `)(jobState, MediaEventTimeoutError);
 await runJob(async () => { assert.equal(jobState.busy, true); }, 'fallback');
 assert.equal(jobState.busy, false);
 assert.equal(jobState.releases, 1);
 assert.equal(jobState.hidden, 1);
-for (const failure of [new Error('conversion failed'), null]) {
+for (const failure of [new Error('https://debug.example.test/stream.m3u8?signature=fixture'), new ResultError('나누기 시간 확인'), null]) {
   await runJob(async () => { throw failure; }, 'fallback');
   assert.equal(jobState.busy, false, 'failed jobs must unlock controls');
-  assert.equal(jobState.alerts.at(-1), failure?.message ?? 'fallback');
+  assert.equal(jobState.alerts.at(-1), failure instanceof ResultError ? failure.message : 'fallback');
   assert.equal(jobState.statuses.at(-1), jobState.alerts.at(-1));
 }
 const previousAlerts = jobState.alerts.length;
@@ -78,11 +79,11 @@ let completeJob, overlappingCalls = 0;
 const runningJob = runJob(() => new Promise(resolve => { completeJob = resolve; }), 'fallback');
 await runJob(async () => { overlappingCalls++; }, 'fallback');
 assert.equal(overlappingCalls, 0, 'an active job must not admit a second conversion');
-assert.equal(jobState.releases, 4, 'a blocked job must not release the active engine');
+assert.equal(jobState.releases, 5, 'a blocked job must not release the active engine');
 completeJob();
 await runningJob;
-assert.equal(jobState.releases, 5);
-assert.equal(jobState.hidden, 5);
+assert.equal(jobState.releases, 6);
+assert.equal(jobState.hidden, 6);
 assert.equal(jobState.busy, false);
 console.log('shared result job success, failure and overlap checks passed');
 

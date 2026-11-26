@@ -3,7 +3,7 @@ import fs from "node:fs";
 import ts from "typescript";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { HEVC_MP4_MIME_TYPES, RECORDING_MIME_CANDIDATES } from "../dist/shared/types.js";
+import { HEVC_MP4_MIME_TYPES, RECORDING_MIME_CANDIDATES, STARTUP_SHORT_STALL_WINDOW_SECONDS } from "../dist/shared/types.js";
 import { getRegionLimit } from "../dist/shared/normalize.js";
 import { getNextRecordingFrameDeadline } from "../dist/content/frame_capture.js";
 
@@ -27,7 +27,7 @@ function visit(node) {
   if (ts.isFunctionDeclaration(node) && node.name?.text === "selectDirectMimeType") selectDirectMimeTypeSource = node.getText(file);
   if (ts.isFunctionDeclaration(node) && node.name?.text === "toggleRecording") toggleRecordingSource = node.getText(file);
   if (ts.isFunctionDeclaration(node) && node.name?.text === "attachBorderControls") borderControlsSource = node.getText(file);
-  if (ts.isFunctionDeclaration(node) && ["startDirectRecording", "syncStartedRecording", "createRecordingSession", "prepareDirectRecordingEncoder", "checkDirectRecordingEncoder", "ignoreRecordingRejection", "releaseDirectRecordingCapture", "stopRecordingStream"].includes(node.name?.text)) startupFunctions.push(node.getText(file));
+  if (ts.isFunctionDeclaration(node) && ["startDirectRecording", "startScreenRecording", "syncStartedRecording", "createRecordingSession", "prepareDirectRecordingEncoder", "requiresHardwareDiscovery", "checkDirectRecordingEncoder", "ignoreRecordingRejection", "releaseDirectRecordingCapture", "stopRecordingStream"].includes(node.name?.text)) startupFunctions.push(node.getText(file));
   if (ts.isVariableDeclaration(node) && node.name.getText(file) === "drawFrame") drawFrameSource = node.initializer.getText(file);
   if (ts.isFunctionDeclaration(node) && ["getVideoStream", "handleDetachedPlayer", "stopDirectRecordingForUnload", "stopDirectRecordingAfterSourceChange", "stopRegionLayoutWatch", "stopRecordingStream", "releaseDirectRecordingCapture", "releaseDirectRecordingRecorder", "cleanupDirectRecordingSession", "startDirectPart", "finalizeDirectRecording", "cancelDirectRecordingSession", "abortDirectRecordingSession", "failDirectRecordingSession", "finishDirectRecording", "requestDirectPartStop"].includes(node.name?.text)) {
     functions.push(node.getText(file));
@@ -333,13 +333,13 @@ draw();
 assert.equal(paints, 3, "do not draw a frame while the player is loading");
 console.log("recording frame checks passed");
 
-const checkStartupGap = new Function("video", "clock", `
+const checkStartupGap = new Function("video", "clock", "STARTUP_SHORT_STALL_WINDOW_SECONDS", `
   let lastPaintedFrame = -1, cropLayoutKey = 'fixed';
   const layoutDependsOnlyOnVideoSize = true;
   let layoutVideoWidth = video.videoWidth, layoutVideoHeight = video.videoHeight;
   let startupStartedAt = 0, lastStartupFrameAt = 0, lastStartupMediaTime = 0;
   const STARTUP_FRAME_GAP_MS = 150, STARTUP_TRIM_MIN_SECONDS = 0.15, STARTUP_STALL_WINDOW_SECONDS = 2.5, STARTUP_TRIM_MAX_SECONDS = 5;
-  const STARTUP_SHORT_STALL_SECONDS = 0.09, STARTUP_SHORT_STALL_WINDOW_SECONDS = 0.5;
+  const STARTUP_SHORT_STALL_SECONDS = 0.09;
   const MILLISECONDS_PER_SECOND = 1000, performance = { now: () => clock.now };
   const HTMLMediaElement = { HAVE_CURRENT_DATA: 2 }, session = { placements: [] };
   const paintPlacements = () => !clock.blocked;
@@ -348,7 +348,7 @@ const checkStartupGap = new Function("video", "clock", `
 for (const gap of [33, 350]) {
   const clock = { now: 0 };
   const source = { ...video, readyState: 4, currentTime: 0 };
-  const { session, draw } = checkStartupGap(source, clock);
+  const { session, draw } = checkStartupGap(source, clock, STARTUP_SHORT_STALL_WINDOW_SECONDS);
   for (let now = 33; now <= 2475; now += 33) {
     clock.now = now;
     source.currentTime = now / 1000;
@@ -369,10 +369,10 @@ for (const gap of [33, 350]) {
   draw();
   assert.equal(session.startupTrimSeconds, gap === 33 ? undefined : end / 1000, "a stall crossing the startup deadline should be trimmed through recovery");
 }
-for (const beforeGap of [33, 495]) {
+for (const [beforeGap, expectedInspection] of [[33, true], [495, true], [957, undefined]]) {
   const clock = { now: 0 };
   const source = { ...video, readyState: 4, currentTime: 0 };
-  const { session, draw } = checkStartupGap(source, clock);
+  const { session, draw } = checkStartupGap(source, clock, STARTUP_SHORT_STALL_WINDOW_SECONDS);
   while (clock.now < beforeGap) {
     clock.now += 33;
     source.currentTime = clock.now / 1000;
@@ -383,7 +383,7 @@ for (const beforeGap of [33, 495]) {
   source.currentTime += 0.033;
   source.frame++;
   draw();
-  assert.equal(session.inspectStartup, beforeGap === 33 ? true : undefined, 'verify a short opening gap against saved timestamps');
+  assert.equal(session.inspectStartup, expectedInspection, 'verify a short opening gap against saved timestamps');
   assert.equal(session.startupTrimSeconds, undefined, 'a short opening gap must not force a cut from callback timing alone');
 }
 
@@ -432,6 +432,8 @@ console.log("recording border timer cleanup checks passed");
 // a pending Promise handler that still retains the drawing closure.
 const createStartup = new Function("getRegionLimit", "getNextRecordingFrameDeadline", "playerState", "mimeType", "nativeCapture", `
   let directSession = null, recordingEncoderCheck, savedFirstScreenRecording = false;
+  let now = 0;
+  const performance = { now: () => now };
   const timers = new Map(), refs = {};
   const window = { setInterval(fn) { timers.set(1, fn); return 1; }, clearInterval(id) { timers.delete(id); } };
   class MediaStream {
@@ -447,6 +449,7 @@ const createStartup = new Function("getRegionLimit", "getNextRecordingFrameDeadl
     const player = { ...playerState }; refs.video = new WeakRef(player); return player;
   };
   const waitForCurrentVideoFrame = async () => true;
+  const canUseSoftwareRecording = () => false;
   const prepareRecordingEncoder = async () => { refs.encoderPreparations = (refs.encoderPreparations ?? 0) + 1; };
   const computeDirectCropFromSelection = () => {
     refs.cropReads = (refs.cropReads ?? 0) + 1;
@@ -473,6 +476,7 @@ const createStartup = new Function("getRegionLimit", "getNextRecordingFrameDeadl
   const HTMLMediaElement = { HAVE_CURRENT_DATA: 2 };
   ${ts.transpile(startupFunctions.join("\n"), { target: ts.ScriptTarget.ES2022 })}
   return { start: startDirectRecording, refs, timers,
+    tick(time) { now = time; timers.get(1)(); },
     stop() { releaseDirectRecordingCapture(directSession); },
     finish() { directSession.resolveFinish(); } };
 `).bind(null, getRegionLimit, getNextRecordingFrameDeadline);
@@ -498,19 +502,43 @@ for (const nativeCapture of [true, 'fallback']) {
   await recording.start({ recordingId: 'lazy-canvas', region: {}, settings: {} });
   assert.equal(recording.refs.canvasContexts ?? 0, nativeCapture === true ? 0 : 1,
     'native capture must allocate a canvas context only when fallback painting is needed');
-  recording.timers.get(1)();
+  recording.tick(33);
   assert.equal(recording.refs.canvasContexts ?? 0, nativeCapture === true ? 0 : 1, 'fallback must reuse its prepared context');
   recording.stop(); recording.finish();
 }
 const stableRegions = createStartup({ muted: false, volume: 1, readyState: 4, videoWidth: 1920, videoHeight: 1080 });
 const relativeRegion = { videoRelative: { x: 0.1, y: 0.1, width: 0.3, height: 0.4 } };
 await stableRegions.start({ recordingId: 'stable-regions', fullPlayer: false, region: relativeRegion, regions: [relativeRegion, relativeRegion], settings: { enableMultiRegion: true } });
-stableRegions.timers.get(1)();
+stableRegions.tick(33);
 assert.equal(stableRegions.refs.cropReads, 2, 'unchanged video-relative regions must reuse their layout');
 stableRegions.refs.video.deref().videoWidth = 1280;
-stableRegions.timers.get(1)();
+stableRegions.tick(66);
 assert.equal(stableRegions.refs.cropReads, 4, 'a resolution change must rebuild video-relative crops');
 stableRegions.stop(); stableRegions.finish();
+{
+  let present;
+  const recording = createStartup({ muted: false, volume: 1, readyState: 4, videoWidth: 1920, videoHeight: 1080,
+    playbackRate: 1, totalVideoFrames: 0,
+    getVideoPlaybackQuality() { return { totalVideoFrames: this.totalVideoFrames }; },
+    requestVideoFrameCallback(callback) { present = callback; return 1; }, cancelVideoFrameCallback() {} });
+  await recording.start({ recordingId: 'late-presentation', region: {}, settings: {} });
+  present(30, { mediaTime: 1 });
+  const player = recording.refs.video.deref();
+  player.totalVideoFrames++;
+  const afterPresentation = recording.refs.paints;
+  recording.tick(33);
+  assert.equal(recording.refs.paints, afterPresentation, 'keep using presentation callbacks while frames arrive on time');
+  recording.tick(66);
+  assert.equal(recording.refs.paints, afterPresentation + 1, 'pick up a newer frame at the first timer tick after a missed presentation interval');
+  present(71, { mediaTime: 1 + 1 / 30 });
+  assert.equal(recording.refs.paints, afterPresentation + 2, 'a new presented frame can arrive immediately after a timer frame');
+  player.totalVideoFrames++;
+  recording.tick(80);
+  assert.equal(recording.refs.paints, afterPresentation + 2, 'the timer must not compete immediately after presentation resumes');
+  present(103, { mediaTime: 1 + 2 / 30 });
+  assert.equal(recording.refs.paints, afterPresentation + 3, 'resume the normal cadence on the next presentation');
+  recording.stop(); recording.finish();
+}
 for (const playbackRate of [0.5, 1, 2]) {
   let onFrame;
   const recording = createStartup({ muted: false, volume: 1, readyState: 4, videoWidth: 1920, videoHeight: 1080,

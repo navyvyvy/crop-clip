@@ -1,4 +1,5 @@
 import { createRecordingController } from "./recording_controller.js";
+import { canUseSoftwareRecording, softwareRecordingEnabled } from "./software_recording.js";
 import type { DirectCrop } from "./crop_layout.js";
 import { getPlayerRecordingState, type PlayerRecordingState } from "./player_state.js";
 import { canvasToBlob } from "../shared/canvas.js";
@@ -2476,9 +2477,12 @@ function findPrimaryVideoElement(): HTMLVideoElement | null {
 if (isExtensionContextAvailable()) {
   chrome.runtime.onMessage.addListener((message: ContentCommand, _sender, sendResponse: (response: MessageResponse<boolean | number> | RegionGeometryResponse | RegionGeometriesResponse) => void) => {
     if (message.type === "PREPARE_DIRECT_RECORDING") {
-      const video = message.settings.recordingCodec === "hevc" ? findPrimaryVideoElement() : null;
+      const video = (softwareRecordingEnabled && message.fullPlayer) || message.settings.recordingCodec === "hevc"
+        ? findPrimaryVideoElement() : null;
+      const preferSoftware = Boolean(message.fullPlayer) && canUseSoftwareRecording(video, message.settings);
       const prepare = message.fullPlayer && message.settings.enableOriginalStreamRecording
-        ? Promise.resolve() : prepareDirectRecordingEncoder(message.settings, video !== null && playbackUsesHevc(video));
+        ? Promise.resolve() : prepareDirectRecordingEncoder(message.settings,
+          message.settings.recordingCodec === "hevc" && video !== null && playbackUsesHevc(video), preferSoftware);
       void prepare
         .then(() => {
           preparedRecordingId = message.recordingId;
