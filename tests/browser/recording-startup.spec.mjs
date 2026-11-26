@@ -1,5 +1,6 @@
 import { test, expect, prepareVideo, decodeDownloads, interceptDownloads } from './fixtures.mjs';
 import fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 
 test('ready broadcast originals record without starting the screen encoder', async ({ extension }) => {
   const { context, page, worker } = extension;
@@ -1135,6 +1136,7 @@ for (const format of ['webm', 'mp4']) test(`full H.264 ${format} recordings excl
     }
     await page.waitForTimeout(duration);
     await expect(button).toHaveAttribute('data-recording', '');
+    const capture = automatic ? await worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState) : undefined;
     const opened = context.waitForEvent('page');
     await page.keyboard.press('e');
     const result = await opened;
@@ -1146,10 +1148,26 @@ for (const format of ['webm', 'mp4']) test(`full H.264 ${format} recordings excl
       expect(filename).toMatch(new RegExp(`_\\d{8}_\\d{6}_\\d+s\\.${format}$`));
       expect(download?.filename.endsWith(`.${format}`)).toBe(true);
       const bytes = await fs.readFile(download.filename);
-      await page.evaluate(({ data, format }) => {
-        window.testDownloads = [new Blob([Uint8Array.from(atob(data), byte => byte.charCodeAt(0))], { type: `video/${format}` })];
-      }, { data: bytes.toString('base64'), format });
-      expect(await decodeDownloads(page, 4.85)).toEqual([true]);
+      const inspection = await context.newPage();
+      try {
+        await inspection.goto(`chrome-extension://${new URL(worker.url()).host}/popup/popup.html`);
+        const saved = await inspection.evaluate(async recordingId => {
+          const { getPartsByRecordingId, getRecording } = await import('/shared/idb.js');
+          const [recording, [part]] = await Promise.all([getRecording(recordingId), getPartsByRecordingId(recordingId)]);
+          const hash = await crypto.subtle.digest('SHA-256', await part.blob.arrayBuffer());
+          return { startedAt: recording.createdAt, hash: Array.from(new Uint8Array(hash)) };
+        }, capture.recordingId);
+        expect(saved.startedAt - capture.startedAt, 'the automatic download must trim the injected opening stall').toBeGreaterThan(150);
+        expect(createHash('sha256').update(bytes).digest()).toEqual(Buffer.from(saved.hash));
+        const { video, decodeResult } = await inspectContinuityDownload(inspection, bytes, format);
+        expect(decodeResult, 'the automatic download must decode through the end').toBe(0);
+        expect(video.at(-1) - video[0], 'the download must retain the playable part of the recording').toBeGreaterThan(2);
+        const opening = video.filter(time => time - video[0] < 1);
+        expect(opening.length).toBeGreaterThan(10);
+        expect(Math.max(...opening.slice(1).map((time, index) => time - opening[index]))).toBeLessThan(0.18);
+      } finally {
+        await inspection.close();
+      }
       await expect.poll(() => worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState.status)).toBe('idle');
       continue;
     }

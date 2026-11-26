@@ -566,7 +566,7 @@ test('large normal MP4 edits download from disk without reading full outputs int
   }, id);
   await result.reload();
   await expect(result.locator('#split-status')).toHaveText('녹화 초반의 끊긴 구간을 제외했습니다.');
-  await expect.poll(() => result.locator('#preview-video').evaluate(video => video.duration)).toBeCloseTo(2, 1);
+  await expect.poll(() => result.locator('#preview-video').evaluate(video => video.duration)).toBeCloseTo(4 - 1.6, 1);
   await expect.poll(jobCount).toBe(1);
   await result.close();
   await worker.evaluate(async id => {
