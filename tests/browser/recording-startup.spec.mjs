@@ -420,14 +420,23 @@ function sampleColorBars(video) {
   const samples = [];
   for (const y of [25, 80]) {
     for (const x of [8, 30, 50, 65, 80, 95, 110, 130, 150]) {
-      const offset = (y * canvas.width + x) * 4;
-      samples.push(data[offset], data[offset + 1], data[offset + 2]);
+      const patch = [[], [], []];
+      for (let dy = -2; dy <= 2; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          const offset = ((y + dy) * canvas.width + x + dx) * 4;
+          for (let channel = 0; channel < 3; channel++) patch[channel].push(data[offset + channel]);
+        }
+      }
+      for (const channel of patch) {
+        channel.sort((a, b) => a - b);
+        samples.push(channel[Math.floor(channel.length / 2)]);
+      }
     }
   }
   return samples;
 }
 
-for (const [format, label] of [['webm', 'WebM'], ['mp4', 'MP4']]) test(`${label} download preserves the source playback colors`, async ({ extension }) => {
+for (const [format, label] of [['webm', 'WebM'], ['mp4', 'MP4']]) test(`${label} download preserves the source playback colors`, async ({ extension }, testInfo) => {
   const { context, page, worker } = extension;
   const source = await makeContinuitySource(context, worker, 4, 'smptehdbars=size=1920x1080:rate=30');
   await worker.evaluate(async outputFormat => {
@@ -468,7 +477,11 @@ for (const [format, label] of [['webm', 'WebM'], ['mp4', 'MP4']]) test(`${label}
   }, { format, encoded: bytes.toString('base64') });
   const actual = await result.locator('#test-saved-clip').evaluate(sampleColorBars);
   const differences = actual.map((channel, index) => Math.abs(channel - expected[index]));
-  expect(Math.max(...differences), `downloaded color bars ${actual} should match ${expected}`).toBeLessThanOrEqual(8);
+  const maxDifference = Math.max(...differences);
+  if (maxDifference > 8) {
+    await testInfo.attach(`downloaded.${format}`, { body: bytes, contentType: `video/${format}` });
+  }
+  expect(maxDifference, `downloaded color bars ${actual} should match ${expected}`).toBeLessThanOrEqual(8);
 });
 
 async function inspectContinuityDownload(result, bytes, format) {
