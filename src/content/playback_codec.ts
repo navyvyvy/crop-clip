@@ -1,4 +1,5 @@
 import { readMp4Tracks } from "../shared/mp4_boxes.js";
+import type { OriginalPlaybackTiming } from "./original_stream.js";
 
 (() => {
   if (typeof MediaSource === "undefined" || typeof SourceBuffer === "undefined") return;
@@ -7,6 +8,7 @@ import { readMp4Tracks } from "../shared/mp4_boxes.js";
   const sources = new Map<string, WeakRef<MediaSource>>();
   const codecs = new WeakMap<SourceBuffer, "hevc" | "other">();
   const mp4Buffers = new WeakSet<SourceBuffer>();
+  const lastSeek = new WeakMap<HTMLVideoElement, { src: string; startedAt: number }>();
   const createObjectURL = URL.createObjectURL;
   const addSourceBuffer = MediaSource.prototype.addSourceBuffer;
   const changeType = SourceBuffer.prototype.changeType;
@@ -70,18 +72,25 @@ import { readMp4Tracks } from "../shared/mp4_boxes.js";
     }
   });
 
+  document.addEventListener("seeking", event => {
+    const video = event.target;
+    if (video instanceof HTMLVideoElement) lastSeek.set(video, { src: video.currentSrc, startedAt: performance.now() });
+  }, true);
+
   document.addEventListener("cropclip-read-playback-offset", event => {
     const video = event.target;
     if (!(video instanceof HTMLVideoElement) || video.paused || !video.buffered.length) return;
+    const seek = lastSeek.get(video);
+    const timing: OriginalPlaybackTiming = { seekStartedAt: seek?.src === video.currentSrc ? seek.startedAt : undefined };
     const source = sources.get(video.currentSrc)?.deref();
-    if (!source) return;
     const end = video.buffered.end(video.buffered.length - 1);
-    for (const buffer of source.activeSourceBuffers) {
+    for (const buffer of source?.activeSourceBuffers ?? []) {
       if (buffer.mode !== "segments" || !buffer.buffered.length || !Number.isFinite(buffer.timestampOffset)) continue;
       if (Math.abs(buffer.buffered.end(buffer.buffered.length - 1) - end) < 0.15) {
-        video.dispatchEvent(new CustomEvent("cropclip-playback-offset", { detail: buffer.timestampOffset }));
-        return;
+        timing.offset = buffer.timestampOffset;
+        break;
       }
     }
+    video.dispatchEvent(new CustomEvent("cropclip-playback-offset", { detail: timing }));
   });
 })();

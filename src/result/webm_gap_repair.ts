@@ -1,24 +1,27 @@
-import { HIGH_RECORDING_FRAME_RATE, STANDARD_RECORDING_FRAME_RATE, WEBM_REPAIR_MIN_GAP_SECONDS, WEBM_REPAIR_MIN_OPENING_SECONDS } from "../shared/types.js";
+import { HIGH_RECORDING_FRAME_RATE, STANDARD_RECORDING_FRAME_RATE, STARTUP_SHORT_STALL_SECONDS, STARTUP_SHORT_STALL_WINDOW_SECONDS, STARTUP_STALL_WINDOW_SECONDS, WEBM_REPAIR_MIN_GAP_SECONDS, WEBM_REPAIR_MIN_OPENING_SECONDS } from "../shared/types.js";
 
 interface VideoGap {
   start: number;
   end: number;
 }
 
-export function findRepairableVideoGaps(timestamps: number[], frameRate = STANDARD_RECORDING_FRAME_RATE): VideoGap[] {
+export function findRepairableVideoGaps(timestamps: number[], frameRate: number | undefined, { opening, middle }: { opening: boolean; middle: boolean }): VideoGap[] {
   const frames = [...new Set(timestamps.filter(time => Number.isFinite(time) && time >= 0))].sort((a, b) => a - b);
   const frameSeconds = 1 / (frameRate === HIGH_RECORDING_FRAME_RATE ? HIGH_RECORDING_FRAME_RATE : STANDARD_RECORDING_FRAME_RATE);
   const gaps: VideoGap[] = [];
-  for (let index = 1; index < frames.length; index++) {
-    const previous = frames[index - 1];
+  for (let index = opening ? 0 : 1; index < frames.length; index++) {
+    const previous = frames[index - 1] ?? 0;
     const next = frames[index];
     const gap = next - previous;
-    // Leave an interrupted start to the opening repair, which also handles decoder preroll.
-    if (previous >= WEBM_REPAIR_MIN_OPENING_SECONDS && gap >= WEBM_REPAIR_MIN_GAP_SECONDS && gap <= 2) {
+    const openingGap = opening && previous < STARTUP_STALL_WINDOW_SECONDS
+      && gap >= (previous < STARTUP_SHORT_STALL_WINDOW_SECONDS ? STARTUP_SHORT_STALL_SECONDS : WEBM_REPAIR_MIN_GAP_SECONDS);
+    const middleGap = middle && previous >= WEBM_REPAIR_MIN_OPENING_SECONDS && gap >= WEBM_REPAIR_MIN_GAP_SECONDS;
+    if ((openingGap || middleGap) && gap <= 2) {
       gaps.push({ start: previous + frameSeconds, end: next });
     }
   }
-  return gaps.length <= 8 && getRemovedGapSeconds(gaps) <= 5 ? gaps : [];
+  const removed = getRemovedGapSeconds(gaps);
+  return gaps.length <= 8 && removed <= 5 && (frames.at(-1) ?? 0) - removed >= 0.5 ? gaps : [];
 }
 
 export function getRemovedGapSeconds(gaps: readonly VideoGap[]): number {

@@ -33,7 +33,7 @@ import {
   type TimeRange,
   type TimeRangeHandle,
 } from "../shared/time_range.js";
-import { MAX_VIDEO_BITS_PER_SECOND, MIN_VIDEO_BITS_PER_SECOND, RECORDING_FORMAT, SPLIT_COUNTS, STANDARD_RECORDING_FRAME_RATE, STARTUP_SHORT_STALL_SECONDS, STARTUP_SHORT_STALL_WINDOW_SECONDS, STARTUP_STALL_WINDOW_SECONDS, STARTUP_TRIM_MAX_SECONDS, type RecordingFormat, type RecordingRecord, type Settings } from "../shared/types.js";
+import { RECORDING_FORMAT, SPLIT_COUNTS, STANDARD_RECORDING_FRAME_RATE, STARTUP_SHORT_STALL_SECONDS, STARTUP_SHORT_STALL_WINDOW_SECONDS, STARTUP_STALL_WINDOW_SECONDS, STARTUP_TRIM_MAX_SECONDS, type RecordingFormat, type RecordingRecord, type Settings } from "../shared/types.js";
 
 const params = new URLSearchParams(location.search);
 const recordingId = params.get("id") ?? "";
@@ -539,45 +539,20 @@ async function makeWebmSeekable(part: LoadedPart): Promise<LoadedPart> {
   }
 }
 
-function getWebmVideoQualityArgs(part: LoadedPart): string[] {
-  const bitrate = part.videoBitsPerSecond;
-  return typeof bitrate === "number" && bitrate >= MIN_VIDEO_BITS_PER_SECOND && bitrate <= MAX_VIDEO_BITS_PER_SECOND
-    ? ["-b:v", String(bitrate)] : ["-crf", "18"];
-}
-
-async function trimRecordingStartup(part: LoadedPart, trimSeconds: number, disk?: FileSystemDirectoryHandle): Promise<{ blob: Blob; cutSeconds: number } | null> {
+async function trimMp4Startup(part: LoadedPart, trimSeconds: number, disk?: FileSystemDirectoryHandle): Promise<{ blob: Blob; cutSeconds: number } | null> {
   return withFfmpegInput(part, async (ffmpeg, inputName) => {
-    const format = part.extension === RECORDING_FORMAT.webm ? "matroska" : "mp4";
     const list = "output-startup.csv";
-    const name = `output-startup-1.${part.extension}`;
-    const validStart = async (path: string) => {
-      if (await ffmpeg.exec([
-        "-xerror", "-i", path, "-map", "0:v:0", "-frames:v", "1", "-abort_on", "empty_output", "-f", "null", "-",
-      ]) !== 0) return false;
-      if (format !== "matroska") return true;
-      const probeName = "output-startup-video-duration.json";
-      await deleteFfmpegFile(ffmpeg, probeName, true);
-      await ffmpeg.ffprobe(["-v", "error", "-select_streams", "v:0", "-read_intervals", "%+0.1", "-show_entries",
-        "stream=start_time,duration:stream_tags=DURATION", "-of", "json", "-o", probeName, path], 4_000);
-      const data = await ffmpeg.readFile(probeName);
-      const { streams } = JSON.parse(typeof data === "string" ? data : new TextDecoder().decode(data)) as {
-        streams?: { start_time?: string; duration?: string; tags?: { DURATION?: string } }[];
-      };
-      const video = streams?.[0];
-      const duration = Number(video?.duration);
-      const taggedEnd = parseTimeInput(video?.tags?.DURATION ?? "");
-      const playableSeconds = duration > 0 ? duration : taggedEnd - (Number(video?.start_time) || 0);
-      return playableSeconds >= STARTUP_MIN_PLAYABLE_SECONDS;
-    };
-    const mimeType = getConvertedMimeType(part.extension);
-    if (disk) await mountEditOutput(ffmpeg, disk, `output-startup-0.${part.extension}`);
+    const name = "output-startup-1.mp4";
+    const validStart = async (path: string) => await ffmpeg.exec([
+      "-xerror", "-i", path, "-map", "0:v:0", "-frames:v", "1", "-abort_on", "empty_output", "-f", "null", "-",
+    ]) === 0;
+    if (disk) await mountEditOutput(ffmpeg, disk, "output-startup-0.mp4");
     const output = disk && await mountEditOutput(ffmpeg, disk, name);
     const code = await ffmpeg.exec([
       "-i", inputName, "-map", "0", "-c", "copy", "-f", "segment",
-      "-segment_format", format, "-segment_times", String(trimSeconds),
-      ...(format === "matroska" ? ["-segment_format_options", "cues_to_front=1"] : []),
+      "-segment_format", "mp4", "-segment_times", String(trimSeconds),
       "-segment_list", list, "-segment_list_type", "csv", "-reset_timestamps", "1",
-      `output-startup-%d.${part.extension}`,
+      "output-startup-%d.mp4",
     ]);
     if (code === 0) {
       const data = await ffmpeg.readFile(list);
@@ -587,35 +562,33 @@ async function trimRecordingStartup(part: LoadedPart, trimSeconds: number, disk?
       // A later keyframe can discard valid footage after playback has already resumed.
       if (Math.abs(cutSeconds - trimSeconds) <= 0.05
         && Number(end) - cutSeconds >= STARTUP_MIN_PLAYABLE_SECONDS && await validStart(name)) {
-        const blob = await readEditOutput(ffmpeg, name, mimeType, output);
+        const blob = await readEditOutput(ffmpeg, name, "video/mp4", output);
         if (blob.size > 0) return { blob, cutSeconds };
       }
     }
 
     await clearFfmpegOutputs(ffmpeg, true);
-    const preciseName = `output-startup-trimmed.${part.extension}`;
+    const preciseName = "output-startup-trimmed.mp4";
     const preciseFile = disk && await mountEditOutput(ffmpeg, disk, preciseName);
     const preciseCode = await ffmpeg.exec([
       "-ss", String(trimSeconds), "-i", inputName, "-map", "0:v:0", "-map", "0:a:0?",
-      // MP4 can hide decoder preroll in its edit list. Matroska needs a new opening keyframe.
-      ...(format === "mp4" ? ["-c", "copy", "-use_editlist", "1", "-avoid_negative_ts", "disabled", "-movflags", "+faststart"]
-        : ["-c:v", "libx264", "-preset", "veryfast", ...getWebmVideoQualityArgs(part), "-fps_mode", "vfr",
-          "-c:a", "libvorbis", "-cues_to_front", "1", "-f", format]),
+      "-c", "copy", "-use_editlist", "1", "-avoid_negative_ts", "disabled", "-movflags", "+faststart",
       preciseName,
     ]);
     if (preciseCode !== 0 || !await validStart(preciseName)) return null;
-    const blob = await readEditOutput(ffmpeg, preciseName, mimeType, preciseFile);
+    const blob = await readEditOutput(ffmpeg, preciseName, "video/mp4", preciseFile);
     return blob.size > 0 ? { blob, cutSeconds: trimSeconds } : null;
   }, "녹화 초반의 끊긴 구간을 정리하는 중입니다.");
 }
 
-async function repairWebmGaps(part: LoadedPart): Promise<LoadedPart | undefined> {
+async function repairWebmGaps(part: LoadedPart, opening: boolean, middle: boolean): Promise<LoadedPart | undefined> {
   if (!part.blob) return;
   const workspace = part.size >= DISK_OUTPUT_MIN_BYTES ? await createEditWorkspace(part.recordingId) : undefined;
   try {
     return await withFfmpegInput(part, async (ffmpeg, inputName) => {
       const probeName = "output-gap-probe.json";
-      await ffmpeg.ffprobe(["-v", "error", "-show_packets", "-show_streams", "-show_format",
+      await ffmpeg.ffprobe(["-v", "error", ...(!middle ? ["-read_intervals", `%+${STARTUP_TRIM_MAX_SECONDS}`] : []),
+        "-show_packets", "-show_streams", "-show_format",
         "-show_entries", "packet=codec_type,pts_time:stream=codec_type:format=start_time", "-of", "json", "-o", probeName, inputName], 8_000);
       const json = await ffmpeg.readFile(probeName);
       const probe = JSON.parse(typeof json === "string" ? json : new TextDecoder().decode(json)) as {
@@ -625,7 +598,7 @@ async function repairWebmGaps(part: LoadedPart): Promise<LoadedPart | undefined>
       };
       const origin = Number(probe.format?.start_time) || 0;
       const frames = (probe.packets ?? []).filter(packet => packet.codec_type === "video").map(packet => Number(packet.pts_time) - origin);
-      const gaps = findRepairableVideoGaps(frames, part.frameRate);
+      const gaps = findRepairableVideoGaps(frames, part.frameRate, { opening, middle });
       if (!gaps.length) return;
 
       const name = "output-gap-repaired.webm";
@@ -639,7 +612,8 @@ async function repairWebmGaps(part: LoadedPart): Promise<LoadedPart | undefined>
       const blob = await readEditOutput(ffmpeg, name, "video/webm", output);
       if (!blob.size) return;
       return await savePreparedPart({ ...part, blob, mimeType: blob.type, size: blob.size, originalBlob: part.originalBlob ?? part.blob,
-        repairVideoGaps: undefined, removedVideoGapSeconds: getRemovedGapSeconds(gaps), seekMetadataVersion: SEEK_METADATA_VERSION }, Boolean(output));
+        inspectStartup: undefined, startupTrimSeconds: undefined, repairVideoGaps: undefined,
+        removedVideoGapSeconds: (part.removedVideoGapSeconds ?? 0) + getRemovedGapSeconds(gaps), seekMetadataVersion: SEEK_METADATA_VERSION }, Boolean(output));
     }, "녹화 파일을 확인하는 중입니다.");
   } finally {
     await workspace?.remove().catch(() => {});
@@ -708,14 +682,24 @@ async function prepareRecordedFiles(includeSeekMetadata: boolean): Promise<strin
   const recordedDuration = getRecordingDurationFallback();
   let cutSeconds = 0;
   let keptUntrimmed = false;
-  for (const saved of parts) {
-    let source = saved;
+  let repairedWebm = false;
+  for (const source of parts) {
     if (source.originalStreamStart !== undefined) {
       prepared.push(await prepareOriginalStream(source));
       continue;
     }
-    if (source.extension === RECORDING_FORMAT.webm && source.repairVideoGaps) {
-      source = await repairWebmGaps(source).catch(() => undefined) ?? source;
+    if (source.extension === RECORDING_FORMAT.webm) {
+      const opening = Boolean(source.inspectStartup || source.startupTrimSeconds);
+      const middle = source.repairVideoGaps === true;
+      const repaired = opening || middle ? await repairWebmGaps(source, opening, middle).catch(() => undefined) : undefined;
+      if (repaired) {
+        repairedWebm = true;
+        prepared.push(repaired);
+      } else {
+        const part = { ...source, inspectStartup: undefined, startupTrimSeconds: undefined, repairVideoGaps: undefined };
+        prepared.push(includeSeekMetadata ? await makeWebmSeekable(part) : part);
+      }
+      continue;
     }
     const enoughAfterCaptureHint = !source.startupTrimSeconds
       || recordedDuration >= source.startupTrimSeconds + STARTUP_MIN_PLAYABLE_SECONDS;
@@ -731,7 +715,7 @@ async function prepareRecordedFiles(includeSeekMetadata: boolean): Promise<strin
       let workspace: Awaited<ReturnType<typeof createEditWorkspace>> | undefined;
       try {
         if (part.size >= DISK_OUTPUT_MIN_BYTES) workspace = await createEditWorkspace(part.recordingId);
-        const cut = await trimRecordingStartup(part, trimSeconds, workspace?.disk);
+        const cut = await trimMp4Startup(part, trimSeconds, workspace?.disk);
         if (cut) {
           const trimmed = {
             ...part,
@@ -753,7 +737,7 @@ async function prepareRecordedFiles(includeSeekMetadata: boolean): Promise<strin
       }
     }
     keptUntrimmed ||= Boolean(trimSeconds);
-    prepared.push(includeSeekMetadata ? await makeWebmSeekable(part) : part);
+    prepared.push(part);
   }
   parts = prepared;
 
@@ -768,6 +752,7 @@ async function prepareRecordedFiles(includeSeekMetadata: boolean): Promise<strin
   recordingDurationSeconds = getRecordingDurationFallback();
   if (keptUntrimmed) return "초반 구간을 정리할 수 없어 원본을 유지했습니다.";
   if (cutSeconds > 0) return "녹화 초반의 끊긴 구간을 제외했습니다.";
+  if (repairedWebm) return "녹화 파일의 끊긴 구간을 정리했습니다.";
   return undefined;
 }
 

@@ -20,7 +20,8 @@ const TIMELINE_HEADER_BYTES = 8 * 1024;
 const TIMELINE_HEADER_RANGE = `bytes=0-${TIMELINE_HEADER_BYTES - 1}`;
 const TIMELINE_TOLERANCE_SECONDS = 0.15;
 
-export type OriginalStreamProbe = { offset: number; playlist: string };
+export type OriginalStreamProbe = { offset: number; playlists: string[] };
+export type OriginalPlaybackTiming = { offset?: number; seekStartedAt?: number };
 
 // Injected into the player page after clicking record. Keep this function self-contained.
 export function probeOriginalStream(src: string, prefixes: string[], bufferedOnly = false): Promise<MessageResponse<OriginalStreamProbe>> {
@@ -31,29 +32,46 @@ export function probeOriginalStream(src: string, prefixes: string[], bufferedOnl
       return;
     }
     type ProbeHook = SourceBuffer["appendBuffer"] & { cancelCropClipProbe?: () => void };
-    const choosePlaylist = (entries: PerformanceEntry[]): PerformanceEntry | undefined => {
-      const playlists = entries.filter(entry => /^https?:\/\/[^?]+\.m3u8(?:\?|$)/.test(entry.name)).reverse();
-      const candidates = playlists.filter(entry => prefixes.some(prefix => entry.name.startsWith(prefix)));
-      return candidates.find(entry => new URL(entry.name).searchParams.has("_HLS_msn")) ?? candidates[0];
-    };
-    let playlist = choosePlaylist(performance.getEntriesByType("resource")
-      .filter(entry => performance.now() - (entry.startTime + entry.duration) <= 6_000));
-    let offset: number | undefined;
-    if (playlist && bufferedOnly) {
-      const receive = (event: Event) => { offset = (event as CustomEvent<number>).detail; };
-      video.addEventListener("cropclip-playback-offset", receive, { once: true });
-      video.dispatchEvent(new Event("cropclip-read-playback-offset", { bubbles: true }));
-      video.removeEventListener("cropclip-playback-offset", receive);
-      if (offset !== undefined && Number.isFinite(offset)) {
-        resolve({ ok: true, data: { offset, playlist: playlist.name } });
-        return;
+    (SourceBuffer.prototype.appendBuffer as ProbeHook).cancelCropClipProbe?.();
+    let timing: OriginalPlaybackTiming | undefined;
+    const receive = (event: Event) => { timing = (event as CustomEvent<OriginalPlaybackTiming>).detail; };
+    video.addEventListener("cropclip-playback-offset", receive, { once: true });
+    video.dispatchEvent(new Event("cropclip-read-playback-offset", { bubbles: true }));
+    video.removeEventListener("cropclip-playback-offset", receive);
+    const seekStartedAt = timing?.seekStartedAt ?? Infinity;
+    const choosePlaylists = (entries: PerformanceEntry[]): PerformanceEntry[] => {
+      const cutoff = Math.min(performance.now() - 6_000, seekStartedAt);
+      const candidates = entries.filter(({ name, startTime, duration }) => startTime + duration >= cutoff
+        && /^https?:\/\/[^?]+\.m3u8(?:\?|$)/.test(name)
+        && prefixes.some(prefix => name.startsWith(prefix)))
+        .map(entry => {
+          const url = new URL(entry.name);
+          const completedAt = entry.startTime + entry.duration;
+          const priority = completedAt >= seekStartedAt ? 2 : Number(url.searchParams.has("_HLS_msn"));
+          // Deduplicate polling positions without changing the URL used to fetch the playlist.
+          url.searchParams.delete("_HLS_msn");
+          url.searchParams.delete("_HLS_part");
+          return { entry, key: url.href, priority, completedAt };
+        })
+        .sort((a, b) => b.priority - a.priority || b.completedAt - a.completedAt);
+      const selected = new Map<string, PerformanceEntry>();
+      for (const { entry, key } of candidates) {
+        if (!selected.has(key)) selected.set(key, entry);
+        if (selected.size === 3) break;
       }
+      return [...selected.values()];
+    };
+    let playlists = choosePlaylists(performance.getEntriesByType("resource"));
+    let offset = timing?.offset;
+    if (offset !== undefined && Number.isFinite(offset) && playlists.length) {
+      resolve({ ok: true, data: { offset, playlists: playlists.map(playlist => playlist.name) } });
+      return;
     }
+    if (!Number.isFinite(offset)) offset = undefined;
     if (bufferedOnly) {
       resolve({ ok: false, error: "재생 중인 원본 위치를 바로 확인하지 못했습니다." });
       return;
     }
-    (SourceBuffer.prototype.appendBuffer as ProbeHook).cancelCropClipProbe?.();
     const original = SourceBuffer.prototype.appendBuffer;
     let finished = false;
     const listeners = new Map<SourceBuffer, () => void>();
@@ -65,12 +83,12 @@ export function probeOriginalStream(src: string, prefixes: string[], bufferedOnl
       for (const [buffer, listener] of listeners) buffer.removeEventListener("updateend", listener);
       listeners.clear();
       video = undefined;
-      playlist = undefined;
+      playlists = [];
       if (SourceBuffer.prototype.appendBuffer === sample) SourceBuffer.prototype.appendBuffer = original;
       resolve(result);
     };
     const tryFinish = () => {
-      if (offset !== undefined && playlist) finish({ ok: true, data: { offset, playlist: playlist.name } });
+      if (offset !== undefined && playlists.length) finish({ ok: true, data: { offset, playlists: playlists.map(playlist => playlist.name) } });
     };
     function sample(this: SourceBuffer, buffer: BufferSource): void {
       original.call(this, buffer);
@@ -93,13 +111,11 @@ export function probeOriginalStream(src: string, prefixes: string[], bufferedOnl
       }
     }
     const observer = new PerformanceObserver(list => {
-      const candidate = choosePlaylist(list.getEntries());
-      if (candidate && (!playlist || new URL(candidate.name).searchParams.has("_HLS_msn")
-        || !new URL(playlist.name).searchParams.has("_HLS_msn"))) playlist = candidate;
+      playlists = choosePlaylists([...playlists, ...list.getEntries()]);
       tryFinish();
     });
     const timer = setTimeout(() => {
-      finish({ ok: false, error: playlist ? "방송의 재생 시각을 원본과 맞추지 못했습니다." : "이 재생 방식의 원본 목록을 찾지 못했습니다." });
+      finish({ ok: false, error: playlists.length ? "방송의 재생 시각을 원본과 맞추지 못했습니다." : "이 재생 방식의 원본 목록을 찾지 못했습니다." });
     }, 3_000);
     (sample as ProbeHook).cancelCropClipProbe = () => finish({ ok: false, error: "새 원본 탐색을 시작했습니다." });
     SourceBuffer.prototype.appendBuffer = sample;
@@ -109,8 +125,14 @@ export function probeOriginalStream(src: string, prefixes: string[], bufferedOnl
 
 export class OriginalStreamError extends Error {}
 
+class OriginalStreamNotReadyError extends OriginalStreamError {
+  constructor(readonly availableThrough: number) {
+    super("클릭한 위치의 원본 조각이 아직 준비되지 않았습니다.");
+  }
+}
+
 interface Track { id: number; timescale: number }
-interface Segment { duration: number; url: string }
+interface Segment { duration: number; url: string; programDateTime?: number }
 
 function readVideoTrack(init: ArrayBuffer): Track {
   const data = new DataView(init);
@@ -178,13 +200,18 @@ function parsePlaylist(text: string, url: URL): { init: string; sequence: number
   const sequence = Number(text.match(/^#EXT-X-MEDIA-SEQUENCE:(\d+)\s*$/m)?.[1]);
   const segments: Segment[] = [];
   let duration: number | undefined;
+  let programDateTime: number | undefined;
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (line.startsWith("#EXTINF:")) {
       duration = Number(line.slice(8).split(",", 1)[0]);
+    } else if (line.startsWith("#EXT-X-PROGRAM-DATE-TIME:")) {
+      const time = Date.parse(line.slice("#EXT-X-PROGRAM-DATE-TIME:".length));
+      programDateTime = Number.isFinite(time) ? time : undefined;
     } else if (duration !== undefined && line && !line.startsWith("#")) {
-      segments.push({ duration, url: mediaUrl(line, url) });
+      segments.push({ duration, programDateTime, url: mediaUrl(line, url) });
       duration = undefined;
+      programDateTime = undefined;
     }
   }
   if (!map || !Number.isSafeInteger(sequence) || !segments.length || segments.some(item => !Number.isFinite(item.duration) || item.duration <= 0)) {
@@ -248,6 +275,33 @@ async function fetchFragment(url: string, signal: AbortSignal): Promise<Blob> {
   return readOriginalBody(await fetchOriginal(url, signal));
 }
 
+export async function openMatchingOriginalStream(playlists: string[], startSeconds: number, signal: AbortSignal, waitForLiveFragment: boolean) {
+  const urls = [...new Set(playlists.map(playlist => getOriginalPlaylist(playlist).href))];
+  if (urls.length === 1) return openOriginalStream(new URL(urls[0]), startSeconds, signal, { waitForLiveFragment });
+  let waitFor: { url: URL; availableThrough: number } | undefined;
+  let lastError: unknown = new OriginalStreamError("이 재생 방식의 원본 목록을 찾지 못했습니다.");
+  for (const value of urls) {
+    signal.throwIfAborted();
+    const url = new URL(value);
+    const attempt = new AbortController();
+    const deadline = setTimeout(() => attempt.abort(), 1_000);
+    try {
+      return await openOriginalStream(url, startSeconds, AbortSignal.any([signal, attempt.signal]), { waitForLiveFragment: false });
+    } catch (error) {
+      attempt.abort();
+      signal.throwIfAborted();
+      lastError = error;
+      if (error instanceof OriginalStreamNotReadyError && (!waitFor || error.availableThrough > waitFor.availableThrough)) {
+        waitFor = { url, availableThrough: error.availableThrough };
+      }
+    } finally {
+      clearTimeout(deadline);
+    }
+  }
+  if (waitForLiveFragment && waitFor) return openOriginalStream(waitFor.url, startSeconds, signal);
+  throw lastError;
+}
+
 export async function openOriginalStream(url: URL, startSeconds: number, signal: AbortSignal, { waitForLiveFragment = true } = {}) {
   const loadPlaylist = async (requestSignal = signal) =>
     parsePlaylist(await (await readOriginalBody(await fetchOriginal(url, requestSignal))).text(), url);
@@ -277,7 +331,7 @@ export async function openOriginalStream(url: URL, startSeconds: number, signal:
   let tail = await readTail(lastUrl);
   // Low-latency playback can reach a fragment before it is listed as complete.
   for (let retry = 0; startSeconds >= tail.start + playlist.segments[lastIndex].duration; retry++) {
-    if (!waitForLiveFragment || retry === 3) throw new OriginalStreamError("클릭한 위치의 원본 조각이 아직 준비되지 않았습니다.");
+    if (!waitForLiveFragment || retry === 3) throw new OriginalStreamNotReadyError(tail.start + playlist.segments[lastIndex].duration);
     await new Promise(resolve => setTimeout(resolve, POLL_MS));
     playlist = await loadPlaylist();
     if (playlist.init !== initUrl) throw new OriginalStreamError("원본 방송 재생 경로가 바뀌었습니다.");
@@ -294,18 +348,38 @@ export async function openOriginalStream(url: URL, startSeconds: number, signal:
   tail.complete = undefined;
   let index = lastIndex;
   let expectedStart = tail.start;
-  while (index > 0 && startSeconds < expectedStart) expectedStart -= playlist.segments[--index].duration;
-  if (startSeconds < expectedStart - TIMELINE_TOLERANCE_SECONDS) {
+  const tailDate = playlist.segments[lastIndex].programDateTime;
+  while (index > 0 && startSeconds < expectedStart) {
+    const { duration, programDateTime } = playlist.segments[--index];
+    // Small differences in EXTINF can accumulate across a long DVR playlist.
+    expectedStart = tailDate !== undefined && programDateTime !== undefined && programDateTime < tailDate
+      ? tail.start - (tailDate - programDateTime) / 1000
+      : expectedStart - duration;
+  }
+  if (tailDate === undefined && startSeconds < expectedStart - TIMELINE_TOLERANCE_SECONDS * (lastIndex + 1)) {
     throw new OriginalStreamError("클릭한 위치의 원본 조각을 찾지 못했습니다.");
   }
-  const cachedFirst = index === lastIndex ? last : undefined;
-  const first = cachedFirst ?? await fetchFragment(playlist.segments[index].url, signal);
+  let first: Blob;
+  let savedThrough: number;
+  let lower = 0;
+  let upper = lastIndex;
+  let estimateFromFragment = true;
+  for (;;) {
+    const segment = playlist.segments[index];
+    const cachedFirst = index === lastIndex ? last : undefined;
+    first = cachedFirst ?? await fetchFragment(segment.url, signal);
+    const firstStart = cachedFirst ? tail.start : await readFragmentStart(first, track);
+    savedThrough = firstStart + segment.duration;
+    if (startSeconds >= firstStart && startSeconds < savedThrough) break;
+    if (startSeconds < firstStart) upper = index - 1;
+    else lower = index + 1;
+    if (lower > upper) throw new OriginalStreamError("클릭한 위치의 원본 조각을 찾지 못했습니다.");
+    index = estimateFromFragment
+      ? Math.max(lower, Math.min(upper, index + Math.floor((startSeconds - firstStart) / segment.duration)))
+      : Math.floor((lower + upper) / 2);
+    estimateFromFragment = false;
+  }
   if (index === lastIndex) last = undefined;
-  const firstStart = cachedFirst ? tail.start : await readFragmentStart(first, track);
-  let savedThrough = firstStart + playlist.segments[index].duration;
-  if (startSeconds < firstStart || startSeconds >= savedThrough || Math.abs(firstStart - expectedStart) > TIMELINE_TOLERANCE_SECONDS) {
-    throw new OriginalStreamError("클릭한 위치의 원본 조각을 찾지 못했습니다.");
-  }
   let next = playlist.sequence + index + 1;
   const limit = startSeconds + MAX_ORIGINAL_STREAM_SECONDS;
   let firstChunk: Blob | undefined = new Blob([init, first], { type: "video/mp4" });

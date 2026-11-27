@@ -2,18 +2,21 @@ import { test, expect, prepareVideo, decodeDownloads, interceptDownloads } from 
 import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 
-test('ready broadcast originals record without starting the screen encoder', async ({ extension }) => {
+for (const rewind of [false, true]) test(rewind
+  ? 'original recording uses the rewound fragment and returns to live after cancellation'
+  : 'ready broadcast originals record without starting the screen encoder', async ({ extension }) => {
+  test.setTimeout(90_000);
   const { context, page, worker } = extension;
   const generator = await context.newPage();
   await generator.goto(`chrome-extension://${new URL(worker.url()).host}/result/result.html`);
-  const source = await generator.evaluate(async () => {
+  const source = await generator.evaluate(async duration => {
     const { loadFfmpeg, readFfmpegBlob, releaseFfmpeg } = await import('/result/ffmpeg.js');
     const ffmpeg = await loadFfmpeg(() => {});
     try {
       const code = await ffmpeg.exec([
-        '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30:duration=8',
-        '-f', 'lavfi', '-i', 'sine=duration=8',
-        '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac',
+        '-f', 'lavfi', '-i', `testsrc2=size=320x180:rate=30:duration=${duration}`,
+        '-f', 'lavfi', '-i', `sine=duration=${duration}`,
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '240', '-sc_threshold', '0', '-c:a', 'aac',
         '-movflags', '+frag_keyframe+empty_moov+default_base_moof', 'source.mp4',
       ]);
       if (code !== 0) throw new Error('Could not encode the broadcast fixture');
@@ -25,21 +28,25 @@ test('ready broadcast originals record without starting the screen encoder', asy
         reader.readAsDataURL(blob);
       });
     } finally { await releaseFfmpeg(); }
-  });
+  }, rewind ? 16 : 8);
   const bytes = Buffer.from(source, 'base64');
-  let fragment = 0;
+  const fragments = [];
   for (let offset = 0; offset + 8 <= bytes.length;) {
-    if (bytes.toString('ascii', offset + 4, offset + 8) === 'moof') { fragment = offset; break; }
+    if (bytes.toString('ascii', offset + 4, offset + 8) === 'moof') fragments.push(offset);
     const size = bytes.readUInt32BE(offset);
     if (size < 8) break;
     offset += size;
   }
-  expect(fragment).toBeGreaterThan(0);
+  expect(fragments).toHaveLength(rewind ? 2 : 1);
+  const [firstFragment, secondFragment = bytes.length] = fragments;
   const base = 'https://nvelop-slight-slit.pstatic.net/cropclip-startup-fixture';
+  const playlist = (sequence, segment) => `#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:${sequence}\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:8,\n${segment}\n`;
   const files = {
-    'live.m3u8': '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:8,\nsegment.m4s\n',
-    'init.mp4': bytes.subarray(0, fragment),
-    'segment.m4s': bytes.subarray(fragment),
+    'live.m3u8': rewind ? playlist(2, 'latest.m4s') : playlist(1, 'first.m4s'),
+    'rewind.m3u8': playlist(1, 'first.m4s'),
+    'init.mp4': bytes.subarray(0, firstFragment),
+    'first.m4s': bytes.subarray(firstFragment, secondFragment),
+    'latest.m4s': bytes.subarray(secondFragment),
   };
   await page.route(`${base}/*`, route => route.fulfill({
     body: files[new URL(route.request().url()).pathname.split('/').at(-1)],
@@ -47,7 +54,8 @@ test('ready broadcast originals record without starting the screen encoder', asy
   }));
   await page.bringToFront();
   await page.getByRole('button', { name: 'Native', exact: true }).click();
-  await page.locator('video').evaluate(async (video, { source, base }) => {
+  const video = page.locator('video');
+  await video.evaluate(async (video, { source, base, rewind }) => {
     history.pushState({}, '', '/live/original-startup-fixture');
     const media = new MediaSource();
     video.src = URL.createObjectURL(media);
@@ -56,10 +64,10 @@ test('ready broadcast originals record without starting the screen encoder', asy
     const appended = new Promise(resolve => buffer.addEventListener('updateend', resolve, { once: true }));
     buffer.appendBuffer(Uint8Array.from(atob(source), byte => byte.charCodeAt(0)));
     await appended;
-    video.currentTime = 0.5;
+    video.currentTime = rewind ? 8.5 : 0.5;
     await video.play();
-    await (await fetch(`${base}/live.m3u8`)).text();
-  }, { source, base });
+    await (await fetch(`${base}/live.m3u8?_HLS_msn=${rewind ? 2 : 1}`)).text();
+  }, { source, base, rewind });
   await worker.evaluate(async () => {
     const { settings } = await chrome.storage.local.get('settings');
     await chrome.storage.local.set({ settings: { ...settings, enableOriginalStreamRecording: true } });
@@ -74,19 +82,44 @@ test('ready broadcast originals record without starting the screen encoder', asy
       };
     } });
   });
-  const before = await page.locator('video').evaluate(video => video.currentTime);
-  await page.keyboard.press('e');
-  await expect(page.locator('#crop-clip-seek-feedback')).toHaveText('원본 저장 중');
-  await expect(page.locator('html')).toHaveAttribute('data-screen-recorder-starts', '0');
-  const { recordingId, startedAt } = await worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState);
-  expect(startedAt).toBeGreaterThan(0);
-  await expect.poll(() => generator.evaluate(async id => {
+  const readState = () => worker.evaluate(async () => (await chrome.storage.local.get('recordingState')).recordingState);
+  const readFirstChunk = recordingId => generator.evaluate(async id => {
     const { getChunksByRecordingId } = await import('/shared/idb.js');
     const [chunk] = await getChunksByRecordingId(id);
     return chunk?.originalStreamStart ?? -1;
-  }, recordingId)).toBeGreaterThanOrEqual(before - 0.05);
+  }, recordingId);
+  if (rewind) {
+    const seekAndLoad = (time, path) => video.evaluate(async (video, { time, url }) => {
+      const seeked = new Promise(resolve => video.addEventListener('seeked', resolve, { once: true }));
+      video.currentTime = time;
+      await seeked;
+      await (await fetch(url)).text();
+    }, { time, url: `${base}/${path}` });
+    await seekAndLoad(0.75, 'rewind.m3u8');
+    await page.evaluate(async base => { await (await fetch(`${base}/live.m3u8?_HLS_msn=2`)).text(); }, base);
+    await page.keyboard.press('e');
+    await expect(page.locator('#crop-clip-seek-feedback')).toHaveText('원본 저장 중');
+    const { recordingId: cancelledId } = await readState();
+    await expect.poll(() => readFirstChunk(cancelledId)).toBeGreaterThanOrEqual(0.75);
+    expect(await readFirstChunk(cancelledId)).toBeLessThan(8);
+    await page.keyboard.press('c');
+    await expect.poll(async () => (await readState()).status).toBe('idle');
+    await expect.poll(() => readFirstChunk(cancelledId)).toBe(-1);
+    await seekAndLoad(8.5, 'live.m3u8?_HLS_msn=2');
+    const recordButton = page.locator('#crop-clip-chzzk-record-button');
+    await expect(recordButton).toHaveAttribute('aria-busy', 'false');
+    await expect(recordButton).not.toHaveAttribute('data-recording', '');
+  }
+  const before = await video.evaluate(video => video.currentTime);
+  await page.keyboard.press('e');
+  await expect(page.locator('#crop-clip-seek-feedback')).toHaveText('원본 저장 중');
+  if (!rewind) await expect(page.locator('html')).toHaveAttribute('data-screen-recorder-starts', '0');
+  const { recordingId, startedAt } = await readState();
+  expect(startedAt).toBeGreaterThan(0);
+  await expect.poll(() => readFirstChunk(recordingId)).toBeGreaterThanOrEqual(before - 0.05);
+  const originalStart = await readFirstChunk(recordingId);
   await generator.close();
-  await expect.poll(() => page.locator('video').evaluate(video => video.currentTime)).toBeGreaterThan(before + 1.1);
+  await expect.poll(() => video.evaluate(video => video.currentTime)).toBeGreaterThan(originalStart + 1.1);
   const opened = context.waitForEvent('page');
   await page.keyboard.press('e');
   const result = await opened;
@@ -361,6 +394,7 @@ for (const [format, label] of [['webm', 'WebM'], ['mp4', 'MP4']]) test(`${label}
   const audioSeconds = audio.at(-1).end - audio[0].start;
   const trackEnds = { video: video.at(-1), audio: audio.at(-1).end };
   const recordingSeconds = (savedTiming.endedAt - startedAt) / 1000;
+  if (format === 'webm') expect(savedTiming.createdAt).toBe(startedAt);
   const videoGaps = video.slice(1).map((time, index) => ({ at: video[index] - video[0], gap: time - video[index] }));
   const worstVideoGap = videoGaps.reduce((worst, frame) => frame.gap > worst.gap ? frame : worst, { at: 0, gap: 0 });
   const videoMaxGap = worstVideoGap.gap;
@@ -920,8 +954,8 @@ test('a recording with audio before its first video frame opens on video', async
 });
 
 for (const [format, scenario] of [['webm', 'early'], ['webm', 'late'], ['mp4', 'early'], ['webm', 'continuous'], ['webm', 'short-video']]) test({
-  early: `${format} download inspects opening timestamps even without a capture stall marker`,
-  late: 'WebM download detects a single startup gap after half a second',
+  early: format === 'webm' ? 'WebM repairs opening gaps without cutting its first frame' : 'mp4 download inspects opening timestamps even without a capture stall marker',
+  late: 'WebM repairs a gap after half a second without changing its start time',
   continuous: 'WebM download preserves a continuous opening despite a capture stall marker',
   'short-video': 'WebM startup trim preserves the source when only the audio has enough duration',
 }[scenario], async ({ extension }) => {
@@ -941,10 +975,11 @@ for (const [format, scenario] of [['webm', 'early'], ['webm', 'late'], ['mp4', '
       : format === 'webm' ? 'not(between(n,1,2)+eq(n,4))' : 'if(lt(t,1),not(mod(n,3)),1)';
     let blob;
     try {
+      const withAudio = shortVideo || (format === 'webm' && !continuous);
       const code = await ffmpeg.exec([
         '-f', 'lavfi', '-i', `color=red:size=160x90:rate=30:duration=${openingDuration}`,
         '-f', 'lavfi', '-i', `testsrc2=size=160x90:rate=30:duration=${shortVideo ? 0.4 : 1.3}`,
-        ...(shortVideo ? ['-f', 'lavfi', '-i', 'sine=duration=2.7', '-map', '2:a:0', '-c:a', 'libvorbis'] : []),
+        ...(withAudio ? ['-f', 'lavfi', '-i', `sine=duration=${shortVideo ? 2.7 : openingDuration + 1.3}`, '-map', '2:a:0', '-c:a', 'libvorbis'] : []),
         '-filter_complex', `[0:v][1:v]concat=n=2:v=1:a=0[joined];[joined]select='${keepFrames}'[v]`, '-map', '[v]', '-fps_mode', 'vfr',
         '-c:v', 'libx264', '-preset', 'ultrafast', '-g', scenario === 'late' ? '30' : '240', '-sc_threshold', '0',
         '-f', format === 'webm' ? 'matroska' : 'mp4', filename,
@@ -964,11 +999,8 @@ for (const [format, scenario] of [['webm', 'early'], ['webm', 'late'], ['mp4', '
       const post = Worker.prototype.postMessage;
       Worker.prototype.postMessage = function (message, ...args) {
         const ffmpegArgs = message?.data?.args;
-        if (message?.type === 'EXEC' && ffmpegArgs?.at(-1) === 'output-startup-trimmed.webm') {
-          window.testStartupTrimEncoding = {
-            bitrate: ffmpegArgs[ffmpegArgs.indexOf('-b:v') + 1],
-            preset: ffmpegArgs[ffmpegArgs.indexOf('-preset') + 1],
-          };
+        if (message?.type === 'EXEC' && ffmpegArgs?.at(-1) === 'output-gap-repaired.webm') {
+          window.testStartupVideoCodec = ffmpegArgs[ffmpegArgs.indexOf('-c:v') + 1];
         }
         return post.call(this, message, ...args);
       };
@@ -977,8 +1009,9 @@ for (const [format, scenario] of [['webm', 'early'], ['webm', 'late'], ['mp4', '
   await result.goto(`${base}?id=${id}`);
   await expect(result.locator('#result-loading')).toBeHidden({ timeout: 30000 });
   if (scenario === 'short-video') {
-    await expect(result.locator('#split-status')).toHaveText('초반 구간을 정리할 수 없어 원본을 유지했습니다.');
+    await expect(result.locator('#split-status')).toBeEmpty();
     await expect.poll(() => result.locator('#preview-video').evaluate(video => video.duration)).toBeCloseTo(2.7, 1);
+    expect(await result.evaluate(() => window.testStartupVideoCodec)).toBeUndefined();
     await expect(result.locator('#download-current-button')).toBeEnabled();
     return;
   }
@@ -991,7 +1024,15 @@ for (const [format, scenario] of [['webm', 'early'], ['webm', 'late'], ['mp4', '
     return;
   }
   if (format === 'webm') {
-    expect(await result.evaluate(() => window.testStartupTrimEncoding)).toEqual({ bitrate: '8500000', preset: 'veryfast' });
+    expect(await result.evaluate(() => window.testStartupVideoCodec)).toBe('copy');
+    const { unchangedStart, removedGapSeconds } = await result.evaluate(async id => {
+      const { getPartsByRecordingId, getRecording } = await import('/shared/idb.js');
+      const [recording, [part]] = await Promise.all([getRecording(id), getPartsByRecordingId(id)]);
+      return { unchangedStart: recording.createdAt === part.createdAt, removedGapSeconds: part.removedVideoGapSeconds };
+    }, id);
+    expect(unchangedStart).toBe(true);
+    expect(removedGapSeconds).toBeGreaterThan(0.05);
+    expect(removedGapSeconds).toBeLessThan(0.15);
   }
   const downloaded = result.waitForEvent('download');
   await result.locator('#download-current-button').click();
@@ -1012,9 +1053,14 @@ for (const [format, scenario] of [['webm', 'early'], ['webm', 'late'], ['mp4', '
       const loaded = new Promise((resolve, reject) => { video.onloadeddata = resolve; video.onerror = reject; });
       video.src = url;
       await loaded;
+      if (format === 'webm') {
+        const openingFrame = new Promise(resolve => { video.onseeked = resolve; });
+        video.currentTime = 0.045;
+        await openingFrame;
+      }
       const first = frame();
       const seeked = new Promise(resolve => { video.onseeked = resolve; });
-      video.currentTime = 0.35;
+      video.currentTime = format === 'webm' ? 0.95 : 0.35;
       await seeked;
       const next = frame();
       let redPixels = 0, changedPixels = 0;
@@ -1031,12 +1077,19 @@ for (const [format, scenario] of [['webm', 'early'], ['webm', 'late'], ['mp4', '
       URL.revokeObjectURL(url);
     }
   }, { data: bytes.toString('base64'), format });
-  expect(frames.openingRedShare).toBeLessThan(0.9);
   expect(frames.changedShare).toBeGreaterThan(0.025);
   expect(frames.duration).toBeGreaterThan(0.9);
-  expect(frames.duration).toBeLessThan(1.5);
-  if (scenario === 'late') {
-    expect(Math.abs(frames.duration - 1.3), 'startup trimming must keep frames before the next keyframe').toBeLessThan(0.08);
+  if (format === 'webm') {
+    expect(frames.openingRedShare, 'retain the original first frame').toBeGreaterThan(0.9);
+    expect(frames.duration).toBeCloseTo(scenario === 'late' ? 1.9 : 1.393, 1);
+    const { video, audio, decodeResult } = await inspectContinuityDownload(result, bytes, format);
+    expect(decodeResult).toBe(0);
+    expect(Math.max(...video.slice(1).map((time, index) => time - video[index]))).toBeLessThan(0.09);
+    expect(Math.abs(video[0] - audio[0].start)).toBeLessThan(0.08);
+    expect(Math.abs(video.at(-1) - audio.at(-1).end)).toBeLessThan(0.1);
+  } else {
+    expect(frames.openingRedShare).toBeLessThan(0.9);
+    expect(frames.duration).toBeLessThan(1.5);
   }
   if (format === 'mp4') {
     await result.evaluate(async id => {
@@ -1056,14 +1109,19 @@ for (const [format, scenario] of [['webm', 'early'], ['webm', 'late'], ['mp4', '
   }
 });
 
-async function verifyTrimmedStartupDownload(page, bytes, format, capture) {
+async function verifyStartupDownload(page, bytes, format, capture) {
   const saved = await page.evaluate(async recordingId => {
     const { getPartsByRecordingId, getRecording } = await import('/shared/idb.js');
     const [recording, [part]] = await Promise.all([getRecording(recordingId), getPartsByRecordingId(recordingId)]);
     const hash = await crypto.subtle.digest('SHA-256', await part.blob.arrayBuffer());
-    return { startedAt: recording.createdAt, hash: Array.from(new Uint8Array(hash)) };
+    return { startedAt: recording.createdAt, removedGapSeconds: part.removedVideoGapSeconds, hash: Array.from(new Uint8Array(hash)) };
   }, capture.recordingId);
-  expect(saved.startedAt - capture.startedAt, 'the download must trim the injected opening stall').toBeGreaterThan(150);
+  if (format === 'webm') {
+    expect(saved.startedAt).toBe(capture.startedAt);
+    expect(saved.removedGapSeconds).toBeGreaterThan(0.15);
+  } else {
+    expect(saved.startedAt - capture.startedAt, 'the download must trim the injected opening stall').toBeGreaterThan(150);
+  }
   expect(createHash('sha256').update(bytes).digest()).toEqual(Buffer.from(saved.hash));
   const { video, decodeResult } = await inspectContinuityDownload(page, bytes, format);
   expect(decodeResult, 'the download must decode through the end').toBe(0);
@@ -1073,7 +1131,9 @@ async function verifyTrimmedStartupDownload(page, bytes, format, capture) {
   expect(Math.max(...opening.slice(1).map((time, index) => time - opening[index]))).toBeLessThan(0.18);
 }
 
-for (const format of ['webm', 'mp4']) test(`full H.264 ${format} recordings exclude a stalled opening and keep short originals`, async ({ extension }, testInfo) => {
+for (const format of ['webm', 'mp4']) test(format === 'webm'
+  ? 'full H.264 WebM recordings preserve their start after an opening stall'
+  : 'full H.264 mp4 recordings exclude a stalled opening and keep short originals', async ({ extension }, testInfo) => {
   test.setTimeout(120_000);
   const { worker, page, context } = extension;
   await prepareVideo(page);
@@ -1111,12 +1171,13 @@ for (const format of ['webm', 'mp4']) test(`full H.264 ${format} recordings excl
     window.startupInspections = 0;
     const post = Worker.prototype.postMessage;
     Worker.prototype.postMessage = function (message, ...args) {
-      if (message.type === 'FFPROBE' && message.data?.args?.includes('output-startup-probe.json')) window.startupInspections++;
+      if (message.type === 'FFPROBE' && message.data?.args?.some(arg =>
+        arg === 'output-startup-probe.json' || arg === 'output-gap-probe.json')) window.startupInspections++;
       return post.call(this, message, ...args);
     };
   });
   const cases = [
-    { duration: 5000, status: /끊긴 구간을 제외/ },
+    { duration: 5000, status: format === 'webm' ? /끊긴 구간을 정리/ : /끊긴 구간을 제외/ },
     { duration: 450, original: true },
   ];
   cases.push({ duration: 5000, automatic: true, original: true });
@@ -1181,7 +1242,7 @@ for (const format of ['webm', 'mp4']) test(`full H.264 ${format} recordings excl
       const inspection = await context.newPage();
       try {
         await inspection.goto(`chrome-extension://${new URL(worker.url()).host}/popup/popup.html`);
-        await verifyTrimmedStartupDownload(inspection, bytes, format, capture);
+        await verifyStartupDownload(inspection, bytes, format, capture);
       } finally {
         await inspection.close();
       }
@@ -1193,7 +1254,7 @@ for (const format of ['webm', 'mp4']) test(`full H.264 ${format} recordings excl
     else await expect(result.locator('#format-chip')).toContainText(format.toUpperCase());
     const video = result.locator('#preview-video');
     await expect.poll(() => video.evaluate(element => element.videoWidth)).toBeGreaterThan(0);
-    expect(await result.evaluate(() => window.startupInspections)).toBe(status ? 1 : 0);
+    if (status || format === 'mp4') expect(await result.evaluate(() => window.startupInspections)).toBe(status ? 1 : 0);
     const saved = await video.evaluate(element => element.duration);
     if (!status) {
       expect(saved).toBeGreaterThan(0.3);
@@ -1203,7 +1264,7 @@ for (const format of ['webm', 'mp4']) test(`full H.264 ${format} recordings excl
     await result.locator('#download-current-button').click();
     const download = await downloadPromise;
     expect(download.suggestedFilename().endsWith(`_${Math.max(1, Math.round(saved))}s.${format}`)).toBe(true);
-    if (status) await verifyTrimmedStartupDownload(result, await fs.readFile(await download.path()), format, capture);
+    if (status) await verifyStartupDownload(result, await fs.readFile(await download.path()), format, capture);
     await result.close();
   }
 });

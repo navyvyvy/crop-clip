@@ -263,7 +263,7 @@ test('recording timers wait for capture and keep size visible after original fal
       return new Promise(resolve => {
         if (options.args?.[2] === true) {
           globalThis.resolveLateOriginalStart = () => resolve([{ result: { ok: true, data: {
-            offset: 0, playlist: 'https://livecloud.pstatic.net/fixture/stale.m3u8',
+            offset: 0, playlists: ['https://livecloud.pstatic.net/fixture/stale.m3u8'],
           } } }]);
           return;
         }

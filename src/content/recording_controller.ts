@@ -2,7 +2,7 @@ import { stopRecordingStream, releaseDirectRecordingCapture, releaseDirectRecord
 import { getVideoStream } from "./player_capture.js";
 import { createVideoFrameCapture, getNextRecordingFrameDeadline } from "./frame_capture.js";
 import { canUseSoftwareRecording, prepareSoftwareRecorder } from "./software_recording.js";
-import { getOriginalPlaylist, openOriginalStream, type OriginalStreamProbe } from "./original_stream.js";
+import { openMatchingOriginalStream, type OriginalStreamProbe } from "./original_stream.js";
 import { computeDirectLayout, scaleLayout, type DirectCrop, type DirectCropPlacement } from "./crop_layout.js";
 import type { PlayerRecordingState } from "./player_state.js";
 import { getRegionLimit } from "../shared/normalize.js";
@@ -481,6 +481,8 @@ export function createRecordingController({
     const startTime = video.currentTime;
     const startedAt = Date.now();
     if (!Number.isFinite(startTime) || startTime < 0) return;
+    const abortOnSeek = () => probe.abort();
+    video.addEventListener("seeking", abortOnSeek);
     const timeout = window.setTimeout(() => probe.abort(), bufferedOnly ? ORIGINAL_START_WINDOW_MS : 5_000);
     let source;
     let offset: number;
@@ -491,11 +493,12 @@ export function createRecordingController({
       offset = response.data.offset;
       start = startTime - offset;
       if (start < 0) return;
-      source = await openOriginalStream(getOriginalPlaylist(response.data.playlist), start, probe.signal, { waitForLiveFragment: !bufferedOnly });
+      source = await openMatchingOriginalStream(response.data.playlists, start, probe.signal, !bufferedOnly);
     } catch {
       return;
     } finally {
       window.clearTimeout(timeout);
+      video.removeEventListener("seeking", abortOnSeek);
     }
 
     if (directSession !== fallback || fallback.stopRequested || fallback.cancelRequested || probe.signal.aborted) return;
@@ -595,11 +598,8 @@ export function createRecordingController({
     const pending = createRecordingSession(command, video, "video/mp4", "mp4");
     const probe = pending.originalProbe = new AbortController();
     directSession = pending;
-    const abortOnSeek = () => probe.abort();
-    video.addEventListener("seeking", abortOnSeek);
     try {
-      await startOriginalRecording(command, video, pending, probe, true)
-        .finally(() => video.removeEventListener("seeking", abortOnSeek));
+      await startOriginalRecording(command, video, pending, probe, true);
       if (directSession !== pending && directSession?.recordingId === pending.recordingId) {
         if (!directSession.stopRequested) showPlayerFeedback("원본 저장 중");
         return { ok: true };

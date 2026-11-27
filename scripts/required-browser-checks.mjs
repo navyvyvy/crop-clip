@@ -48,6 +48,7 @@ const requiredChecks = {
   ],
   "recording-startup.spec.mjs": [
     "ready broadcast originals record without starting the screen encoder",
+    "original recording uses the rewound fragment and returns to live after cancellation",
     "a recording with audio before its first video frame opens on video",
     "recording keeps the opening frames when the display clock is rounded",
     "WebM download preserves the source playback colors",
@@ -57,12 +58,12 @@ const requiredChecks = {
     "WebM download repairs a dropped interval and preserves the recorded file",
     "MP4 recording keeps middle frames when timer sampling is delayed",
     "MP4 recording uses H.265 only for a confirmed H.265 source",
-    "webm download inspects opening timestamps even without a capture stall marker",
-    "WebM download detects a single startup gap after half a second",
+    "WebM repairs opening gaps without cutting its first frame",
+    "WebM repairs a gap after half a second without changing its start time",
     "WebM download preserves a continuous opening despite a capture stall marker",
     "WebM startup trim preserves the source when only the audio has enough duration",
     "mp4 download inspects opening timestamps even without a capture stall marker",
-    "full H.264 webm recordings exclude a stalled opening and keep short originals",
+    "full H.264 WebM recordings preserve their start after an opening stall",
     "full H.264 mp4 recordings exclude a stalled opening and keep short originals",
   ],
   "recording-tabs.spec.mjs": [

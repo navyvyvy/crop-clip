@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
-import { getOriginalPlaylist, openOriginalStream, ORIGINAL_STREAM_PREFIXES, probeOriginalStream } from "../dist/content/original_stream.js";
+import { getOriginalPlaylist, openMatchingOriginalStream, openOriginalStream, ORIGINAL_STREAM_PREFIXES, probeOriginalStream } from "../dist/content/original_stream.js";
 import { MAX_ORIGINAL_STREAM_SECONDS } from "../dist/shared/time_range.js";
 import { readMp4VideoCodec } from "../dist/shared/mp4_boxes.js";
 
@@ -94,6 +94,61 @@ try {
   const beforeRewind = requested.filter(name => name === "first.m4v").length;
   await assert.rejects(() => openOriginalStream(url, 119, new AbortController().signal), /클릭한 위치/);
   assert.equal(requested.filter(name => name === "first.m4v").length, beforeRewind, "do not fetch an unrelated first fragment after rewinding beyond the playlist");
+
+  for (const includeDates of [true, false]) {
+    const count = 1800;
+    const start = 120;
+    const firstIndex = 90;
+    const click = start + firstIndex * 2 + 1.5;
+    const rows = Array.from({ length: count }, (_, index) => {
+      const date = new Date(Date.UTC(2026, 0, 1) + index * 2000).toISOString();
+      return `${includeDates ? `#EXT-X-PROGRAM-DATE-TIME:${date}\n` : ""}#EXTINF:2.000667,\n${index}.m4v\n`;
+    });
+    const dvr = `#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXT-X-MAP:URI="init.mp4"\n${rows.join("")}`;
+    const reads = [];
+    globalThis.fetch = async value => {
+      const name = new URL(value).pathname.split("/").at(-1);
+      if (name === "live.m3u8") return new Response(dvr);
+      if (name === "init.mp4") return new Response(init);
+      const index = Number(name.slice(0, -4));
+      reads.push(index);
+      return new Response(fragment((start + index * 2) * 1000));
+    };
+    const recording = await openOriginalStream(url, click, new AbortController().signal);
+    const parts = [];
+    await recording.record(async blob => parts.push(Buffer.from(await blob.arrayBuffer())), () => click + 0.8, () => click + 0.8);
+    assert.deepEqual(parts, [Buffer.concat([init, fragment((start + firstIndex * 2) * 1000)]), fragment((start + (firstIndex + 1) * 2) * 1000)]);
+    assert.deepEqual(reads, includeDates ? [count - 1, firstIndex, firstIndex + 1] : [count - 1, firstIndex + 1, firstIndex, firstIndex + 1]);
+  }
+
+  const rewindUrl = new URL("rewind.m3u8", url);
+  const rewindFragment = fragment(118_000);
+  globalThis.fetch = async value => {
+    const name = new URL(value).pathname.split("/").at(-1);
+    const rewindManifest = manifest.replace("first.m4v", "rewound.m4v").replace("last.m4v", "first.m4v");
+    const data = { "live.m3u8": manifest, "rewind.m3u8": rewindManifest,
+      "init.mp4": init, "rewound.m4v": rewindFragment, "first.m4v": first, "last.m4v": last }[name];
+    return new Response(data, { status: data ? 200 : 404 });
+  };
+  const rewound = await openMatchingOriginalStream([url.href, rewindUrl.href], 119, new AbortController().signal, false);
+  const rewindChunks = [];
+  await rewound.record(async blob => rewindChunks.push(Buffer.from(await blob.arrayBuffer())), () => 120.4, () => 120.4);
+  assert.deepEqual(rewindChunks, [Buffer.concat([init, rewindFragment]), first], "try the rewind playlist when live does not cover the recording start");
+
+  const latest = await openMatchingOriginalStream([rewindUrl.href, url.href], 123, new AbortController().signal, true);
+  const latestChunks = [];
+  await latest.record(async blob => latestChunks.push(Buffer.from(await blob.arrayBuffer())), () => 123.5, () => 123.5);
+  assert.deepEqual(latestChunks, [Buffer.concat([init, last])], "a stale rewind playlist must not wait for live fragments before trying the current one");
+
+  const cancelledLookup = new AbortController();
+  const pendingRequests = [];
+  globalThis.fetch = async (value, { signal }) => {
+    pendingRequests.push(String(value));
+    cancelledLookup.abort();
+    signal.throwIfAborted();
+  };
+  await assert.rejects(() => openMatchingOriginalStream([rewindUrl.href, url.href], 121, cancelledLookup.signal, true), { name: "AbortError" });
+  assert.deepEqual(pendingRequests, [rewindUrl.href], "cancellation must stop the candidate search");
 
   for (const codec of ["hvc1", "hev1"]) {
     const hevcInit = box("moov", track(1, "vide", codec), track(2, "soun", "mp4a"));
@@ -245,6 +300,10 @@ console.log("original stream click alignment, stop and playlist validation check
 const src = "blob:https://chzzk.naver.com/fixture";
 const buffered = { length: 1, end: () => 50 };
 const latest = { name: `${url.href}?_HLS_msn=11`, startTime: 20_000, duration: 1 };
+const video = Object.assign(new EventTarget(), { currentSrc: src, paused: false, buffered });
+let timing;
+let resourceEntries = [{ ...latest, startTime: 0 }];
+video.addEventListener("cropclip-read-playback-offset", () => video.dispatchEvent(new CustomEvent("cropclip-playback-offset", { detail: timing })));
 const globals = Object.getOwnPropertyDescriptors(globalThis);
 let emitResources, disconnected = false, appends = 0, registeredListeners = 0;
 class TestSourceBuffer extends EventTarget {
@@ -259,9 +318,9 @@ class TestSourceBuffer extends EventTarget {
 }
 const originalAppend = TestSourceBuffer.prototype.appendBuffer;
 const replacements = {
-  document: { querySelectorAll: () => [{ currentSrc: src, paused: false, buffered }] },
+  document: { querySelectorAll: () => [video] },
   SourceBuffer: TestSourceBuffer,
-  performance: { now: () => 20_001, getEntriesByType: () => [{ ...latest, startTime: 0 }] },
+  performance: { now: () => 20_001, getEntriesByType: () => resourceEntries },
   PerformanceObserver: class {
     constructor(callback) { emitResources = entries => callback({ getEntries: () => entries }); }
     observe(options) { assert.deepEqual(options, { type: "resource" }); }
@@ -280,7 +339,7 @@ try {
   assert.equal(disconnected, false, "appendBuffer has not updated the buffered ranges yet");
   buffer.buffered = buffered;
   buffer.dispatchEvent(new Event("updateend"));
-  assert.deepEqual(await pending, { ok: true, data: { offset: -120, playlist: latest.name } });
+  assert.deepEqual(await pending, { ok: true, data: { offset: -120, playlists: [latest.name, new URL("master.m3u8", url).href] } });
   assert.equal(appends, 1);
   assert.equal(disconnected, true);
   assert.equal(TestSourceBuffer.prototype.appendBuffer, originalAppend, "restore playback and release the observer after finding the stream");
@@ -297,7 +356,7 @@ try {
   const cdnProbe = probeOriginalStream(src, ORIGINAL_STREAM_PREFIXES);
   buffer.appendBuffer(new ArrayBuffer(1));
   emitResources([{ ...latest, name: cdnPlaylist.href }]);
-  assert.deepEqual(await cdnProbe, { ok: true, data: { offset: -120, playlist: cdnPlaylist.href } });
+  assert.deepEqual(await cdnProbe, { ok: true, data: { offset: -120, playlists: [cdnPlaylist.href] } });
   assert.equal(TestSourceBuffer.prototype.appendBuffer, originalAppend);
   const cdnSourceUrl = getOriginalPlaylist(cdnPlaylist.href);
   assert.equal(cdnSourceUrl.href, "https://livecloud.pstatic.net/fixture/live.m3u8");
@@ -314,6 +373,22 @@ try {
   } finally {
     globalThis.fetch = realFetch;
   }
+
+  const rewind = { name: new URL("rewind.m3u8", url).href, startTime: 11_100, duration: 5 };
+  timing = { offset: -120, seekStartedAt: 11_000 };
+  resourceEntries = [rewind, ...[8, 9, 10].map(sequence => ({ ...latest, name: `${url.href}?_HLS_msn=${sequence}`, startTime: 19_900 })), latest];
+  const fromRewind = await probeOriginalStream(src, ORIGINAL_STREAM_PREFIXES, true);
+  assert.deepEqual(fromRewind, { ok: true, data: { offset: -120, playlists: [latest.name, rewind.name] } },
+    "retain the seek's playlist and deduplicate subsequent live polling requests");
+  timing = { seekStartedAt: 19_500 };
+  resourceEntries = [latest];
+  const whileBuffering = probeOriginalStream(src, ORIGINAL_STREAM_PREFIXES);
+  emitResources([{ ...rewind, startTime: 19_950 }]);
+  buffer.appendBuffer(new ArrayBuffer(1));
+  assert.deepEqual(await whileBuffering, { ok: true, data: { offset: -120, playlists: [latest.name, rewind.name] } },
+    "keep a rewind playlist observed while waiting for the playback timestamp offset");
+  timing = undefined;
+  resourceEntries = [{ ...latest, startTime: 0 }];
 
   const unrecognized = probeOriginalStream(src, ORIGINAL_STREAM_PREFIXES);
   emitResources([{ ...latest, name: "https://alternate.example.test:8443/fixture/chunklist.m3u8?signature=fixture" }]);
